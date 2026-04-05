@@ -1,0 +1,124 @@
+<svg width="920" height="1160" viewBox="0 0 920 1160" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="bg" x1="40" y1="30" x2="860" y2="1130" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#E9EEF5"/>
+      <stop offset="1" stop-color="#D7DDE7"/>
+    </linearGradient>
+    <filter id="shadow" x="0" y="0" width="920" height="1160" filterUnits="userSpaceOnUse" color-interpolation-filters="sRGB">
+      <feDropShadow dx="0" dy="16" stdDeviation="24" flood-color="#506070" flood-opacity="0.18"/>
+    </filter>
+  </defs>
+
+  <rect width="920" height="1160" fill="url(#bg)"/>
+
+  <g filter="url(#shadow)">
+    <rect x="42" y="34" width="836" height="1088" rx="34" fill="#F7F9FC" fill-opacity="0.92"/>
+  </g>
+
+  <text x="84" y="104" fill="#111827" font-family="SF Pro Display, Helvetica, Arial, sans-serif" font-size="28" font-weight="700">PortKeeper</text>
+  <rect x="676" y="68" width="158" height="42" rx="21" fill="#E9EEF5"/>
+  <text x="710" y="96" fill="#4B5563" font-family="SF Pro Text, Helvetica, Arial, sans-serif" font-size="18" font-weight="600">5 configured</text>
+  <text x="84" y="146" fill="#6B7280" font-family="SF Pro Text, Helvetica, Arial, sans-serif" font-size="18">2 connected, 2 failed, 1 connecting</text>
+
+  <line x1="72" y1="176" x2="848" y2="176" stroke="#D6DCE6"/>
+
+  <g>
+    <rect x="72" y="204" width="776" height="162" rx="24" fill="white"/>
+    <circle cx="102" cy="241" r="9" fill="#13B94B"/>
+    <text x="126" y="249" fill="#111827" font-family="SF Pro Display, Helvetica, Arial, sans-serif" font-size="22" font-weight="700">sp-8866-web3000</text>
+    <rect x="402" y="220" width="78" height="28" rx="14" fill="#EEF2F7"/>
+    <text x="423" y="239" fill="#6B7280" font-family="SF Pro Text, Helvetica, Arial, sans-serif" font-size="15" font-weight="700">:4444</text>
+    <rect x="710" y="218" width="106" height="32" rx="16" fill="#E5F7EA"/>
+    <text x="735" y="239" fill="#12A443" font-family="SF Pro Text, Helvetica, Arial, sans-serif" font-size="16" font-weight="700">Connected</text>
+
+    <text x="126" y="285" fill="#667085" font-family="SF Pro Text, Helvetica, Arial, sans-serif" font-size="16" font-weight="600">100.64.0.42</text>
+    <text x="126" y="314" fill="#7B8798" font-family="SF Pro Text, Helvetica, Arial, sans-serif" font-size="16">local 8866 → localhost:3000</text>
+
+    <text x="126" y="348" fill="#7B8798" font-family="SF Pro Text, Helvetica, Arial, sans-serif" font-size="15" font-weight="600">Auto-connect</text>
+    <rect x="232" y="328" width="54" height="30" rx="15" fill="#1A73E8"/>
+    <circle cx="269" cy="343" r="13" fill="white"/>
+
+    <rect x="484" y="323" width="82" height="34" rx="12" fill="#EEF2F7"/>
+    <text x="511" y="345" fill="#111827" font-family="SF Pro Text, Helvetica, Arial, sans-serif" font-size="16" font-weight="600">Stop</text>
+    <rect x="574" y="323" width="98" height="34" rx="12" fill="#EEF2F7"/>
+    <text x="596" y="345" fill="#111827" font-family="SF Pro Text, Helvetica, Arial, sans-serif" font-size="16" font-weight="600">Restart</text>
+    <rect x="680" y="323" width="86" height="34" rx="12" fill="#EEF2F7"/>
+    <text x="711" y="345" fill="#111827" font-family="SF Pro Text, Helvetica, Arial, sans-serif" font-size="16" font-weight="600">Edit</text>
+  </g>
+
+  <g>
+    <rect x="72" y="386" width="776" height="194" rx="24" fill="white"/>
+    <circle cx="102" cy="423" r="9" fill="#E23D3D"/>
+    <text x="126" y="431" fill="#111827" font-family="SF Pro Display, Helvetica, Arial, sans-serif" font-size="22" font-weight="700">hpc-4000-web3000</text>
+    <rect x="454" y="402" width="62" height="28" rx="14" fill="#EEF2F7"/>
+    <text x="475" y="421" fill="#6B7280" font-family="SF Pro Text, Helvetica, Arial, sans-serif" font-size="15" font-weight="700">:22</text>
+    <rect x="730" y="400" width="86" height="32" rx="16" fill="#FCEBEC"/>
+    <text x="757" y="421" fill="#E23D3D" font-family="SF Pro Text, Helvetica, Arial, sans-serif" font-size="16" font-weight="700">Failed</text>
+
+    <text x="126" y="467" fill="#667085" font-family="SF Pro Text, Helvetica, Arial, sans-serif" font-size="16" font-weight="600">hpc.university.edu</text>
+    <text x="126" y="496" fill="#7B8798" font-family="SF Pro Text, Helvetica, Arial, sans-serif" font-size="16">local 4000 → 172.18.227.249:3000</text>
+
+    <text x="126" y="530" fill="#7B8798" font-family="SF Pro Text, Helvetica, Arial, sans-serif" font-size="15" font-weight="600">Auto-connect</text>
+    <rect x="232" y="510" width="54" height="30" rx="15" fill="#1A73E8"/>
+    <circle cx="269" cy="525" r="13" fill="white"/>
+
+    <rect x="484" y="505" width="82" height="34" rx="12" fill="#EEF2F7"/>
+    <text x="511" y="527" fill="#111827" font-family="SF Pro Text, Helvetica, Arial, sans-serif" font-size="16" font-weight="600">Stop</text>
+    <rect x="574" y="505" width="98" height="34" rx="12" fill="#EEF2F7"/>
+    <text x="596" y="527" fill="#111827" font-family="SF Pro Text, Helvetica, Arial, sans-serif" font-size="16" font-weight="600">Restart</text>
+    <rect x="680" y="505" width="86" height="34" rx="12" fill="#EEF2F7"/>
+    <text x="711" y="527" fill="#111827" font-family="SF Pro Text, Helvetica, Arial, sans-serif" font-size="16" font-weight="600">Edit</text>
+
+    <rect x="126" y="548" width="624" height="20" rx="10" fill="#F8E2E4"/>
+    <text x="138" y="562" fill="#A9444A" font-family="SF Pro Text, Helvetica, Arial, sans-serif" font-size="13" font-weight="600">ssh exited 255  •  reconnecting in 5s  •  check VPN / DNS / password</text>
+  </g>
+
+  <g>
+    <rect x="72" y="600" width="776" height="162" rx="24" fill="white"/>
+    <circle cx="102" cy="637" r="9" fill="#F5A623"/>
+    <text x="126" y="645" fill="#111827" font-family="SF Pro Display, Helvetica, Arial, sans-serif" font-size="22" font-weight="700">sp-8875-web3000</text>
+    <rect x="400" y="616" width="78" height="28" rx="14" fill="#EEF2F7"/>
+    <text x="424" y="635" fill="#6B7280" font-family="SF Pro Text, Helvetica, Arial, sans-serif" font-size="15" font-weight="700">:3333</text>
+    <rect x="718" y="614" width="98" height="32" rx="16" fill="#FFF1DA"/>
+    <text x="741" y="635" fill="#D17A00" font-family="SF Pro Text, Helvetica, Arial, sans-serif" font-size="16" font-weight="700">Connecting</text>
+
+    <text x="126" y="681" fill="#667085" font-family="SF Pro Text, Helvetica, Arial, sans-serif" font-size="16" font-weight="600">100.64.0.42</text>
+    <text x="126" y="710" fill="#7B8798" font-family="SF Pro Text, Helvetica, Arial, sans-serif" font-size="16">local 8875 → localhost:3000</text>
+
+    <text x="126" y="744" fill="#7B8798" font-family="SF Pro Text, Helvetica, Arial, sans-serif" font-size="15" font-weight="600">Auto-connect</text>
+    <rect x="232" y="724" width="54" height="30" rx="15" fill="#1A73E8"/>
+    <circle cx="269" cy="739" r="13" fill="white"/>
+
+    <rect x="484" y="719" width="82" height="34" rx="12" fill="#EEF2F7"/>
+    <text x="511" y="741" fill="#111827" font-family="SF Pro Text, Helvetica, Arial, sans-serif" font-size="16" font-weight="600">Stop</text>
+    <rect x="574" y="719" width="98" height="34" rx="12" fill="#EEF2F7"/>
+    <text x="596" y="741" fill="#111827" font-family="SF Pro Text, Helvetica, Arial, sans-serif" font-size="16" font-weight="600">Restart</text>
+    <rect x="680" y="719" width="86" height="34" rx="12" fill="#EEF2F7"/>
+    <text x="711" y="741" fill="#111827" font-family="SF Pro Text, Helvetica, Arial, sans-serif" font-size="16" font-weight="600">Edit</text>
+  </g>
+
+  <line x1="72" y1="796" x2="848" y2="796" stroke="#D6DCE6"/>
+
+  <text x="84" y="834" fill="#667085" font-family="SF Pro Text, Helvetica, Arial, sans-serif" font-size="15" font-weight="700">Actions</text>
+
+  <rect x="84" y="856" width="108" height="38" rx="12" fill="#E9EEF5"/>
+  <text x="118" y="881" fill="#111827" font-family="SF Pro Text, Helvetica, Arial, sans-serif" font-size="16" font-weight="600">Reload</text>
+  <rect x="204" y="856" width="142" height="38" rx="12" fill="#E9EEF5"/>
+  <text x="234" y="881" fill="#111827" font-family="SF Pro Text, Helvetica, Arial, sans-serif" font-size="16" font-weight="600">Start Enabled</text>
+  <rect x="358" y="856" width="110" height="38" rx="12" fill="#E9EEF5"/>
+  <text x="393" y="881" fill="#111827" font-family="SF Pro Text, Helvetica, Arial, sans-serif" font-size="16" font-weight="600">Stop All</text>
+  <rect x="480" y="856" width="126" height="38" rx="12" fill="#111827"/>
+  <text x="514" y="881" fill="white" font-family="SF Pro Text, Helvetica, Arial, sans-serif" font-size="16" font-weight="600">New Tunnel</text>
+
+  <rect x="84" y="908" width="122" height="38" rx="12" fill="#E9EEF5"/>
+  <text x="117" y="933" fill="#111827" font-family="SF Pro Text, Helvetica, Arial, sans-serif" font-size="16" font-weight="600">Edit JSON</text>
+  <rect x="218" y="908" width="122" height="38" rx="12" fill="#E9EEF5"/>
+  <text x="247" y="933" fill="#111827" font-family="SF Pro Text, Helvetica, Arial, sans-serif" font-size="16" font-weight="600">Reveal File</text>
+  <rect x="732" y="908" width="84" height="38" rx="12" fill="#EDEFF4"/>
+  <text x="760" y="933" fill="#111827" font-family="SF Pro Text, Helvetica, Arial, sans-serif" font-size="16" font-weight="600">Quit</text>
+
+  <text x="84" y="1000" fill="#667085" font-family="SF Pro Text, Helvetica, Arial, sans-serif" font-size="14" font-weight="700">Design intent</text>
+  <text x="84" y="1032" fill="#7B8798" font-family="SF Pro Text, Helvetica, Arial, sans-serif" font-size="15">• Port badge only once, next to the tunnel name</text>
+  <text x="84" y="1060" fill="#7B8798" font-family="SF Pro Text, Helvetica, Arial, sans-serif" font-size="15">• Error state stays compact but surfaces a clearer hint line</text>
+  <text x="84" y="1088" fill="#7B8798" font-family="SF Pro Text, Helvetica, Arial, sans-serif" font-size="15">• Controls align on one row so more tunnels fit without scrolling as quickly</text>
+</svg>
