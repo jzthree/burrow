@@ -88,7 +88,9 @@ final class MenuBarViewModel: ObservableObject {
     }
 
     var menuBarSymbol: String {
-        tunnels.contains(where: \.isRunning) ? "lock.shield.fill" : "lock.shield"
+        tunnels.contains(where: \.isRunning)
+            ? "point.3.filled.connected.trianglepath.dotted"
+            : "point.3.connected.trianglepath.dotted"
     }
 
     func loadConfig() {

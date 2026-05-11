@@ -38,6 +38,7 @@ mkdir -p "$APP_DIR/Contents/MacOS" "$APP_DIR/Contents/Resources"
 
 cp "$SOURCE_BINARY" "$APP_DIR/Contents/MacOS/${EXECUTABLE_NAME}"
 chmod 755 "$APP_DIR/Contents/MacOS/${EXECUTABLE_NAME}"
+cp "$ROOT_DIR/XcodeSupport/Burrow.icns" "$APP_DIR/Contents/Resources/Burrow.icns"
 
 cat > "$APP_DIR/Contents/Info.plist" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
@@ -52,6 +53,8 @@ cat > "$APP_DIR/Contents/Info.plist" <<EOF
   <string>${EXECUTABLE_NAME}</string>
   <key>CFBundleIdentifier</key>
   <string>${BUNDLE_ID}</string>
+  <key>CFBundleIconFile</key>
+  <string>Burrow</string>
   <key>CFBundleInfoDictionaryVersion</key>
   <string>6.0</string>
   <key>CFBundleName</key>

@@ -32,6 +32,8 @@ unless File.exist?(INFO_PLIST_PATH)
         <string>$(EXECUTABLE_NAME)</string>
         <key>CFBundleIdentifier</key>
         <string>$(PRODUCT_BUNDLE_IDENTIFIER)</string>
+        <key>CFBundleIconFile</key>
+        <string>Burrow</string>
         <key>CFBundleInfoDictionaryVersion</key>
         <string>6.0</string>
         <key>CFBundleName</key>
@@ -62,6 +64,7 @@ core_group = sources_group.new_group('PortKeeperCore', 'PortKeeperCore')
 app_group = sources_group.new_group('PortKeeperMenuBar', 'PortKeeperMenuBar')
 support_group = project.main_group.new_group('XcodeSupport', 'XcodeSupport')
 support_group.new_file('Burrow-Info.plist')
+icon_ref = support_group.new_file('Burrow.icns')
 
 core_target = project.new_target(:framework, 'PortKeeperCore', :osx, '13.0')
 app_target = project.new_target(:application, 'Burrow', :osx, '13.0')
@@ -110,6 +113,7 @@ embed_phase = app_target.copy_files_build_phases.find { |phase| phase.name == 'E
 embed_phase.symbol_dst_subfolder_spec = :frameworks
 embed_build_file = embed_phase.add_file_reference(core_target.product_reference, true)
 embed_build_file.settings = { 'ATTRIBUTES' => %w[CodeSignOnCopy RemoveHeadersOnCopy] }
+app_target.resources_build_phase.add_file_reference(icon_ref)
 
 project.build_configurations.each do |config|
   config.build_settings['SWIFT_VERSION'] = '6.0'

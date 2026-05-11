@@ -17,6 +17,7 @@
 		67D36CDD557BBFB377E782EE /* SSHCommandBuilder.swift in Sources */ = {isa = PBXBuildFile; fileRef = FCC4D63D853D05969C9B7827 /* SSHCommandBuilder.swift */; };
 		8A23FF176E1D2D7EAD8817CA /* PortKeeperCore.framework in Embed Frameworks */ = {isa = PBXBuildFile; fileRef = C383B939CB84FFBB5CFF5A5E /* PortKeeperCore.framework */; settings = {ATTRIBUTES = (CodeSignOnCopy, RemoveHeadersOnCopy, ); }; };
 		A3DD8F278F19A249242157CF /* TunnelLaunchPreparer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8330E882D9FEC66415D857CA /* TunnelLaunchPreparer.swift */; };
+		B001C0F657A6494C9D0A0001 /* Burrow.icns in Resources */ = {isa = PBXBuildFile; fileRef = B001C0F657A6494C9D0A0002 /* Burrow.icns */; };
 		CD7538A9D5EDBB6E27F8AC0C /* PortKeeperRuntimeRegistry.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1116EB2FBD61CE8A189A61E7 /* PortKeeperRuntimeRegistry.swift */; };
 		E12DB270544A8041CF3C603D /* Models.swift in Sources */ = {isa = PBXBuildFile; fileRef = CFE6EABECDFA77B126FA4B10 /* Models.swift */; };
 /* End PBXBuildFile section */
@@ -54,6 +55,7 @@
 		7BE8F412FCCBA07BAEEAD4F1 /* ConfigStore.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = ConfigStore.swift; sourceTree = "<group>"; };
 		8330E882D9FEC66415D857CA /* TunnelLaunchPreparer.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = TunnelLaunchPreparer.swift; sourceTree = "<group>"; };
 		83ACA32B6D8B64508C4B4FC6 /* PasswordSupport.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = PasswordSupport.swift; sourceTree = "<group>"; };
+		B001C0F657A6494C9D0A0002 /* Burrow.icns */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = image.icns; path = Burrow.icns; sourceTree = "<group>"; };
 		C383B939CB84FFBB5CFF5A5E /* PortKeeperCore.framework */ = {isa = PBXFileReference; explicitFileType = wrapper.framework; includeInIndex = 0; path = PortKeeperCore.framework; sourceTree = BUILT_PRODUCTS_DIR; };
 		CFE6EABECDFA77B126FA4B10 /* Models.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = Models.swift; sourceTree = "<group>"; };
 		EC22E816C254D601D62A6503 /* AppMain.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = AppMain.swift; sourceTree = "<group>"; };
@@ -113,6 +115,7 @@
 			isa = PBXGroup;
 			children = (
 				2DCD9B77D4ACC5ED9FBB434A /* Burrow-Info.plist */,
+				B001C0F657A6494C9D0A0002 /* Burrow.icns */,
 			);
 			path = XcodeSupport;
 			sourceTree = "<group>";
@@ -248,6 +251,7 @@
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				B001C0F657A6494C9D0A0001 /* Burrow.icns in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
