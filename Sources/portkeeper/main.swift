@@ -3,7 +3,7 @@ import Foundation
 import PortKeeperCore
 
 @main
-struct PortKeeperCLI {
+struct BurrowCLI {
     static func main() async {
         do {
             try await CLI().run(arguments: Array(CommandLine.arguments.dropFirst()))
@@ -23,7 +23,8 @@ struct CLI {
 
     init(environment: [String: String] = ProcessInfo.processInfo.environment) {
         self.environment = environment
-        if let configPath = environment["PORTKEEPER_CONFIG"], !configPath.isEmpty {
+        let configPathOverride = environment["BURROW_CONFIG"] ?? environment["PORTKEEPER_CONFIG"]
+        if let configPath = configPathOverride, !configPath.isEmpty {
             let expandedPath = (configPath as NSString).expandingTildeInPath
             self.store = ConfigStore(configURL: URL(fileURLWithPath: expandedPath))
         } else {
@@ -67,7 +68,7 @@ struct CLI {
     private func listTunnels() throws {
         let config = try store.load()
         if config.tunnels.isEmpty {
-            print("No tunnels configured. Use `portkeeper add ...` or `portkeeper sample-config`.")
+            print("No tunnels configured. Use `burrow add ...` or `burrow sample-config`.")
             return
         }
 
@@ -141,7 +142,7 @@ struct CLI {
 
     private func removeTunnel(arguments: [String]) throws {
         guard let name = arguments.first, !name.isEmpty else {
-            throw CLIError("usage: portkeeper remove <name>")
+            throw CLIError("usage: burrow remove <name>")
         }
 
         if try store.remove(name: name) {
@@ -153,7 +154,7 @@ struct CLI {
 
     private func setEnabled(arguments: [String], enabled: Bool) throws {
         guard let name = arguments.first, !name.isEmpty else {
-            throw CLIError("usage: portkeeper \(enabled ? "enable" : "disable") <name>")
+            throw CLIError("usage: burrow \(enabled ? "enable" : "disable") <name>")
         }
 
         var config = try store.load()
@@ -169,7 +170,7 @@ struct CLI {
     private func runTunnels(arguments: [String]) async throws {
         let config = try store.load()
         let tunnelName = arguments.first(where: { !$0.hasPrefix("-") })
-        let sshExecutablePath = environment["PORTKEEPER_SSH_EXECUTABLE"] ?? "/usr/bin/ssh"
+        let sshExecutablePath = environment["BURROW_SSH_EXECUTABLE"] ?? environment["PORTKEEPER_SSH_EXECUTABLE"] ?? "/usr/bin/ssh"
 
         let selected: [TunnelConfig]
         if let tunnelName {
@@ -180,7 +181,7 @@ struct CLI {
         } else if arguments.contains("--all") || arguments.isEmpty {
             selected = try config.tunnels.filter(\.enabled).map { try TunnelLaunchPreparer.prepare($0) }
         } else {
-            throw CLIError("usage: portkeeper run [--all|<name>]")
+            throw CLIError("usage: burrow run [--all|<name>]")
         }
 
         guard !selected.isEmpty else {
@@ -311,7 +312,7 @@ struct CLI {
     private func printHelp() {
         print(
             """
-            portkeeper
+            burrow
 
             Commands:
               init
@@ -389,7 +390,7 @@ struct ArgumentParser {
 final class SignalHandler {
     private let stream: AsyncStream<Void>
     private let continuation: AsyncStream<Void>.Continuation
-    private let signalQueue = DispatchQueue(label: "portkeeper.signals")
+    private let signalQueue = DispatchQueue(label: "burrow.signals")
     private var sources: [DispatchSourceSignal] = []
 
     init() {

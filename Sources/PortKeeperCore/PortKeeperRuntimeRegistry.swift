@@ -84,7 +84,7 @@ public enum PortKeeperRuntimeRegistry {
             directory = runtimeDirectory
         } else {
             let baseURL = fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-                .appendingPathComponent("PortKeeper", isDirectory: true)
+                .appendingPathComponent("Burrow", isDirectory: true)
                 .appendingPathComponent("runtime", isDirectory: true)
             directory = baseURL
         }
@@ -97,7 +97,7 @@ public enum PortKeeperRuntimeRegistry {
         let rawValue = try String(contentsOf: pidFileURL, encoding: .utf8)
             .trimmingCharacters(in: .whitespacesAndNewlines)
         guard let pid = pid_t(rawValue) else {
-            throw NSError(domain: "PortKeeperRuntimeRegistry", code: 1, userInfo: [
+            throw NSError(domain: "BurrowRuntimeRegistry", code: 1, userInfo: [
                 NSLocalizedDescriptionKey: "Invalid pid file contents for \(pidFileURL.lastPathComponent)",
             ])
         }

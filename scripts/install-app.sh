@@ -3,10 +3,10 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
-APP_NAME="PortKeeper"
-EXECUTABLE_NAME="PortKeeper"
-BUNDLE_ID="${PORTKEEPER_BUNDLE_ID:-com.jianzhou.portkeeper}"
-APP_DIR="${PORTKEEPER_APP_DIR:-$HOME/Applications/${APP_NAME}.app}"
+APP_NAME="Burrow"
+EXECUTABLE_NAME="Burrow"
+BUNDLE_ID="${BURROW_BUNDLE_ID:-com.jianzhou.burrow}"
+APP_DIR="${BURROW_APP_DIR:-${PORTKEEPER_APP_DIR:-$HOME/Applications/${APP_NAME}.app}}"
 SIGNING_IDENTITY="${SIGNING_IDENTITY:--}"
 BUILD_CONFIGURATION="${BUILD_CONFIGURATION:-release}"
 
@@ -14,10 +14,10 @@ echo "Building ${APP_NAME} (${BUILD_CONFIGURATION})..."
 swift build \
   --package-path "$ROOT_DIR" \
   -c "$BUILD_CONFIGURATION" \
-  --product PortKeeper
+  --product BurrowApp
 
 BIN_DIR="$(swift build --package-path "$ROOT_DIR" -c "$BUILD_CONFIGURATION" --show-bin-path)"
-SOURCE_BINARY="${BIN_DIR}/PortKeeper"
+SOURCE_BINARY="${BIN_DIR}/BurrowApp"
 
 if [ ! -x "$SOURCE_BINARY" ]; then
   echo "error: built binary not found at $SOURCE_BINARY" >&2

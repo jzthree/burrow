@@ -15,9 +15,9 @@
             <BuildableReference
                BuildableIdentifier = "primary"
                BlueprintIdentifier = "19EFB357F08F61B404C9EC73"
-               BuildableName = "PortKeeper.app"
-               BlueprintName = "PortKeeper"
-               ReferencedContainer = "container:PortKeeper.xcodeproj">
+               BuildableName = "Burrow.app"
+               BlueprintName = "Burrow"
+               ReferencedContainer = "container:Burrow.xcodeproj">
             </BuildableReference>
          </BuildActionEntry>
       </BuildActionEntries>
@@ -31,9 +31,9 @@
          <BuildableReference
             BuildableIdentifier = "primary"
             BlueprintIdentifier = "19EFB357F08F61B404C9EC73"
-            BuildableName = "PortKeeper.app"
-            BlueprintName = "PortKeeper"
-            ReferencedContainer = "container:PortKeeper.xcodeproj">
+            BuildableName = "Burrow.app"
+            BlueprintName = "Burrow"
+            ReferencedContainer = "container:Burrow.xcodeproj">
          </BuildableReference>
       </MacroExpansion>
       <Testables>
@@ -54,9 +54,9 @@
          <BuildableReference
             BuildableIdentifier = "primary"
             BlueprintIdentifier = "19EFB357F08F61B404C9EC73"
-            BuildableName = "PortKeeper.app"
-            BlueprintName = "PortKeeper"
-            ReferencedContainer = "container:PortKeeper.xcodeproj">
+            BuildableName = "Burrow.app"
+            BlueprintName = "Burrow"
+            ReferencedContainer = "container:Burrow.xcodeproj">
          </BuildableReference>
       </BuildableProductRunnable>
    </LaunchAction>
@@ -71,9 +71,9 @@
          <BuildableReference
             BuildableIdentifier = "primary"
             BlueprintIdentifier = "19EFB357F08F61B404C9EC73"
-            BuildableName = "PortKeeper.app"
-            BlueprintName = "PortKeeper"
-            ReferencedContainer = "container:PortKeeper.xcodeproj">
+            BuildableName = "Burrow.app"
+            BlueprintName = "Burrow"
+            ReferencedContainer = "container:Burrow.xcodeproj">
          </BuildableReference>
       </BuildableProductRunnable>
    </ProfileAction>

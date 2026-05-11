@@ -2,13 +2,18 @@ import Foundation
 
 public struct ConfigStore: Sendable {
     public let configURL: URL
+    private let legacyConfigURL: URL?
 
     public init(configURL: URL? = nil) {
         if let configURL {
             self.configURL = configURL
+            self.legacyConfigURL = nil
         } else {
             let baseURL = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
             self.configURL = baseURL
+                .appendingPathComponent("Burrow", isDirectory: true)
+                .appendingPathComponent("config.json", isDirectory: false)
+            self.legacyConfigURL = baseURL
                 .appendingPathComponent("PortKeeper", isDirectory: true)
                 .appendingPathComponent("config.json", isDirectory: false)
         }
@@ -19,7 +24,11 @@ public struct ConfigStore: Sendable {
         let directory = configURL.deletingLastPathComponent()
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         if !FileManager.default.fileExists(atPath: configURL.path) {
-            try save(AppConfig())
+            if let legacyConfigURL, FileManager.default.fileExists(atPath: legacyConfigURL.path) {
+                try FileManager.default.copyItem(at: legacyConfigURL, to: configURL)
+            } else {
+                try save(AppConfig())
+            }
         }
         return configURL
     }

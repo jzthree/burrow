@@ -7,7 +7,7 @@ public enum TunnelLaunchPreparer {
     ) throws -> TunnelConfig {
         let knownHostsDirectory = fileManager.homeDirectoryForCurrentUser
             .appendingPathComponent(".ssh", isDirectory: true)
-            .appendingPathComponent("portkeeper", isDirectory: true)
+            .appendingPathComponent("burrow", isDirectory: true)
         try fileManager.createDirectory(at: knownHostsDirectory, withIntermediateDirectories: true)
 
         let defaultKnownHostsPath = knownHostsDirectory

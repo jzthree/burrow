@@ -1,31 +1,31 @@
-# PortKeeper
+# Burrow
 
-`portkeeper` is a macOS-first SSH tunnel manager with:
+`burrow` is a macOS-first SSH tunnel manager with:
 
-- a central saved config in `~/Library/Application Support/PortKeeper/config.json`
+- a central saved config in `~/Library/Application Support/Burrow/config.json`
 - a CLI to add, list, enable, disable, and run tunnels
 - a native menu-bar app for start, stop, restart, reload, and config access
 - automatic reconnect when `ssh` exits
-- a core Swift module that can be reused by a future SwiftUI menu-bar app
+- a shared Swift core used by both the CLI and menu-bar app
 
 ## Quick start
 
 ```bash
 cd /Users/jianzhou/Code/portkeeper
 swift build
-.build/debug/portkeeper init
-.build/debug/portkeeper add \
+.build/debug/burrow init
+.build/debug/burrow add \
   --name prod-db \
   --host bastion.example.com \
   --user alice \
   --identity ~/.ssh/id_ed25519 \
   --local 127.0.0.1:15432:127.0.0.1:5432
-.build/debug/portkeeper list
-.build/debug/portkeeper run prod-db
-.build/debug/PortKeeper
+.build/debug/burrow list
+.build/debug/burrow run prod-db
+.build/debug/BurrowApp
 ```
 
-Use `Ctrl-C` to stop the supervisor. While running, `portkeeper` will restart the SSH session after failures using the tunnel's configured reconnect delay.
+Use `Ctrl-C` to stop the supervisor. While running, `burrow` will restart the SSH session after failures using the tunnel's configured reconnect delay.
 
 ## Forward syntax
 
@@ -71,7 +71,7 @@ Run:
 
 ```bash
 cd /Users/jianzhou/Code/portkeeper
-swift run PortKeeper
+swift run BurrowApp
 ```
 
 The app sits in the macOS top bar and can:
@@ -86,25 +86,25 @@ Install as a real app bundle:
 ```bash
 cd /Users/jianzhou/Code/portkeeper
 ./scripts/install-app.sh
-open ~/Applications/PortKeeper.app
+open ~/Applications/Burrow.app
 ```
 
-That installs `~/Applications/PortKeeper.app` with a stable bundle identifier and signs it. On this machine, where no code-signing identity is configured, the install script uses ad-hoc signing by default. That is still a better fit for Keychain access than `swift run`, because the app path and bundle metadata remain stable between launches. If you later install a persistent signing identity, reuse the same script with `SIGNING_IDENTITY="..."`.
+That installs `~/Applications/Burrow.app` with a stable bundle identifier and signs it. On this machine, where no code-signing identity is configured, the install script uses ad-hoc signing by default. That is still a better fit for Keychain access than `swift run`, because the app path and bundle metadata remain stable between launches. If you later install a persistent signing identity, reuse the same script with `SIGNING_IDENTITY="..."`.
 
 Generate an Xcode project:
 
 ```bash
 cd /Users/jianzhou/Code/portkeeper
 ./scripts/generate-xcodeproj.rb
-open PortKeeper.xcodeproj
+open Burrow.xcodeproj
 ```
 
 The generated Xcode project contains:
 
-- a `PortKeeper` macOS app target
+- a `Burrow` macOS app target
 - a `PortKeeperCore` framework target
-- a shared `PortKeeper` scheme
-- bundle identifier `com.jianzhou.portkeeper`
+- a shared `Burrow` scheme
+- bundle identifier `com.jianzhou.burrow`
 
 The project is configured for automatic signing, but you still need to select your team and signing identity inside Xcode.
 

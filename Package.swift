@@ -4,7 +4,7 @@
 import PackageDescription
 
 let package = Package(
-    name: "portkeeper",
+    name: "burrow",
     platforms: [
         .macOS(.v13),
     ],
@@ -14,11 +14,11 @@ let package = Package(
             targets: ["PortKeeperCore"]
         ),
         .executable(
-            name: "portkeeper",
+            name: "burrow",
             targets: ["portkeeper"]
         ),
         .executable(
-            name: "PortKeeper",
+            name: "BurrowApp",
             targets: ["PortKeeperMenuBar"]
         ),
     ],

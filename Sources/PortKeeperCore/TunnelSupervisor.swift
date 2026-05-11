@@ -159,12 +159,6 @@ public final class TunnelSupervisor: @unchecked Sendable {
             throw AuthenticationFailureError(message: authenticationFailure)
         }
 
-        if process.terminationStatus == 255,
-           !didConnect,
-           askPassWasInvoked() {
-            throw AuthenticationFailureError(message: "ssh exited with code 255 after password entry")
-        }
-
         return process.terminationStatus
     }
 
@@ -172,17 +166,9 @@ public final class TunnelSupervisor: @unchecked Sendable {
         let normalized = line.lowercased()
         return normalized.contains("permission denied") ||
             normalized.contains("authentication failed") ||
-            normalized.contains("too many authentication failures")
-    }
-
-    private func askPassWasInvoked() -> Bool {
-        guard let logPath = environment["PORTKEEPER_ASKPASS_LOG"] else {
-            return false
-        }
-        guard let contents = try? String(contentsOfFile: logPath, encoding: .utf8) else {
-            return false
-        }
-        return contents.contains("askpass")
+            normalized.contains("incorrect password") ||
+            normalized.contains("invalid password") ||
+            normalized.contains("access denied")
     }
 
     private func waitForForwardReadiness(process: Process) -> Bool {
@@ -197,11 +183,27 @@ public final class TunnelSupervisor: @unchecked Sendable {
         }
 
         guard !probeTargets.isEmpty else {
+            // Remote-only forwards: no local port to probe. Give ssh a moment to fail-fast,
+            // then treat a still-running process as connected.
+            let warmupDeadline = Date().addingTimeInterval(2)
+            while process.isRunning && Date() < warmupDeadline {
+                usleep(150_000)
+            }
+            return process.isRunning
+        }
+
+        // Brief warmup so ssh has a chance to fail-fast on bind conflicts before
+        // we mistake another process listening on the same port for our forward.
+        let warmupDeadline = Date().addingTimeInterval(0.4)
+        while process.isRunning && Date() < warmupDeadline {
+            usleep(100_000)
+        }
+        guard process.isRunning else {
             return false
         }
 
         let deadline = Date().addingTimeInterval(TimeInterval(max(tunnel.serverAliveInterval, 10)))
-        let stableDuration: TimeInterval = 10
+        let stableDuration: TimeInterval = 1.0
         while process.isRunning && Date() < deadline {
             if probeTargets.contains(where: { canConnect(host: $0.0, port: $0.1) }) {
                 let stableUntil = Date().addingTimeInterval(stableDuration)
@@ -212,14 +214,14 @@ public final class TunnelSupervisor: @unchecked Sendable {
                         remainedHealthy = false
                         break
                     }
-                    usleep(250_000)
+                    usleep(150_000)
                 }
 
                 if remainedHealthy && process.isRunning {
                     return true
                 }
             }
-            usleep(250_000)
+            usleep(200_000)
         }
 
         return false

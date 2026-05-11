@@ -15,7 +15,7 @@
     <rect x="42" y="28" width="836" height="1064" rx="32" fill="#F8FAFD" fill-opacity="0.96"/>
   </g>
 
-  <text x="86" y="92" fill="#0F172A" font-family="SF Pro Display, Helvetica, Arial, sans-serif" font-size="29" font-weight="700">PortKeeper</text>
+  <text x="86" y="92" fill="#0F172A" font-family="SF Pro Display, Helvetica, Arial, sans-serif" font-size="29" font-weight="700">Burrow</text>
   <text x="86" y="128" fill="#64748B" font-family="SF Pro Text, Helvetica, Arial, sans-serif" font-size="18">Compact list mode with hover actions</text>
   <rect x="696" y="58" width="138" height="40" rx="20" fill="#E8EEF5"/>
   <text x="725" y="84" fill="#475569" font-family="SF Pro Text, Helvetica, Arial, sans-serif" font-size="18" font-weight="700">5 tunnels</text>

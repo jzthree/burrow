@@ -11,6 +11,13 @@ final class EventRecorder: @unchecked Sendable {
         events.append(event)
         lock.unlock()
     }
+
+    func contains(where predicate: (TunnelRuntimeEvent) -> Bool) -> Bool {
+        lock.lock()
+        let result = events.contains(where: predicate)
+        lock.unlock()
+        return result
+    }
 }
 
 @Test func sshArgumentsIncludeExpectedFlags() async throws {
@@ -130,6 +137,7 @@ final class EventRecorder: @unchecked Sendable {
     let fakeSSHScript = """
     #!/bin/sh
     "$SSH_ASKPASS" >/dev/null
+    echo "Permission denied (publickey,password)." 1>&2
     exit 255
     """
     try fakeSSHScript.write(to: fakeSSHURL, atomically: true, encoding: .utf8)
@@ -160,17 +168,97 @@ final class EventRecorder: @unchecked Sendable {
 
     await supervisor.run()
 
-    let sawAuthFailure = recorder.events.contains {
+    let sawAuthFailure = recorder.contains {
         if case .authenticationFailed = $0 { return true }
         return false
     }
-    let sawExit = recorder.events.contains {
+    let sawExit = recorder.contains {
         if case .exited = $0 { return true }
         return false
     }
 
     #expect(sawAuthFailure)
     #expect(!sawExit)
+}
+
+@Test func supervisorTreatsAskPassThenNetwork255AsGenericExit() async throws {
+    let tempDirectory = FileManager.default.temporaryDirectory
+        .appendingPathComponent(UUID().uuidString, isDirectory: true)
+    try FileManager.default.createDirectory(at: tempDirectory, withIntermediateDirectories: true)
+
+    let askPassURL = tempDirectory.appendingPathComponent("askpass.sh")
+    let askPassScript = """
+    #!/bin/sh
+    if [ -n "$PORTKEEPER_ASKPASS_LOG" ]; then
+      printf 'askpass\\n' >> "$PORTKEEPER_ASKPASS_LOG"
+    fi
+    printf '%s\\n' "$PORTKEEPER_PASSWORD"
+    """
+    try askPassScript.write(to: askPassURL, atomically: true, encoding: .utf8)
+    try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: askPassURL.path)
+
+    let fakeSSHURL = tempDirectory.appendingPathComponent("fake-ssh.sh")
+    let fakeSSHScript = """
+    #!/bin/sh
+    "$SSH_ASKPASS" >/dev/null
+    echo "Could not resolve hostname example.internal: nodename nor servname provided, or not known" 1>&2
+    exit 255
+    """
+    try fakeSSHScript.write(to: fakeSSHURL, atomically: true, encoding: .utf8)
+    try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: fakeSSHURL.path)
+
+    let askPassLogURL = tempDirectory.appendingPathComponent("askpass.log")
+    let recorder = EventRecorder()
+    let tunnel = TunnelConfig(
+        name: "askpass-network-fail",
+        host: "example.com",
+        user: "alice",
+        forwards: [],
+        reconnectDelaySeconds: 1
+    )
+
+    let supervisor = TunnelSupervisor(
+        tunnel: tunnel,
+        logger: { _ in },
+        eventHandler: { event in
+            recorder.append(event)
+        },
+        environment: [
+            "SSH_ASKPASS": askPassURL.path,
+            "PORTKEEPER_PASSWORD": "password",
+            "PORTKEEPER_ASKPASS_LOG": askPassLogURL.path,
+        ],
+        executablePath: fakeSSHURL.path
+    )
+
+    let runTask = Task {
+        await supervisor.run()
+    }
+    defer {
+        runTask.cancel()
+    }
+
+    try await waitUntil(timeout: 2.0) {
+        recorder.contains {
+            if case .exited = $0 { return true }
+            return false
+        }
+    }
+
+    let sawAuthFailure = recorder.contains {
+        if case .authenticationFailed = $0 { return true }
+        return false
+    }
+    let sawExit = recorder.contains {
+        if case .exited = $0 { return true }
+        return false
+    }
+
+    #expect(!sawAuthFailure)
+    #expect(sawExit)
+
+    runTask.cancel()
+    _ = await runTask.result
 }
 
 @Test func runtimeRegistryReclaimsRecordedSSHProcess() async throws {
@@ -220,4 +308,20 @@ final class EventRecorder: @unchecked Sendable {
     let pidFileURL = runtimeDirectory.appendingPathComponent("\(tunnel.name).pid")
     #expect(process.terminationStatus != 0)
     #expect(!FileManager.default.fileExists(atPath: pidFileURL.path))
+}
+
+private struct WaitTimeoutError: LocalizedError {
+    var errorDescription: String? { "Timed out waiting for expected event" }
+}
+
+private func waitUntil(timeout: TimeInterval, condition: @escaping @Sendable () -> Bool) async throws {
+    let deadline = Date().addingTimeInterval(timeout)
+    while Date() < deadline {
+        if condition() {
+            return
+        }
+        try await Task.sleep(for: .milliseconds(50))
+    }
+
+    throw WaitTimeoutError()
 }

@@ -9,9 +9,9 @@ $LOAD_PATH.unshift(File.join(gem_home, 'gems', 'xcodeproj-1.27.0', 'lib'))
 require 'xcodeproj'
 
 ROOT = File.expand_path('..', __dir__)
-PROJECT_PATH = File.join(ROOT, 'PortKeeper.xcodeproj')
+PROJECT_PATH = File.join(ROOT, 'Burrow.xcodeproj')
 SUPPORT_DIR = File.join(ROOT, 'XcodeSupport')
-INFO_PLIST_PATH = File.join(SUPPORT_DIR, 'PortKeeper-Info.plist')
+INFO_PLIST_PATH = File.join(SUPPORT_DIR, 'Burrow-Info.plist')
 
 FileUtils.rm_rf(PROJECT_PATH)
 FileUtils.mkdir_p(SUPPORT_DIR)
@@ -27,7 +27,7 @@ unless File.exist?(INFO_PLIST_PATH)
         <key>CFBundleDevelopmentRegion</key>
         <string>en</string>
         <key>CFBundleDisplayName</key>
-        <string>PortKeeper</string>
+        <string>Burrow</string>
         <key>CFBundleExecutable</key>
         <string>$(EXECUTABLE_NAME)</string>
         <key>CFBundleIdentifier</key>
@@ -61,15 +61,15 @@ sources_group = project.main_group.new_group('Sources', 'Sources')
 core_group = sources_group.new_group('PortKeeperCore', 'PortKeeperCore')
 app_group = sources_group.new_group('PortKeeperMenuBar', 'PortKeeperMenuBar')
 support_group = project.main_group.new_group('XcodeSupport', 'XcodeSupport')
-support_group.new_file('PortKeeper-Info.plist')
+support_group.new_file('Burrow-Info.plist')
 
 core_target = project.new_target(:framework, 'PortKeeperCore', :osx, '13.0')
-app_target = project.new_target(:application, 'PortKeeper', :osx, '13.0')
+app_target = project.new_target(:application, 'Burrow', :osx, '13.0')
 
 core_target.build_configurations.each do |config|
   config.build_settings['PRODUCT_NAME'] = 'PortKeeperCore'
   config.build_settings['PRODUCT_MODULE_NAME'] = 'PortKeeperCore'
-  config.build_settings['PRODUCT_BUNDLE_IDENTIFIER'] = 'com.jianzhou.portkeeper.core'
+  config.build_settings['PRODUCT_BUNDLE_IDENTIFIER'] = 'com.jianzhou.burrow.core'
   config.build_settings['DEFINES_MODULE'] = 'YES'
   config.build_settings['SWIFT_VERSION'] = '6.0'
   config.build_settings['MACOSX_DEPLOYMENT_TARGET'] = '13.0'
@@ -80,15 +80,15 @@ core_target.build_configurations.each do |config|
 end
 
 app_target.build_configurations.each do |config|
-  config.build_settings['PRODUCT_NAME'] = 'PortKeeper'
-  config.build_settings['PRODUCT_BUNDLE_IDENTIFIER'] = 'com.jianzhou.portkeeper'
+  config.build_settings['PRODUCT_NAME'] = 'Burrow'
+  config.build_settings['PRODUCT_BUNDLE_IDENTIFIER'] = 'com.jianzhou.burrow'
   config.build_settings['MARKETING_VERSION'] = '1.0'
   config.build_settings['CURRENT_PROJECT_VERSION'] = '1'
   config.build_settings['SWIFT_VERSION'] = '6.0'
   config.build_settings['MACOSX_DEPLOYMENT_TARGET'] = '13.0'
   config.build_settings['CODE_SIGN_STYLE'] = 'Automatic'
   config.build_settings['GENERATE_INFOPLIST_FILE'] = 'NO'
-  config.build_settings['INFOPLIST_FILE'] = 'XcodeSupport/PortKeeper-Info.plist'
+  config.build_settings['INFOPLIST_FILE'] = 'XcodeSupport/Burrow-Info.plist'
   config.build_settings['LD_RUNPATH_SEARCH_PATHS'] = ['$(inherited)', '@executable_path/../Frameworks']
   config.build_settings['ENABLE_APP_SANDBOX'] = 'NO'
   config.build_settings['ASSETCATALOG_COMPILER_APPICON_NAME'] = ''
@@ -121,6 +121,6 @@ project.save
 scheme = Xcodeproj::XCScheme.new
 scheme.add_build_target(app_target)
 scheme.set_launch_target(app_target)
-scheme.save_as(PROJECT_PATH, 'PortKeeper', true)
+scheme.save_as(PROJECT_PATH, 'Burrow', true)
 
 puts "Generated #{PROJECT_PATH}"

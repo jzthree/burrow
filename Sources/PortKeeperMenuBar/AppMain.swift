@@ -4,7 +4,7 @@ import PortKeeperCore
 import SwiftUI
 
 @main
-struct PortKeeperApp: App {
+struct BurrowApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
     @StateObject private var viewModel = MenuBarViewModel()
 
@@ -28,7 +28,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
 @MainActor
 final class MenuBarViewModel: ObservableObject {
-    enum ConnectionState {
+    enum ConnectionState: Equatable {
         case disconnected
         case connecting
         case connected
@@ -42,6 +42,7 @@ final class MenuBarViewModel: ObservableObject {
         var isRunning: Bool
         var connectionState: ConnectionState
         var lastMessage: String
+        var recentLogs: [String]
     }
 
     let store = ConfigStore()
@@ -57,6 +58,7 @@ final class MenuBarViewModel: ObservableObject {
     private var activeCredentialSources: [String: CredentialSource] = [:]
     private var sawAuthenticationFailure: Set<String> = []
     private var sessionPasswords: [TunnelCredentialKey: String] = [:]
+    private var sessionPasswordsByHostUser: [HostUserKey: String] = [:]
     private var savedCredentialKeysThisSession: Set<TunnelCredentialKey> = []
     private var invalidCredentialKeys: Set<TunnelCredentialKey> = []
     private var authRePromptCounts: [String: Int] = [:]
@@ -82,7 +84,7 @@ final class MenuBarViewModel: ObservableObject {
 
     var menuBarTitle: String {
         let runningCount = tunnels.filter(\.isRunning).count
-        return runningCount > 0 ? "PortKeeper \(runningCount)" : "PortKeeper"
+        return runningCount > 0 ? "Burrow \(runningCount)" : "Burrow"
     }
 
     var menuBarSymbol: String {
@@ -93,14 +95,17 @@ final class MenuBarViewModel: ObservableObject {
         do {
             let config = try store.load()
             let running = Set(tasks.keys)
+            let existingStatesByName = Dictionary(uniqueKeysWithValues: tunnels.map { ($0.id, $0) })
             tunnels = config.tunnels.map { tunnel in
-                TunnelState(
+                let existingState = existingStatesByName[tunnel.name]
+                return TunnelState(
                     id: tunnel.name,
                     tunnel: tunnel,
                     isConfiguredEnabled: tunnel.enabled,
                     isRunning: running.contains(tunnel.name),
                     connectionState: running.contains(tunnel.name) ? .connecting : .disconnected,
-                    lastMessage: running.contains(tunnel.name) ? "Connecting" : (tunnel.enabled ? "Auto-connect enabled" : "Auto-connect disabled")
+                    lastMessage: existingState?.lastMessage ?? (running.contains(tunnel.name) ? "Connecting" : (tunnel.enabled ? "Auto-connect enabled" : "Auto-connect disabled")),
+                    recentLogs: existingState?.recentLogs ?? []
                 )
             }
             .sorted { $0.tunnel.name < $1.tunnel.name }
@@ -319,8 +324,10 @@ final class MenuBarViewModel: ObservableObject {
             let tunnel = try draft.toTunnelConfig()
             let originalName = draft.originalName
             let wasRunning = originalName.map { tasks[$0] != nil } ?? false
+            var pendingOldTask: Task<Void, Never>?
 
             if let originalName, originalName != tunnel.name {
+                pendingOldTask = tasks[originalName]
                 _ = try store.remove(name: originalName)
                 if tasks[originalName] != nil {
                     stopTunnel(named: originalName)
@@ -331,7 +338,16 @@ final class MenuBarViewModel: ObservableObject {
             loadConfig()
 
             if wasRunning {
-                startTunnel(named: tunnel.name)
+                if let pendingOldTask {
+                    let newName = tunnel.name
+                    updateState(for: newName, isRunning: false, state: .connecting, message: "Waiting for previous session to close")
+                    Task { @MainActor [weak self] in
+                        _ = await pendingOldTask.value
+                        self?.startTunnel(named: newName)
+                    }
+                } else {
+                    startTunnel(named: tunnel.name)
+                }
             }
 
             globalMessage = "Saved \(tunnel.name)."
@@ -369,44 +385,51 @@ final class MenuBarViewModel: ObservableObject {
             return ConnectionPreparation(environment: [:], pendingSave: nil, credentialSource: .none)
         }
 
-        if invalidCredentialKeys.contains(credentialKey) {
-            guard let password = PasswordPrompt.requestPassword(for: credentialKey) else {
-                throw ConnectionPreparationError.cancelledPasswordPrompt
+        let hostUserKey = credentialKey.hostUserKey
+        let isRetry = invalidCredentialKeys.contains(credentialKey)
+
+        if !isRetry {
+            if let sessionPassword = sessionPasswords[credentialKey], !sessionPassword.isEmpty {
+                let pendingSave: PendingCredentialSave? = savedCredentialKeysThisSession.contains(credentialKey)
+                    ? nil
+                    : PendingCredentialSave(key: credentialKey, password: sessionPassword)
+                return ConnectionPreparation(
+                    environment: try AskPassSupport.environment(password: sessionPassword),
+                    pendingSave: pendingSave,
+                    credentialSource: .prompted(credentialKey)
+                )
             }
 
-            sessionPasswords[credentialKey] = password
-            return ConnectionPreparation(
-                environment: try AskPassSupport.environment(password: password),
-                pendingSave: PendingCredentialSave(key: credentialKey, password: password),
-                credentialSource: .prompted(credentialKey)
-            )
+            if let password = try passwordStore.password(for: credentialKey), !password.isEmpty {
+                sessionPasswords[credentialKey] = password
+                sessionPasswordsByHostUser[hostUserKey] = password
+                return ConnectionPreparation(
+                    environment: try AskPassSupport.environment(password: password),
+                    pendingSave: nil,
+                    credentialSource: .keychain(credentialKey)
+                )
+            }
+
+            if let sharedPassword = sessionPasswordsByHostUser[hostUserKey], !sharedPassword.isEmpty {
+                sessionPasswords[credentialKey] = sharedPassword
+                return ConnectionPreparation(
+                    environment: try AskPassSupport.environment(password: sharedPassword),
+                    pendingSave: PendingCredentialSave(key: credentialKey, password: sharedPassword),
+                    credentialSource: .prompted(credentialKey)
+                )
+            }
         }
 
-        if let sessionPassword = sessionPasswords[credentialKey], !sessionPassword.isEmpty {
-            let pendingSave: PendingCredentialSave? = savedCredentialKeysThisSession.contains(credentialKey)
-                ? nil
-                : PendingCredentialSave(key: credentialKey, password: sessionPassword)
-            return ConnectionPreparation(
-                environment: try AskPassSupport.environment(password: sessionPassword),
-                pendingSave: pendingSave,
-                credentialSource: .prompted(credentialKey)
-            )
-        }
-
-        if let password = try passwordStore.password(for: credentialKey), !password.isEmpty {
-            sessionPasswords[credentialKey] = password
-            return ConnectionPreparation(
-                environment: try AskPassSupport.environment(password: password),
-                pendingSave: nil,
-                credentialSource: .keychain(credentialKey)
-            )
-        }
-
-        guard let password = PasswordPrompt.requestPassword(for: credentialKey) else {
+        guard let password = PasswordPrompt.requestPassword(
+            for: credentialKey,
+            tunnelName: tunnel.name,
+            retry: isRetry
+        ) else {
             throw ConnectionPreparationError.cancelledPasswordPrompt
         }
 
         sessionPasswords[credentialKey] = password
+        sessionPasswordsByHostUser[hostUserKey] = password
 
         return ConnectionPreparation(
             environment: try AskPassSupport.environment(password: password),
@@ -435,6 +458,20 @@ final class MenuBarViewModel: ObservableObject {
             tunnels[index].connectionState = state
         }
         tunnels[index].lastMessage = message
+    }
+
+    fileprivate func appendLog(for name: String, message: String) {
+        guard let index = tunnels.firstIndex(where: { $0.id == name }) else {
+            return
+        }
+        let trimmed = message.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            return
+        }
+        tunnels[index].recentLogs.append(trimmed)
+        if tunnels[index].recentLogs.count > 20 {
+            tunnels[index].recentLogs.removeFirst(tunnels[index].recentLogs.count - 20)
+        }
     }
 
     fileprivate func finishTunnel(named name: String) {
@@ -501,19 +538,27 @@ final class MenuBarViewModel: ObservableObject {
             } catch {
                 globalMessage = "Authentication failed and the saved password could not be removed: \(error.localizedDescription)"
             }
-            sessionPasswords[key] = nil
+            forgetSessionPassword(for: key)
             savedCredentialKeysThisSession.remove(key)
         case .prompted(let key):
             invalidCredentialKeys.insert(key)
-            sessionPasswords[key] = nil
+            forgetSessionPassword(for: key)
             savedCredentialKeysThisSession.remove(key)
         case .none:
             break
         }
     }
 
+    private func forgetSessionPassword(for key: TunnelCredentialKey) {
+        let rejected = sessionPasswords.removeValue(forKey: key)
+        let hostUserKey = key.hostUserKey
+        if let rejected, sessionPasswordsByHostUser[hostUserKey] == rejected {
+            sessionPasswordsByHostUser.removeValue(forKey: hostUserKey)
+        }
+    }
+
     private func shouldAutoPromptAgain(for name: String) -> Bool {
-        authRePromptCounts[name, default: 0] < 1
+        authRePromptCounts[name, default: 0] < 3
     }
 
     private func uniqueDuplicateName(for baseName: String) -> String {
@@ -546,6 +591,7 @@ final class TunnelEventBridge: @unchecked Sendable {
                 message.localizedCaseInsensitiveContains("authentication failed") {
                 self.owner?.recordAuthenticationFailure(for: self.tunnelName)
             }
+            self.owner?.appendLog(for: self.tunnelName, message: message)
             self.owner?.updateState(for: self.tunnelName, isRunning: true, message: message)
         }
     }
@@ -585,6 +631,13 @@ final class TunnelEventBridge: @unchecked Sendable {
 struct MenuBarContent: View {
     @ObservedObject var viewModel: MenuBarViewModel
 
+    struct EndpointGroup: Identifiable {
+        let endpoint: String
+        let tunnels: [MenuBarViewModel.TunnelState]
+
+        var id: String { endpoint }
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             header
@@ -601,18 +654,26 @@ struct MenuBarContent: View {
                     emptyState
                 } else {
                     ScrollView {
-                        VStack(alignment: .leading, spacing: 10) {
-                            ForEach(viewModel.tunnels) { tunnel in
-                                TunnelRow(
-                                    tunnel: tunnel,
-                                    onStart: { viewModel.startTunnel(named: tunnel.id) },
-                                    onStop: { viewModel.stopTunnel(named: tunnel.id) },
-                                    onRestart: { viewModel.restartTunnel(named: tunnel.id) },
-                                    onEdit: { viewModel.openEditor(for: tunnel.id) },
-                                    onDuplicate: { viewModel.duplicateTunnel(named: tunnel.id) },
-                                    onDelete: { viewModel.deleteTunnel(named: tunnel.id) },
-                                    onToggleAutoConnect: { viewModel.setAutoConnect(named: tunnel.id, enabled: $0) }
-                                )
+                        VStack(alignment: .leading, spacing: 12) {
+                            ForEach(endpointGroups) { group in
+                                VStack(alignment: .leading, spacing: 6) {
+                                    EndpointHeader(group: group)
+
+                                    VStack(alignment: .leading, spacing: 8) {
+                                        ForEach(group.tunnels) { tunnel in
+                                            TunnelRow(
+                                                tunnel: tunnel,
+                                                onStart: { viewModel.startTunnel(named: tunnel.id) },
+                                                onStop: { viewModel.stopTunnel(named: tunnel.id) },
+                                                onRestart: { viewModel.restartTunnel(named: tunnel.id) },
+                                                onEdit: { viewModel.openEditor(for: tunnel.id) },
+                                                onDuplicate: { viewModel.duplicateTunnel(named: tunnel.id) },
+                                                onDelete: { viewModel.deleteTunnel(named: tunnel.id) },
+                                                onToggleAutoConnect: { viewModel.setAutoConnect(named: tunnel.id, enabled: $0) }
+                                            )
+                                        }
+                                    }
+                                }
                             }
                         }
                         .padding(.vertical, 2)
@@ -625,6 +686,7 @@ struct MenuBarContent: View {
         }
         .padding(14)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .background(Color(nsColor: .windowBackgroundColor))
     }
 
     private var header: some View {
@@ -637,19 +699,15 @@ struct MenuBarContent: View {
                     .buttonStyle(.bordered)
                     .controlSize(.small)
                 } else {
-                    Text("PortKeeper")
+                    Text("Burrow")
                         .font(.system(size: 15, weight: .semibold))
                 }
                 Spacer()
-                Text(viewModel.editorDraft == nil ? "\(viewModel.tunnels.count) configured" : "Editing tunnel")
-                    .font(.system(size: 11, weight: .semibold))
-                    .foregroundStyle(.secondary)
-                    .padding(.horizontal, 10)
-                    .padding(.vertical, 5)
-                    .background(
-                        Capsule(style: .continuous)
-                            .fill(Color(nsColor: .controlBackgroundColor))
-                    )
+                if viewModel.editorDraft == nil {
+                    HealthSummaryPill(tunnels: viewModel.tunnels)
+                } else {
+                    HeaderPill(text: "Editing tunnel")
+                }
             }
             Text(viewModel.globalMessage)
                 .font(.system(size: 11))
@@ -717,6 +775,101 @@ struct MenuBarContent: View {
             set: { viewModel.editorDraft = $0 }
         )
     }
+
+    private var endpointGroups: [EndpointGroup] {
+        Dictionary(grouping: viewModel.tunnels) { tunnel in
+            "\(tunnel.tunnel.host):\(String(tunnel.tunnel.sshPort))"
+        }
+        .map { endpoint, tunnels in
+            EndpointGroup(endpoint: endpoint, tunnels: tunnels.sorted { $0.tunnel.name < $1.tunnel.name })
+        }
+        .sorted { $0.endpoint.localizedStandardCompare($1.endpoint) == .orderedAscending }
+    }
+}
+
+private struct EndpointHeader: View {
+    let group: MenuBarContent.EndpointGroup
+
+    var body: some View {
+        HStack(spacing: 6) {
+            Image(systemName: "network")
+                .font(.system(size: 9, weight: .semibold))
+                .foregroundStyle(.secondary)
+            Text(verbatim: group.endpoint)
+                .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+                .truncationMode(.middle)
+            Spacer(minLength: 4)
+            Text("\(group.tunnels.count)")
+                .font(.system(size: 9, weight: .semibold))
+                .foregroundStyle(.tertiary)
+        }
+        .padding(.horizontal, 2)
+    }
+}
+
+private struct HeaderPill: View {
+    let text: String
+
+    var body: some View {
+        Text(text)
+            .font(.system(size: 11, weight: .semibold))
+            .foregroundStyle(.secondary)
+            .padding(.horizontal, 10)
+            .padding(.vertical, 5)
+            .background(
+                Capsule(style: .continuous)
+                    .fill(Color(nsColor: .controlBackgroundColor))
+            )
+    }
+}
+
+private struct HealthSummaryPill: View {
+    let tunnels: [MenuBarViewModel.TunnelState]
+
+    var body: some View {
+        HStack(spacing: 7) {
+            summaryText(count: upCount, label: "up", color: .green)
+            summaryText(count: connectingCount, label: "starting", color: .orange)
+            summaryText(count: failedCount, label: "failed", color: .red)
+            summaryText(count: waitingCount, label: "waiting", color: .gray)
+        }
+        .padding(.horizontal, 9)
+        .padding(.vertical, 5)
+        .background(
+            Capsule(style: .continuous)
+                .fill(Color(nsColor: .controlBackgroundColor))
+        )
+        .help("\(tunnels.count) configured")
+    }
+
+    private var upCount: Int {
+        tunnels.filter { $0.connectionState == .connected }.count
+    }
+
+    private var connectingCount: Int {
+        tunnels.filter { $0.connectionState == .connecting }.count
+    }
+
+    private var failedCount: Int {
+        tunnels.filter { $0.connectionState == .failed }.count
+    }
+
+    private var waitingCount: Int {
+        tunnels.filter { $0.connectionState == .disconnected }.count
+    }
+
+    private func summaryText(count: Int, label: String, color: Color) -> some View {
+        HStack(spacing: 3) {
+            Circle()
+                .fill(color)
+                .frame(width: 5, height: 5)
+            Text("\(count) \(label)")
+                .font(.system(size: 10.5, weight: .semibold))
+                .foregroundStyle(.secondary)
+        }
+    }
 }
 
 struct TunnelRow: View {
@@ -729,6 +882,7 @@ struct TunnelRow: View {
     let onDelete: () -> Void
     let onToggleAutoConnect: (Bool) -> Void
     @State private var isFailureTooltipVisible = false
+    @State private var isDetailsPresented = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -937,7 +1091,9 @@ struct TunnelRow: View {
             return .green
         case .connecting:
             return .orange
-        case .disconnected, .failed:
+        case .disconnected:
+            return .gray
+        case .failed:
             return .red
         }
     }
@@ -945,6 +1101,10 @@ struct TunnelRow: View {
     @ViewBuilder
     private var rowMenu: some View {
         Menu {
+            Button("Details") {
+                isDetailsPresented = true
+            }
+            Divider()
             Button("Restart", action: onRestart)
             Button("Edit", action: onEdit)
             Button("Duplicate", action: onDuplicate)
@@ -958,6 +1118,14 @@ struct TunnelRow: View {
         .menuStyle(.borderlessButton)
         .menuIndicator(.hidden)
         .frame(width: 22, alignment: .trailing)
+        .popover(isPresented: $isDetailsPresented, arrowEdge: .trailing) {
+            TunnelDetailsPopover(
+                tunnel: tunnel,
+                routeSummary: fullRouteSummary,
+                commandText: sshCommandText,
+                failurePresentation: failurePresentation
+            )
+        }
     }
 
     @ViewBuilder
@@ -998,11 +1166,11 @@ struct TunnelRow: View {
         }
     }
 
-    private func failureTooltip(_ presentation: FailurePresentation) -> some View {
+    private func failureTooltip(_ presentation: TunnelFailurePresentation) -> some View {
         VStack(alignment: .leading, spacing: 3) {
             Text(presentation.codeLine)
                 .font(.system(size: 10, weight: .semibold, design: .monospaced))
-                .foregroundStyle(Color(red: 0.68, green: 0.12, blue: 0.10))
+                .foregroundStyle(presentation.color)
             Text(presentation.hintLine)
                 .font(.system(size: 10))
                 .foregroundStyle(Color(red: 0.36, green: 0.14, blue: 0.12))
@@ -1021,7 +1189,164 @@ struct TunnelRow: View {
         )
     }
 
-    private var failurePresentation: FailurePresentation? {
+    private var failurePresentation: TunnelFailurePresentation? {
+        TunnelFailureClassifier.presentation(for: tunnel)
+    }
+
+    private var sshCommandText: String {
+        let prepared = (try? TunnelLaunchPreparer.prepare(tunnel.tunnel)) ?? tunnel.tunnel
+        return SSHCommandBuilder.render(prepared)
+    }
+}
+
+private struct TunnelDetailsPopover: View {
+    let tunnel: MenuBarViewModel.TunnelState
+    let routeSummary: String
+    let commandText: String
+    let failurePresentation: TunnelFailurePresentation?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 7) {
+                Circle()
+                    .fill(statusColor)
+                    .frame(width: 7, height: 7)
+                Text(tunnel.tunnel.name)
+                    .font(.system(size: 13, weight: .semibold))
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                Spacer()
+                Text(statusText)
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundStyle(.secondary)
+            }
+
+            VStack(alignment: .leading, spacing: 5) {
+                detailRow("Endpoint", "\(tunnel.tunnel.host):\(String(tunnel.tunnel.sshPort))")
+                detailRow("Route", routeSummary)
+                detailRow("Auto", tunnel.isConfiguredEnabled ? "enabled" : "disabled")
+                detailRow("Credential", credentialText)
+                detailRow("Probe", probeText)
+            }
+
+            if let failurePresentation {
+                Divider()
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(failurePresentation.codeLine)
+                        .font(.system(size: 10.5, weight: .semibold, design: .monospaced))
+                        .foregroundStyle(failurePresentation.color)
+                    Text(failurePresentation.hintLine)
+                        .font(.system(size: 10.5))
+                        .foregroundStyle(.secondary)
+                }
+            }
+
+            Divider()
+
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Recent log")
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundStyle(.secondary)
+                Text(recentLogText)
+                    .font(.system(size: 10, design: .monospaced))
+                    .foregroundStyle(.primary.opacity(0.78))
+                    .lineLimit(8)
+                    .textSelection(.enabled)
+            }
+
+            VStack(alignment: .leading, spacing: 4) {
+                Text("SSH command")
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundStyle(.secondary)
+                Text(commandText)
+                    .font(.system(size: 9.5, design: .monospaced))
+                    .foregroundStyle(.primary.opacity(0.72))
+                    .lineLimit(5)
+                    .textSelection(.enabled)
+            }
+        }
+        .padding(12)
+        .frame(width: 340, alignment: .leading)
+    }
+
+    private func detailRow(_ label: String, _ value: String) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: 8) {
+            Text(label)
+                .font(.system(size: 10, weight: .semibold))
+                .foregroundStyle(.secondary)
+                .frame(width: 62, alignment: .leading)
+            Text(value)
+                .font(.system(size: 10.5, design: .monospaced))
+                .foregroundStyle(.primary.opacity(0.82))
+                .lineLimit(2)
+                .truncationMode(.middle)
+                .textSelection(.enabled)
+        }
+    }
+
+    private var statusColor: Color {
+        switch tunnel.connectionState {
+        case .connected:
+            return .green
+        case .connecting:
+            return .orange
+        case .disconnected:
+            return .gray
+        case .failed:
+            return .red
+        }
+    }
+
+    private var statusText: String {
+        switch tunnel.connectionState {
+        case .connected:
+            return "connected"
+        case .connecting:
+            return "connecting"
+        case .disconnected:
+            return "stopped"
+        case .failed:
+            return failurePresentation?.category ?? "failed"
+        }
+    }
+
+    private var credentialText: String {
+        guard let user = tunnel.tunnel.user, !user.isEmpty else {
+            return "none"
+        }
+        return "\(user)@\(tunnel.tunnel.host):\(String(tunnel.tunnel.sshPort))"
+    }
+
+    private var probeText: String {
+        switch tunnel.connectionState {
+        case .connected:
+            return "local forward reachable"
+        case .connecting:
+            return "checking local forward"
+        case .failed:
+            return failurePresentation?.category ?? "failed"
+        case .disconnected:
+            return "not running"
+        }
+    }
+
+    private var recentLogText: String {
+        if tunnel.recentLogs.isEmpty {
+            return tunnel.lastMessage.isEmpty ? "No recent log" : tunnel.lastMessage
+        }
+        return tunnel.recentLogs.suffix(20).joined(separator: "\n")
+    }
+}
+
+private struct TunnelFailurePresentation {
+    let category: String
+    let codeLine: String
+    let hintLine: String
+    let color: Color
+}
+
+private enum TunnelFailureClassifier {
+    static func presentation(for tunnel: MenuBarViewModel.TunnelState) -> TunnelFailurePresentation? {
         guard case .failed = tunnel.connectionState else {
             return nil
         }
@@ -1029,43 +1354,79 @@ struct TunnelRow: View {
         let message = tunnel.lastMessage.trimmingCharacters(in: .whitespacesAndNewlines)
         let lowercased = message.lowercased()
 
-        if lowercased.contains("255") {
-            return FailurePresentation(
-                codeLine: "ssh exited 255",
-                hintLine: "Check VPN, DNS, credentials, or remote host access."
-            )
-        }
-
-        if lowercased.contains("authentication failed") || lowercased.contains("permission denied") {
-            return FailurePresentation(
+        if containsAny(lowercased, ["authentication failed", "permission denied", "incorrect password", "invalid password", "access denied"]) {
+            return TunnelFailurePresentation(
+                category: "auth failed",
                 codeLine: "authentication failed",
-                hintLine: "Check the saved username or password for this target."
+                hintLine: "Check the saved username or password for this endpoint.",
+                color: Color(red: 0.68, green: 0.12, blue: 0.10)
             )
         }
 
-        if lowercased.contains("not running") || lowercased.contains("stopped") {
-            return FailurePresentation(
+        if containsAny(lowercased, ["address already in use", "cannot listen to port", "could not request local forwarding"]) {
+            return TunnelFailurePresentation(
+                category: "port conflict",
+                codeLine: "local port unavailable",
+                hintLine: "Another process is already listening on this local port.",
+                color: Color(red: 0.72, green: 0.18, blue: 0.10)
+            )
+        }
+
+        if containsAny(lowercased, ["could not resolve hostname", "nodename nor servname", "temporary failure in name resolution"]) {
+            return TunnelFailurePresentation(
+                category: "dns issue",
+                codeLine: "host not resolvable",
+                hintLine: "Check VPN, DNS, or the current network environment.",
+                color: Color(red: 0.68, green: 0.12, blue: 0.10)
+            )
+        }
+
+        if containsAny(lowercased, ["operation timed out", "connection timed out", "network is unreachable", "no route to host", "connection refused"]) {
+            return TunnelFailurePresentation(
+                category: "network issue",
+                codeLine: "network unavailable",
+                hintLine: "Check VPN, remote reachability, or firewall rules.",
+                color: Color(red: 0.68, green: 0.12, blue: 0.10)
+            )
+        }
+
+        if containsAny(lowercased, ["host key verification failed", "remote host identification has changed"]) {
+            return TunnelFailurePresentation(
+                category: "host key issue",
+                codeLine: "host key rejected",
+                hintLine: "Review the known-hosts entry for this endpoint.",
+                color: Color(red: 0.68, green: 0.12, blue: 0.10)
+            )
+        }
+
+        if lowercased.contains("255") {
+            return TunnelFailurePresentation(
+                category: "ssh exited",
+                codeLine: "ssh exited 255",
+                hintLine: "Usually VPN, DNS, host reachability, or SSH policy.",
+                color: Color(red: 0.68, green: 0.12, blue: 0.10)
+            )
+        }
+
+        if containsAny(lowercased, ["not running", "stopped"]) {
+            return TunnelFailurePresentation(
+                category: "stopped",
                 codeLine: "tunnel stopped",
-                hintLine: "Start the tunnel again to restore the forward."
+                hintLine: "Start the tunnel again to restore the forward.",
+                color: .secondary
             )
         }
 
-        if !message.isEmpty {
-            return FailurePresentation(
-                codeLine: message,
-                hintLine: "Inspect the SSH connection details and try again."
-            )
-        }
-
-        return FailurePresentation(
-            codeLine: "connection failed",
-            hintLine: "Inspect the SSH connection details and try again."
+        return TunnelFailurePresentation(
+            category: "failed",
+            codeLine: message.isEmpty ? "connection failed" : message,
+            hintLine: "Open details for the SSH command and last message.",
+            color: Color(red: 0.68, green: 0.12, blue: 0.10)
         )
     }
 
-    private struct FailurePresentation {
-        let codeLine: String
-        let hintLine: String
+    private static func containsAny(_ text: String, _ needles: [String]) -> Bool {
+        needles.contains { text.contains($0) }
     }
 }
 
@@ -1425,5 +1786,5 @@ private extension String {
 }
 
 private extension Notification.Name {
-    static let portKeeperDidFinishLaunching = Notification.Name("PortKeeperDidFinishLaunching")
+    static let portKeeperDidFinishLaunching = Notification.Name("BurrowDidFinishLaunching")
 }

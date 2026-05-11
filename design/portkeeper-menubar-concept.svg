@@ -15,7 +15,7 @@
     <rect x="42" y="34" width="836" height="1088" rx="34" fill="#F7F9FC" fill-opacity="0.92"/>
   </g>
 
-  <text x="84" y="104" fill="#111827" font-family="SF Pro Display, Helvetica, Arial, sans-serif" font-size="28" font-weight="700">PortKeeper</text>
+  <text x="84" y="104" fill="#111827" font-family="SF Pro Display, Helvetica, Arial, sans-serif" font-size="28" font-weight="700">Burrow</text>
   <rect x="676" y="68" width="158" height="42" rx="21" fill="#E9EEF5"/>
   <text x="710" y="96" fill="#4B5563" font-family="SF Pro Text, Helvetica, Arial, sans-serif" font-size="18" font-weight="600">5 configured</text>
   <text x="84" y="146" fill="#6B7280" font-family="SF Pro Text, Helvetica, Arial, sans-serif" font-size="18">2 connected, 2 failed, 1 connecting</text>

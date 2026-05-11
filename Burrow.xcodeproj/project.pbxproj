@@ -47,8 +47,8 @@
 
 /* Begin PBXFileReference section */
 		1116EB2FBD61CE8A189A61E7 /* PortKeeperRuntimeRegistry.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = PortKeeperRuntimeRegistry.swift; sourceTree = "<group>"; };
-		12AC1582B180911CC380DB81 /* PortKeeper.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = PortKeeper.app; sourceTree = BUILT_PRODUCTS_DIR; };
-		2DCD9B77D4ACC5ED9FBB434A /* PortKeeper-Info.plist */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.plist.xml; path = "PortKeeper-Info.plist"; sourceTree = "<group>"; };
+		12AC1582B180911CC380DB81 /* Burrow.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Burrow.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		2DCD9B77D4ACC5ED9FBB434A /* Burrow-Info.plist */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.plist.xml; path = "Burrow-Info.plist"; sourceTree = "<group>"; };
 		56F7BCBC59B9C2E13C2004F5 /* TunnelSupervisor.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = TunnelSupervisor.swift; sourceTree = "<group>"; };
 		7376D53339AFA9421B35520E /* Cocoa.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = Cocoa.framework; path = Platforms/MacOSX.platform/Developer/SDKs/MacOSX15.0.sdk/System/Library/Frameworks/Cocoa.framework; sourceTree = DEVELOPER_DIR; };
 		7BE8F412FCCBA07BAEEAD4F1 /* ConfigStore.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = ConfigStore.swift; sourceTree = "<group>"; };
@@ -85,7 +85,7 @@
 			isa = PBXGroup;
 			children = (
 				C383B939CB84FFBB5CFF5A5E /* PortKeeperCore.framework */,
-				12AC1582B180911CC380DB81 /* PortKeeper.app */,
+				12AC1582B180911CC380DB81 /* Burrow.app */,
 			);
 			name = Products;
 			sourceTree = "<group>";
@@ -112,7 +112,7 @@
 		7385E72487EE79C29018DF16 /* XcodeSupport */ = {
 			isa = PBXGroup;
 			children = (
-				2DCD9B77D4ACC5ED9FBB434A /* PortKeeper-Info.plist */,
+				2DCD9B77D4ACC5ED9FBB434A /* Burrow-Info.plist */,
 			);
 			path = XcodeSupport;
 			sourceTree = "<group>";
@@ -168,9 +168,9 @@
 /* End PBXHeadersBuildPhase section */
 
 /* Begin PBXNativeTarget section */
-		19EFB357F08F61B404C9EC73 /* PortKeeper */ = {
+		19EFB357F08F61B404C9EC73 /* Burrow */ = {
 			isa = PBXNativeTarget;
-			buildConfigurationList = 6CBEA5C9A78DCF570E2DABA2 /* Build configuration list for PBXNativeTarget "PortKeeper" */;
+			buildConfigurationList = 6CBEA5C9A78DCF570E2DABA2 /* Build configuration list for PBXNativeTarget "Burrow" */;
 			buildPhases = (
 				1BB04C2B3F296CE2BC51A11E /* Sources */,
 				5DFA4F3839E64C19CBDF9894 /* Frameworks */,
@@ -182,9 +182,9 @@
 			dependencies = (
 				171704229353A64C1AA76950 /* PBXTargetDependency */,
 			);
-			name = PortKeeper;
-			productName = PortKeeper;
-			productReference = 12AC1582B180911CC380DB81 /* PortKeeper.app */;
+			name = Burrow;
+			productName = Burrow;
+			productReference = 12AC1582B180911CC380DB81 /* Burrow.app */;
 			productType = "com.apple.product-type.application";
 		};
 		F8EB39888A031E3556059ABE /* PortKeeperCore */ = {
@@ -224,7 +224,7 @@
 					};
 				};
 			};
-			buildConfigurationList = B2866A50BF50C4E68BF2B25D /* Build configuration list for PBXProject "PortKeeper" */;
+			buildConfigurationList = B2866A50BF50C4E68BF2B25D /* Build configuration list for PBXProject "Burrow" */;
 			compatibilityVersion = "Xcode 3.2";
 			developmentRegion = en;
 			hasScannedForEncodings = 0;
@@ -238,7 +238,7 @@
 			projectRoot = "";
 			targets = (
 				F8EB39888A031E3556059ABE /* PortKeeperCore */,
-				19EFB357F08F61B404C9EC73 /* PortKeeper */,
+				19EFB357F08F61B404C9EC73 /* Burrow */,
 			);
 		};
 /* End PBXProject section */
@@ -313,7 +313,7 @@
 				INSTALL_PATH = "$(LOCAL_LIBRARY_DIR)/Frameworks";
 				LD_RUNPATH_SEARCH_PATHS = "$(inherited) @executable_path/../Frameworks @loader_path/Frameworks";
 				MACOSX_DEPLOYMENT_TARGET = 13.0;
-				PRODUCT_BUNDLE_IDENTIFIER = com.jianzhou.portkeeper.core;
+				PRODUCT_BUNDLE_IDENTIFIER = com.jianzhou.burrow.core;
 				PRODUCT_MODULE_NAME = PortKeeperCore;
 				PRODUCT_NAME = PortKeeperCore;
 				SDKROOT = macosx;
@@ -334,12 +334,12 @@
 				CURRENT_PROJECT_VERSION = 1;
 				ENABLE_APP_SANDBOX = NO;
 				GENERATE_INFOPLIST_FILE = NO;
-				INFOPLIST_FILE = "XcodeSupport/PortKeeper-Info.plist";
+				INFOPLIST_FILE = "XcodeSupport/Burrow-Info.plist";
 				LD_RUNPATH_SEARCH_PATHS = "$(inherited) @executable_path/../Frameworks";
 				MACOSX_DEPLOYMENT_TARGET = 13.0;
 				MARKETING_VERSION = 1.0;
-				PRODUCT_BUNDLE_IDENTIFIER = com.jianzhou.portkeeper;
-				PRODUCT_NAME = PortKeeper;
+				PRODUCT_BUNDLE_IDENTIFIER = com.jianzhou.burrow;
+				PRODUCT_NAME = Burrow;
 				SDKROOT = macosx;
 				SWIFT_VERSION = 6.0;
 			};
@@ -355,12 +355,12 @@
 				CURRENT_PROJECT_VERSION = 1;
 				ENABLE_APP_SANDBOX = NO;
 				GENERATE_INFOPLIST_FILE = NO;
-				INFOPLIST_FILE = "XcodeSupport/PortKeeper-Info.plist";
+				INFOPLIST_FILE = "XcodeSupport/Burrow-Info.plist";
 				LD_RUNPATH_SEARCH_PATHS = "$(inherited) @executable_path/../Frameworks";
 				MACOSX_DEPLOYMENT_TARGET = 13.0;
 				MARKETING_VERSION = 1.0;
-				PRODUCT_BUNDLE_IDENTIFIER = com.jianzhou.portkeeper;
-				PRODUCT_NAME = PortKeeper;
+				PRODUCT_BUNDLE_IDENTIFIER = com.jianzhou.burrow;
+				PRODUCT_NAME = Burrow;
 				SDKROOT = macosx;
 				SWIFT_VERSION = 6.0;
 			};
@@ -446,7 +446,7 @@
 				INSTALL_PATH = "$(LOCAL_LIBRARY_DIR)/Frameworks";
 				LD_RUNPATH_SEARCH_PATHS = "$(inherited) @executable_path/../Frameworks @loader_path/Frameworks";
 				MACOSX_DEPLOYMENT_TARGET = 13.0;
-				PRODUCT_BUNDLE_IDENTIFIER = com.jianzhou.portkeeper.core;
+				PRODUCT_BUNDLE_IDENTIFIER = com.jianzhou.burrow.core;
 				PRODUCT_MODULE_NAME = PortKeeperCore;
 				PRODUCT_NAME = PortKeeperCore;
 				SDKROOT = macosx;
@@ -514,7 +514,7 @@
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
-		6CBEA5C9A78DCF570E2DABA2 /* Build configuration list for PBXNativeTarget "PortKeeper" */ = {
+		6CBEA5C9A78DCF570E2DABA2 /* Build configuration list for PBXNativeTarget "Burrow" */ = {
 			isa = XCConfigurationList;
 			buildConfigurations = (
 				721D9281F3CA6CCCD629EC1F /* Release */,
@@ -532,7 +532,7 @@
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;
 		};
-		B2866A50BF50C4E68BF2B25D /* Build configuration list for PBXProject "PortKeeper" */ = {
+		B2866A50BF50C4E68BF2B25D /* Build configuration list for PBXProject "Burrow" */ = {
 			isa = XCConfigurationList;
 			buildConfigurations = (
 				8105C8FC45E1E5DE41390EEE /* Debug */,
