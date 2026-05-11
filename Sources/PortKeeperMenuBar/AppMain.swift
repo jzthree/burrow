@@ -641,7 +641,7 @@ struct MenuBarContent: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
+        VStack(alignment: .leading, spacing: 10) {
             header
             Divider()
             if let draft = viewModel.editorDraft {
@@ -656,13 +656,17 @@ struct MenuBarContent: View {
                     emptyState
                 } else {
                     ScrollView {
-                        VStack(alignment: .leading, spacing: 12) {
+                        VStack(alignment: .leading, spacing: 10) {
                             ForEach(endpointGroups) { group in
-                                VStack(alignment: .leading, spacing: 6) {
+                                VStack(alignment: .leading, spacing: 4) {
                                     EndpointHeader(group: group)
 
-                                    VStack(alignment: .leading, spacing: 8) {
-                                        ForEach(group.tunnels) { tunnel in
+                                    VStack(alignment: .leading, spacing: 0) {
+                                        ForEach(Array(group.tunnels.enumerated()), id: \.element.id) { index, tunnel in
+                                            if index > 0 {
+                                                Divider()
+                                                    .padding(.leading, 28)
+                                            }
                                             TunnelRow(
                                                 tunnel: tunnel,
                                                 onStart: { viewModel.startTunnel(named: tunnel.id) },
@@ -675,6 +679,14 @@ struct MenuBarContent: View {
                                             )
                                         }
                                     }
+                                    .background(
+                                        RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                            .fill(Color(nsColor: .controlBackgroundColor))
+                                    )
+                                    .overlay(
+                                        RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                            .stroke(Color.black.opacity(0.035), lineWidth: 1)
+                                    )
                                 }
                             }
                         }
@@ -686,13 +698,13 @@ struct MenuBarContent: View {
                 footer
             }
         }
-        .padding(14)
+        .padding(12)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .background(Color(nsColor: .windowBackgroundColor))
     }
 
     private var header: some View {
-        VStack(alignment: .leading, spacing: 6) {
+        VStack(alignment: .leading, spacing: 5) {
             HStack {
                 if viewModel.editorDraft != nil {
                     Button("Back") {
@@ -702,7 +714,7 @@ struct MenuBarContent: View {
                     .controlSize(.small)
                 } else {
                     Text("Burrow")
-                        .font(.system(size: 15, weight: .semibold))
+                        .font(.system(size: 16, weight: .semibold))
                 }
                 Spacer()
                 if viewModel.editorDraft == nil {
@@ -712,13 +724,15 @@ struct MenuBarContent: View {
                 }
             }
             Text(viewModel.globalMessage)
-                .font(.system(size: 11))
+                .font(.system(size: 10.5))
                 .foregroundStyle(.secondary)
+                .lineLimit(1)
+                .truncationMode(.middle)
         }
     }
 
     private var emptyState: some View {
-        VStack(alignment: .leading, spacing: 8) {
+        VStack(alignment: .leading, spacing: 7) {
             Text("No tunnels saved.")
                 .font(.system(size: 13, weight: .medium))
             Text("Create tunnels with the CLI or edit the central config, then reload here.")
@@ -793,21 +807,61 @@ private struct EndpointHeader: View {
     let group: MenuBarContent.EndpointGroup
 
     var body: some View {
-        HStack(spacing: 6) {
-            Image(systemName: "network")
-                .font(.system(size: 9, weight: .semibold))
-                .foregroundStyle(.secondary)
+        HStack(spacing: 7) {
             Text(verbatim: group.endpoint)
-                .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                .font(.system(size: 10.5, weight: .semibold, design: .monospaced))
                 .foregroundStyle(.secondary)
                 .lineLimit(1)
                 .truncationMode(.middle)
             Spacer(minLength: 4)
-            Text("\(group.tunnels.count)")
-                .font(.system(size: 9, weight: .semibold))
+            EndpointHealthDots(tunnels: group.tunnels)
+        }
+        .padding(.horizontal, 4)
+        .padding(.vertical, 2)
+    }
+}
+
+private struct EndpointHealthDots: View {
+    let tunnels: [MenuBarViewModel.TunnelState]
+
+    var body: some View {
+        HStack(spacing: 4) {
+            if connectedCount > 0 {
+                dot(.green)
+            }
+            if connectingCount > 0 {
+                dot(.orange)
+            }
+            if failedCount > 0 {
+                dot(.red)
+            }
+            Text("\(tunnels.count)")
+                .font(.system(size: 9.5, weight: .semibold))
                 .foregroundStyle(.tertiary)
         }
-        .padding(.horizontal, 2)
+        .help("\(connectedCount) up, \(connectingCount) starting, \(failedCount) failed, \(waitingCount) waiting")
+    }
+
+    private func dot(_ color: Color) -> some View {
+        Circle()
+            .fill(color)
+            .frame(width: 5, height: 5)
+    }
+
+    private var connectedCount: Int {
+        tunnels.filter { $0.connectionState == .connected }.count
+    }
+
+    private var connectingCount: Int {
+        tunnels.filter { $0.connectionState == .connecting }.count
+    }
+
+    private var failedCount: Int {
+        tunnels.filter { $0.connectionState == .failed }.count
+    }
+
+    private var waitingCount: Int {
+        tunnels.filter { $0.connectionState == .disconnected }.count
     }
 }
 
@@ -831,19 +885,19 @@ private struct HealthSummaryPill: View {
     let tunnels: [MenuBarViewModel.TunnelState]
 
     var body: some View {
-        HStack(spacing: 7) {
-            summaryText(count: upCount, label: "up", color: .green)
-            summaryText(count: connectingCount, label: "starting", color: .orange)
-            summaryText(count: failedCount, label: "failed", color: .red)
-            summaryText(count: waitingCount, label: "waiting", color: .gray)
+        HStack(spacing: 8) {
+            summaryText(count: upCount, color: .green)
+            summaryText(count: connectingCount, color: .orange)
+            summaryText(count: failedCount, color: .red)
+            summaryText(count: waitingCount, color: .gray)
         }
-        .padding(.horizontal, 9)
-        .padding(.vertical, 5)
+        .padding(.horizontal, 8)
+        .padding(.vertical, 4)
         .background(
             Capsule(style: .continuous)
                 .fill(Color(nsColor: .controlBackgroundColor))
         )
-        .help("\(tunnels.count) configured")
+        .help("\(upCount) up, \(connectingCount) starting, \(failedCount) failed, \(waitingCount) waiting")
     }
 
     private var upCount: Int {
@@ -862,13 +916,13 @@ private struct HealthSummaryPill: View {
         tunnels.filter { $0.connectionState == .disconnected }.count
     }
 
-    private func summaryText(count: Int, label: String, color: Color) -> some View {
-        HStack(spacing: 3) {
+    private func summaryText(count: Int, color: Color) -> some View {
+        HStack(spacing: 3.5) {
             Circle()
                 .fill(color)
-                .frame(width: 5, height: 5)
-            Text("\(count) \(label)")
-                .font(.system(size: 10.5, weight: .semibold))
+                .frame(width: 5.5, height: 5.5)
+            Text("\(count)")
+                .font(.system(size: 11, weight: .semibold))
                 .foregroundStyle(.secondary)
         }
     }
@@ -887,61 +941,33 @@ struct TunnelRow: View {
     @State private var isDetailsPresented = false
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack(alignment: .top, spacing: 8) {
-                Circle()
-                    .fill(statusColor)
-                    .frame(width: 9, height: 9)
-                    .padding(.top, 4)
+        HStack(alignment: .center, spacing: 9) {
+            Circle()
+                .fill(statusColor)
+                .frame(width: 8, height: 8)
 
-                VStack(alignment: .leading, spacing: 6) {
-                    HStack(alignment: .firstTextBaseline, spacing: 8) {
-                        Text(tunnel.tunnel.name)
-                            .font(.system(size: 13, weight: .semibold))
-                            .lineLimit(1)
-                            .truncationMode(.middle)
-                            .layoutPriority(1)
+            VStack(alignment: .leading, spacing: 4) {
+                Text(tunnel.tunnel.name)
+                    .font(.system(size: 12.5, weight: .semibold))
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                    .layoutPriority(1)
 
-                        Spacer(minLength: 6)
-
-                        HStack(spacing: 5) {
-                            Text("Auto")
-                                .font(.system(size: 9.5, weight: .medium))
-                                .foregroundStyle(.secondary)
-                            Toggle("", isOn: Binding(
-                                get: { tunnel.isConfiguredEnabled },
-                                set: { value in
-                                    onToggleAutoConnect(value)
-                                }
-                            ))
-                            .labelsHidden()
-                            .toggleStyle(.switch)
-                            .controlSize(.mini)
-                        }
-                        failureInfoSlot
-                        rowMenu
-                    }
-
-                    HStack(alignment: .center, spacing: 8) {
-                        routeSummaryView
-
-                        Spacer(minLength: 6)
-
-                        primaryActionButton
-                    }
-                }
+                routeSummaryView
             }
+            .layoutPriority(1)
+
+            Spacer(minLength: 8)
+
+            if failurePresentation != nil {
+                failureInfoSlot
+            }
+            autoConnectButton
+            primaryActionButton
+            rowMenu
         }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 9)
-        .background(
-            RoundedRectangle(cornerRadius: 10, style: .continuous)
-                .fill(Color(nsColor: .controlBackgroundColor))
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: 10, style: .continuous)
-                .stroke(Color.black.opacity(0.04), lineWidth: 1)
-        )
+        .padding(.horizontal, 10)
+        .padding(.vertical, 7)
         .overlay(alignment: .topTrailing) {
             if let presentation = failurePresentation, isFailureTooltipVisible {
                 failureTooltip(presentation)
@@ -981,7 +1007,7 @@ struct TunnelRow: View {
                 .help(fullRouteText(for: forward))
         } else {
             Text(verbatim: compactRouteSummary)
-                .font(.system(size: 10.8, weight: .medium))
+                .font(.system(size: 12, weight: .medium, design: .monospaced))
                 .monospacedDigit()
                 .foregroundStyle(.primary.opacity(0.82))
                 .lineLimit(1)
@@ -1000,12 +1026,8 @@ struct TunnelRow: View {
                     .font(.system(size: 9, weight: .bold))
                     .foregroundStyle(.secondary)
                 Text(verbatim: compactDestinationText(for: forward))
-                Image(systemName: "globe")
-                    .font(.system(size: 10))
-                    .foregroundStyle(.secondary)
-                Text(verbatim: endpointText)
             }
-            .font(.system(size: 10.8, weight: .medium))
+            .font(.system(size: 12, weight: .medium, design: .monospaced))
             .monospacedDigit()
             .foregroundStyle(.primary.opacity(0.82))
             .lineLimit(1)
@@ -1017,12 +1039,8 @@ struct TunnelRow: View {
                     .font(.system(size: 9, weight: .bold))
                     .foregroundStyle(.secondary)
                 Text(verbatim: String(forward.listenPort))
-                Image(systemName: "globe")
-                    .font(.system(size: 10))
-                    .foregroundStyle(.secondary)
-                Text(verbatim: endpointText)
             }
-            .font(.system(size: 10.8, weight: .medium))
+            .font(.system(size: 12, weight: .medium, design: .monospaced))
             .monospacedDigit()
             .foregroundStyle(.primary.opacity(0.82))
             .lineLimit(1)
@@ -1031,12 +1049,8 @@ struct TunnelRow: View {
             HStack(spacing: 4) {
                 Text(verbatim: "SOCKS")
                 Text(verbatim: String(forward.listenPort))
-                Image(systemName: "globe")
-                    .font(.system(size: 10))
-                    .foregroundStyle(.secondary)
-                Text(verbatim: endpointText)
             }
-            .font(.system(size: 10.8, weight: .medium))
+            .font(.system(size: 12, weight: .medium, design: .monospaced))
             .monospacedDigit()
             .foregroundStyle(.primary.opacity(0.82))
             .lineLimit(1)
@@ -1048,11 +1062,11 @@ struct TunnelRow: View {
         tunnel.tunnel.forwards.map { forward in
             switch forward.kind {
             case .local:
-                return "\(String(forward.listenPort)) -> \(compactDestinationText(for: forward)) @ \(endpointText)"
+                return "\(String(forward.listenPort)) -> \(compactDestinationText(for: forward))"
             case .remote:
-                return "\(compactDestinationText(for: forward)) <- \(String(forward.listenPort)) @ \(endpointText)"
+                return "\(compactDestinationText(for: forward)) <- \(String(forward.listenPort))"
             case .dynamic:
-                return "SOCKS \(String(forward.listenPort)) @ \(endpointText)"
+                return "SOCKS \(String(forward.listenPort))"
             }
         }
         .joined(separator: "  •  ")
@@ -1113,13 +1127,18 @@ struct TunnelRow: View {
             Divider()
             Button("Delete", role: .destructive, action: onDelete)
         } label: {
-            Image(systemName: "ellipsis.circle")
-                .font(.system(size: 14, weight: .semibold))
+            Image(systemName: "ellipsis")
+                .font(.system(size: 12.5, weight: .bold))
                 .foregroundStyle(.secondary)
+                .frame(width: 22, height: 22)
+                .background(
+                    Circle()
+                        .stroke(Color.secondary.opacity(0.22), lineWidth: 1)
+                )
         }
         .menuStyle(.borderlessButton)
         .menuIndicator(.hidden)
-        .frame(width: 22, alignment: .trailing)
+        .frame(width: 24, alignment: .trailing)
         .popover(isPresented: $isDetailsPresented, arrowEdge: .trailing) {
             TunnelDetailsPopover(
                 tunnel: tunnel,
@@ -1130,32 +1149,57 @@ struct TunnelRow: View {
         }
     }
 
+    private var autoConnectButton: some View {
+        Button {
+            onToggleAutoConnect(!tunnel.isConfiguredEnabled)
+        } label: {
+            HStack(spacing: 4) {
+                Image(systemName: tunnel.isConfiguredEnabled ? "bolt.fill" : "bolt.slash")
+                    .font(.system(size: 10.5, weight: .semibold))
+                Text("Auto")
+                    .font(.system(size: 10.5, weight: .semibold))
+            }
+            .foregroundStyle(tunnel.isConfiguredEnabled ? Color.accentColor : Color.secondary)
+            .padding(.horizontal, 7)
+            .frame(height: 24)
+            .background(
+                Capsule(style: .continuous)
+                    .fill(tunnel.isConfiguredEnabled ? Color.accentColor.opacity(0.10) : Color.secondary.opacity(0.08))
+            )
+        }
+        .buttonStyle(.plain)
+        .help(tunnel.isConfiguredEnabled ? "Auto-connect enabled" : "Auto-connect disabled")
+    }
+
     @ViewBuilder
     private var primaryActionButton: some View {
-        Button(tunnel.isRunning ? "Stop" : "Connect") {
-            if tunnel.isRunning {
+        if tunnel.isRunning {
+            Button("Stop") {
                 onStop()
-            } else {
+            }
+            .buttonStyle(.bordered)
+            .tint(.red)
+            .controlSize(.small)
+            .frame(width: 64, alignment: .trailing)
+        } else {
+            Button("Connect") {
                 onStart()
             }
+            .buttonStyle(.borderedProminent)
+            .controlSize(.small)
+            .frame(width: 78, alignment: .trailing)
         }
-        .buttonStyle(.borderedProminent)
-        .tint(tunnel.isRunning ? .red : .accentColor)
-        .controlSize(.small)
-        .frame(width: 82, alignment: .trailing)
     }
 
     private var failureInfoSlot: some View {
-        Group {
-            if failurePresentation != nil {
-                Image(systemName: "info.circle.fill")
-                    .font(.system(size: 12, weight: .semibold))
-                    .foregroundStyle(Color(red: 0.68, green: 0.12, blue: 0.10))
-            } else {
-                Color.clear
-            }
-        }
-        .frame(width: 14, height: 14)
+        Image(systemName: "info.circle.fill")
+            .font(.system(size: 11.5, weight: .semibold))
+            .foregroundStyle(Color(red: 0.68, green: 0.12, blue: 0.10))
+            .frame(width: 22, height: 22)
+            .background(
+                Circle()
+                    .fill(Color(red: 0.68, green: 0.12, blue: 0.10).opacity(0.10))
+            )
         .contentShape(Rectangle())
         .onHover { hovering in
             guard failurePresentation != nil else {
