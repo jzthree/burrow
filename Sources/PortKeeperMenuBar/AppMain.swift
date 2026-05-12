@@ -11,7 +11,7 @@ struct BurrowApp: App {
     var body: some Scene {
         MenuBarExtra {
             MenuBarContent(viewModel: viewModel)
-                .frame(width: 400, height: 520)
+                .frame(width: 420, height: 520)
         } label: {
             Label(viewModel.menuBarTitle, systemImage: viewModel.menuBarSymbol)
         }
@@ -959,12 +959,14 @@ struct TunnelRow: View {
 
             Spacer(minLength: 8)
 
-            if failurePresentation != nil {
+            HStack(spacing: 6) {
                 failureInfoSlot
+                autoConnectButton
+                primaryActionButton
+                rowMenu
             }
-            autoConnectButton
-            primaryActionButton
-            rowMenu
+            .frame(width: 194, alignment: .trailing)
+            .layoutPriority(2)
         }
         .padding(.horizontal, 10)
         .padding(.vertical, 7)
@@ -1128,9 +1130,9 @@ struct TunnelRow: View {
             Button("Delete", role: .destructive, action: onDelete)
         } label: {
             Image(systemName: "ellipsis")
-                .font(.system(size: 12.5, weight: .bold))
+                .font(.system(size: 11.5, weight: .bold))
                 .foregroundStyle(.secondary)
-                .frame(width: 22, height: 22)
+                .frame(width: 24, height: 24)
                 .background(
                     Circle()
                         .stroke(Color.secondary.opacity(0.22), lineWidth: 1)
@@ -1138,7 +1140,7 @@ struct TunnelRow: View {
         }
         .menuStyle(.borderlessButton)
         .menuIndicator(.hidden)
-        .frame(width: 24, alignment: .trailing)
+        .frame(width: 26, height: 24, alignment: .trailing)
         .popover(isPresented: $isDetailsPresented, arrowEdge: .trailing) {
             TunnelDetailsPopover(
                 tunnel: tunnel,
@@ -1153,21 +1155,21 @@ struct TunnelRow: View {
         Button {
             onToggleAutoConnect(!tunnel.isConfiguredEnabled)
         } label: {
-            HStack(spacing: 4) {
-                Image(systemName: tunnel.isConfiguredEnabled ? "bolt.fill" : "bolt.slash")
-                    .font(.system(size: 10.5, weight: .semibold))
-                Text("Auto")
-                    .font(.system(size: 10.5, weight: .semibold))
-            }
-            .foregroundStyle(tunnel.isConfiguredEnabled ? Color.accentColor : Color.secondary)
-            .padding(.horizontal, 7)
-            .frame(height: 24)
-            .background(
-                Capsule(style: .continuous)
-                    .fill(tunnel.isConfiguredEnabled ? Color.accentColor.opacity(0.10) : Color.secondary.opacity(0.08))
-            )
+            Text("Auto")
+                .font(.system(size: 10.5, weight: .semibold))
+                .frame(width: 48, height: 24)
+                .foregroundStyle(tunnel.isConfiguredEnabled ? Color.accentColor : Color.secondary)
+                .background(
+                    Capsule(style: .continuous)
+                        .fill(tunnel.isConfiguredEnabled ? Color.accentColor.opacity(0.10) : Color.secondary.opacity(0.08))
+                )
+                .overlay(
+                    Capsule(style: .continuous)
+                        .stroke(tunnel.isConfiguredEnabled ? Color.accentColor.opacity(0.18) : Color.secondary.opacity(0.14), lineWidth: 1)
+                )
         }
         .buttonStyle(.plain)
+        .frame(width: 48, height: 24)
         .help(tunnel.isConfiguredEnabled ? "Auto-connect enabled" : "Auto-connect disabled")
     }
 
@@ -1180,7 +1182,7 @@ struct TunnelRow: View {
             .buttonStyle(.bordered)
             .tint(.red)
             .controlSize(.small)
-            .frame(width: 64, alignment: .trailing)
+            .frame(width: 78, alignment: .trailing)
         } else {
             Button("Connect") {
                 onStart()
@@ -1192,22 +1194,29 @@ struct TunnelRow: View {
     }
 
     private var failureInfoSlot: some View {
-        Image(systemName: "info.circle.fill")
-            .font(.system(size: 11.5, weight: .semibold))
-            .foregroundStyle(Color(red: 0.68, green: 0.12, blue: 0.10))
-            .frame(width: 22, height: 22)
-            .background(
-                Circle()
-                    .fill(Color(red: 0.68, green: 0.12, blue: 0.10).opacity(0.10))
-            )
+        Group {
+            if failurePresentation != nil {
+                Image(systemName: "info.circle.fill")
+                    .font(.system(size: 11.5, weight: .semibold))
+                    .foregroundStyle(Color(red: 0.68, green: 0.12, blue: 0.10))
+                    .frame(width: 24, height: 24)
+                    .background(
+                        Circle()
+                            .fill(Color(red: 0.68, green: 0.12, blue: 0.10).opacity(0.10))
+                    )
+            } else {
+                Color.clear
+            }
+        }
+        .frame(width: 24, height: 24)
         .contentShape(Rectangle())
         .onHover { hovering in
-            guard failurePresentation != nil else {
+            if failurePresentation == nil {
                 isFailureTooltipVisible = false
-                return
-            }
-            withAnimation(.easeInOut(duration: 0.08)) {
-                isFailureTooltipVisible = hovering
+            } else {
+                withAnimation(.easeInOut(duration: 0.08)) {
+                    isFailureTooltipVisible = hovering
+                }
             }
         }
     }
