@@ -1,0 +1,154 @@
+<svg width="920" height="760" viewBox="0 0 920 760" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="page" x1="0" y1="0" x2="920" y2="760" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#F8FAF7"/>
+      <stop offset="1" stop-color="#EDF4F1"/>
+    </linearGradient>
+    <filter id="windowShadow" x="47" y="25" width="826" height="704" color-interpolation-filters="sRGB" filterUnits="userSpaceOnUse">
+      <feDropShadow dx="0" dy="18" stdDeviation="24" flood-color="#38504A" flood-opacity="0.18"/>
+      <feDropShadow dx="0" dy="2" stdDeviation="5" flood-color="#1E2B28" flood-opacity="0.10"/>
+    </filter>
+    <filter id="softShadow" x="-20%" y="-20%" width="140%" height="140%" color-interpolation-filters="sRGB">
+      <feDropShadow dx="0" dy="3" stdDeviation="6" flood-color="#263B36" flood-opacity="0.08"/>
+    </filter>
+    <style>
+      .ui { font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", "Helvetica Neue", Arial, sans-serif; }
+      .mono { font-family: "SF Mono", ui-monospace, Menlo, Consolas, monospace; }
+      .title { font-size: 32px; font-weight: 760; letter-spacing: -0.8px; fill: #111312; }
+      .message { font-size: 18px; font-weight: 500; fill: #6D7470; }
+      .endpoint { font-size: 17px; font-weight: 680; fill: #767D79; }
+      .endpointCount { font-size: 16px; font-weight: 680; fill: #9CA19E; }
+      .name { font-size: 25px; font-weight: 760; letter-spacing: -0.35px; fill: #121514; }
+      .route { font-size: 22px; font-weight: 560; fill: #5D6560; }
+      .chipText { font-size: 17px; font-weight: 720; }
+      .buttonText { font-size: 18px; font-weight: 720; }
+      .footerText { font-size: 20px; font-weight: 650; fill: #121514; }
+    </style>
+  </defs>
+
+  <rect width="920" height="760" rx="36" fill="url(#page)"/>
+
+  <g filter="url(#windowShadow)">
+    <rect x="72" y="48" width="776" height="656" rx="28" fill="#FBFCFB"/>
+    <rect x="72.5" y="48.5" width="775" height="655" rx="27.5" stroke="#DDE4E0"/>
+  </g>
+
+  <g class="ui">
+    <text x="104" y="105" class="title">Burrow</text>
+    <text x="104" y="148" class="message">All tunnels visible, restartable, and remembered.</text>
+
+    <circle cx="674" cy="84" r="5.5" fill="#08C15D"/>
+    <text x="688" y="91" font-size="17" font-weight="720" fill="#6D7470">3</text>
+    <circle cx="728" cy="84" r="5.5" fill="#FF8700"/>
+    <text x="742" y="91" font-size="17" font-weight="720" fill="#6D7470">1</text>
+    <circle cx="782" cy="84" r="5.5" fill="#FF0A33"/>
+    <text x="796" y="91" font-size="17" font-weight="720" fill="#6D7470">1</text>
+
+    <line x1="104" y1="178" x2="816" y2="178" stroke="#E2E7E4" stroke-width="1.5"/>
+
+    <g transform="translate(104 212)">
+      <rect x="0" y="-9" width="15" height="11" rx="2" stroke="#A5AAA7" stroke-width="1.5"/>
+      <line x1="3" y1="-5" x2="12" y2="-5" stroke="#A5AAA7" stroke-width="1.2"/>
+      <line x1="3" y1="-1" x2="12" y2="-1" stroke="#A5AAA7" stroke-width="1.2"/>
+      <text x="25" y="0" class="mono endpoint">workstation.local:3333</text>
+      <circle cx="660" cy="-6" r="5.5" fill="#08C15D"/>
+      <text x="676" y="0" class="endpointCount">1</text>
+
+      <g filter="url(#softShadow)">
+        <rect x="0" y="20" width="712" height="92" rx="17" fill="#FFFFFF"/>
+        <rect x="0.5" y="20.5" width="711" height="91" rx="16.5" stroke="#ECEFED"/>
+      </g>
+      <circle cx="24" cy="66" r="8" fill="#08C15D"/>
+      <text x="52" y="58" class="name">web-dashboard</text>
+      <text x="52" y="88" class="mono route">8875 -&gt; 3000</text>
+
+      <g transform="translate(380 48)">
+        <rect width="104" height="38" rx="19" fill="#EFF6FF" stroke="#CFE2FF" stroke-width="1.6"/>
+        <path d="M30.1 10L21.5 23.4H30L26.8 32L37.4 17.8H28.6L30.1 10Z" fill="#087DFF"/>
+        <text x="47" y="25" class="chipText" fill="#087DFF">Auto</text>
+      </g>
+      <g transform="translate(512 47)">
+        <rect width="112" height="40" rx="20" fill="#F8FAF9" stroke="#E3E9E6" stroke-width="1.4"/>
+        <text x="37" y="26" class="buttonText" fill="#BF4545">Stop</text>
+      </g>
+      <text x="663" y="75" font-size="28" font-weight="800" fill="#676E6A">...</text>
+    </g>
+
+    <g transform="translate(104 360)">
+      <rect x="0" y="-9" width="15" height="11" rx="2" stroke="#A5AAA7" stroke-width="1.5"/>
+      <line x1="3" y1="-5" x2="12" y2="-5" stroke="#A5AAA7" stroke-width="1.2"/>
+      <line x1="3" y1="-1" x2="12" y2="-1" stroke="#A5AAA7" stroke-width="1.2"/>
+      <text x="25" y="0" class="mono endpoint">bastion.example.net:4444</text>
+      <circle cx="648" cy="-6" r="5.5" fill="#08C15D"/>
+      <circle cx="666" cy="-6" r="5.5" fill="#FF0A33"/>
+      <text x="684" y="0" class="endpointCount">2</text>
+
+      <g filter="url(#softShadow)">
+        <rect x="0" y="20" width="712" height="150" rx="17" fill="#FFFFFF"/>
+        <rect x="0.5" y="20.5" width="711" height="149" rx="16.5" stroke="#ECEFED"/>
+      </g>
+
+      <circle cx="24" cy="66" r="8" fill="#FF0A33"/>
+      <text x="52" y="58" class="name">notebook-api</text>
+      <text x="52" y="88" class="mono route">8866 -&gt; 3000</text>
+      <circle cx="334" cy="66" r="22" fill="#FBECEC"/>
+      <circle cx="334" cy="66" r="12" fill="#BA2A2A"/>
+      <text x="330" y="72" font-size="16" font-weight="800" fill="#FFFFFF">i</text>
+      <g transform="translate(380 48)">
+        <rect width="104" height="38" rx="19" fill="#EFF6FF" stroke="#CFE2FF" stroke-width="1.6"/>
+        <path d="M30.1 10L21.5 23.4H30L26.8 32L37.4 17.8H28.6L30.1 10Z" fill="#087DFF"/>
+        <text x="47" y="25" class="chipText" fill="#087DFF">Auto</text>
+      </g>
+      <g transform="translate(512 47)">
+        <rect width="112" height="40" rx="20" fill="#F8FAF9" stroke="#E3E9E6" stroke-width="1.4"/>
+        <text x="37" y="26" class="buttonText" fill="#BF4545">Stop</text>
+      </g>
+      <text x="663" y="75" font-size="28" font-weight="800" fill="#676E6A">...</text>
+
+      <line x1="52" y1="106" x2="712" y2="106" stroke="#E9EEEB" stroke-width="1.2"/>
+      <circle cx="24" cy="132" r="8" fill="#08C15D"/>
+      <text x="52" y="124" class="name">admin-console</text>
+      <text x="52" y="154" class="mono route">8876 -&gt; 8888</text>
+      <g transform="translate(380 114)">
+        <rect width="104" height="38" rx="19" fill="#EFF6FF" stroke="#CFE2FF" stroke-width="1.6"/>
+        <path d="M30.1 10L21.5 23.4H30L26.8 32L37.4 17.8H28.6L30.1 10Z" fill="#087DFF"/>
+        <text x="47" y="25" class="chipText" fill="#087DFF">Auto</text>
+      </g>
+      <g transform="translate(512 113)">
+        <rect width="112" height="40" rx="20" fill="#F8FAF9" stroke="#E3E9E6" stroke-width="1.4"/>
+        <text x="37" y="26" class="buttonText" fill="#BF4545">Stop</text>
+      </g>
+      <text x="663" y="141" font-size="28" font-weight="800" fill="#676E6A">...</text>
+    </g>
+
+    <g transform="translate(104 594)">
+      <rect x="0" y="-9" width="15" height="11" rx="2" stroke="#A5AAA7" stroke-width="1.5"/>
+      <line x1="3" y1="-5" x2="12" y2="-5" stroke="#A5AAA7" stroke-width="1.2"/>
+      <line x1="3" y1="-1" x2="12" y2="-1" stroke="#A5AAA7" stroke-width="1.2"/>
+      <text x="25" y="0" class="mono endpoint">cluster.example.edu:22</text>
+      <circle cx="660" cy="-6" r="5.5" fill="#FF0A33"/>
+      <text x="676" y="0" class="endpointCount">1</text>
+
+      <g filter="url(#softShadow)">
+        <rect x="0" y="20" width="712" height="92" rx="17" fill="#FFFFFF"/>
+        <rect x="0.5" y="20.5" width="711" height="91" rx="16.5" stroke="#ECEFED"/>
+      </g>
+      <circle cx="24" cy="66" r="8" fill="#FF0A33"/>
+      <text x="52" y="58" class="name">cluster-web</text>
+      <text x="52" y="88" class="mono route">4000 -&gt; 172.18.2...</text>
+      <circle cx="334" cy="66" r="22" fill="#FBECEC"/>
+      <circle cx="334" cy="66" r="12" fill="#BA2A2A"/>
+      <text x="330" y="72" font-size="16" font-weight="800" fill="#FFFFFF">i</text>
+      <g transform="translate(380 48)">
+        <rect width="104" height="38" rx="19" fill="#EFF6FF" stroke="#CFE2FF" stroke-width="1.6"/>
+        <path d="M30.1 10L21.5 23.4H30L26.8 32L37.4 17.8H28.6L30.1 10Z" fill="#087DFF"/>
+        <text x="47" y="25" class="chipText" fill="#087DFF">Auto</text>
+      </g>
+      <g transform="translate(512 47)">
+        <rect width="112" height="40" rx="20" fill="#0A7CFF"/>
+        <text x="24" y="26" class="buttonText" fill="#FFFFFF">Connect</text>
+      </g>
+      <text x="663" y="75" font-size="28" font-weight="800" fill="#676E6A">...</text>
+    </g>
+  </g>
+</svg>
