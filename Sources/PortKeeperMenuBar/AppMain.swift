@@ -122,17 +122,17 @@ final class MenuBarViewModel: ObservableObject {
             let existingStatesByName = Dictionary(uniqueKeysWithValues: tunnels.map { ($0.id, $0) })
             tunnels = config.tunnels.map { tunnel in
                 let existingState = existingStatesByName[tunnel.name]
+                let isRunning = running.contains(tunnel.name)
                 return TunnelState(
                     id: tunnel.name,
                     tunnel: tunnel,
                     isConfiguredEnabled: tunnel.enabled,
-                    isRunning: running.contains(tunnel.name),
-                    connectionState: running.contains(tunnel.name) ? .connecting : .disconnected,
-                    lastMessage: existingState?.lastMessage ?? (running.contains(tunnel.name) ? "Connecting" : (tunnel.enabled ? "Auto-connect enabled" : "Auto-connect disabled")),
+                    isRunning: isRunning,
+                    connectionState: connectionStateAfterReload(existingState: existingState, isRunning: isRunning),
+                    lastMessage: lastMessageAfterReload(existingState: existingState, tunnel: tunnel, isRunning: isRunning),
                     recentLogs: existingState?.recentLogs ?? []
                 )
             }
-            .sorted { $0.tunnel.name < $1.tunnel.name }
 
             if tunnels.isEmpty {
                 globalMessage = "No tunnels configured yet."
@@ -144,6 +144,30 @@ final class MenuBarViewModel: ObservableObject {
             tunnels = []
             globalMessage = "Failed to load config: \(error.localizedDescription)"
         }
+    }
+
+    private func connectionStateAfterReload(existingState: TunnelState?, isRunning: Bool) -> ConnectionState {
+        if isRunning {
+            return existingState?.connectionState ?? .connecting
+        }
+
+        if existingState?.connectionState == .failed {
+            return .failed
+        }
+
+        return .disconnected
+    }
+
+    private func lastMessageAfterReload(existingState: TunnelState?, tunnel: TunnelConfig, isRunning: Bool) -> String {
+        if isRunning {
+            return existingState?.lastMessage ?? "Connecting"
+        }
+
+        if existingState?.connectionState == .failed, let lastMessage = existingState?.lastMessage {
+            return lastMessage
+        }
+
+        return tunnel.enabled ? "Auto-connect enabled" : "Auto-connect disabled"
     }
 
     func reloadConfig() {
@@ -352,13 +376,12 @@ final class MenuBarViewModel: ObservableObject {
 
             if let originalName, originalName != tunnel.name {
                 pendingOldTask = tasks[originalName]
-                _ = try store.remove(name: originalName)
                 if tasks[originalName] != nil {
                     stopTunnel(named: originalName)
                 }
             }
 
-            try store.upsert(tunnel)
+            try store.upsert(tunnel, replacing: originalName)
             loadConfig()
 
             if wasRunning {
@@ -832,13 +855,20 @@ struct MenuBarContent: View {
     }
 
     private var endpointGroups: [EndpointGroup] {
-        Dictionary(grouping: viewModel.tunnels) { tunnel in
-            "\(tunnel.tunnel.host):\(String(tunnel.tunnel.sshPort))"
+        var groups: [EndpointGroup] = []
+
+        for tunnel in viewModel.tunnels {
+            let endpoint = "\(tunnel.tunnel.host):\(String(tunnel.tunnel.sshPort))"
+            if let index = groups.firstIndex(where: { $0.endpoint == endpoint }) {
+                var tunnels = groups[index].tunnels
+                tunnels.append(tunnel)
+                groups[index] = EndpointGroup(endpoint: endpoint, tunnels: tunnels)
+            } else {
+                groups.append(EndpointGroup(endpoint: endpoint, tunnels: [tunnel]))
+            }
         }
-        .map { endpoint, tunnels in
-            EndpointGroup(endpoint: endpoint, tunnels: tunnels.sorted { $0.tunnel.name < $1.tunnel.name })
-        }
-        .sorted { $0.endpoint.localizedStandardCompare($1.endpoint) == .orderedAscending }
+
+        return groups
     }
 }
 

@@ -48,14 +48,19 @@ public struct ConfigStore: Sendable {
         try data.write(to: configURL, options: .atomic)
     }
 
-    public func upsert(_ tunnel: TunnelConfig) throws {
+    public func upsert(_ tunnel: TunnelConfig, replacing originalName: String? = nil) throws {
         var config = try load()
-        if let index = config.tunnels.firstIndex(where: { $0.name == tunnel.name }) {
+        let replacementName = originalName ?? tunnel.name
+        if let index = config.tunnels.firstIndex(where: { $0.name == replacementName }) {
+            config.tunnels[index] = tunnel
+            for duplicateIndex in config.tunnels.indices.reversed() where duplicateIndex != index && config.tunnels[duplicateIndex].name == tunnel.name {
+                config.tunnels.remove(at: duplicateIndex)
+            }
+        } else if let index = config.tunnels.firstIndex(where: { $0.name == tunnel.name }) {
             config.tunnels[index] = tunnel
         } else {
             config.tunnels.append(tunnel)
         }
-        config.tunnels.sort { $0.name < $1.name }
         try save(config)
     }
 

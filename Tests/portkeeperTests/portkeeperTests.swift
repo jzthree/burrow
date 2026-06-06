@@ -66,6 +66,42 @@ final class EventRecorder: @unchecked Sendable {
     #expect(config.tunnels.first?.forwards.first?.listenPort == 16379)
 }
 
+@Test func configUpsertPreservesExistingTunnelOrder() async throws {
+    let tempDirectory = FileManager.default.temporaryDirectory
+        .appendingPathComponent(UUID().uuidString, isDirectory: true)
+    let configURL = tempDirectory.appendingPathComponent("config.json")
+    let store = ConfigStore(configURL: configURL)
+
+    try store.save(AppConfig(tunnels: [
+        TunnelConfig(name: "b-web", host: "bastion-b.example.com", forwards: []),
+        TunnelConfig(name: "a-web", host: "bastion-a.example.com", forwards: []),
+        TunnelConfig(name: "c-web", host: "bastion-c.example.com", forwards: []),
+    ]))
+
+    try store.upsert(TunnelConfig(name: "a-web", host: "edited.example.com", forwards: []))
+
+    let names = try store.load().tunnels.map(\.name)
+    #expect(names == ["b-web", "a-web", "c-web"])
+}
+
+@Test func configUpsertRenamePreservesOriginalSlot() async throws {
+    let tempDirectory = FileManager.default.temporaryDirectory
+        .appendingPathComponent(UUID().uuidString, isDirectory: true)
+    let configURL = tempDirectory.appendingPathComponent("config.json")
+    let store = ConfigStore(configURL: configURL)
+
+    try store.save(AppConfig(tunnels: [
+        TunnelConfig(name: "first", host: "first.example.com", forwards: []),
+        TunnelConfig(name: "old-name", host: "old.example.com", forwards: []),
+        TunnelConfig(name: "last", host: "last.example.com", forwards: []),
+    ]))
+
+    try store.upsert(TunnelConfig(name: "new-name", host: "new.example.com", forwards: []), replacing: "old-name")
+
+    let names = try store.load().tunnels.map(\.name)
+    #expect(names == ["first", "new-name", "last"])
+}
+
 @Test func supervisorMarksPermissionDeniedAsAuthenticationFailure() async throws {
     let tempDirectory = FileManager.default.temporaryDirectory
         .appendingPathComponent(UUID().uuidString, isDirectory: true)
