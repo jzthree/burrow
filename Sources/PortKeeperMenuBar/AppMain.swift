@@ -11,7 +11,6 @@ struct BurrowApp: App {
     var body: some Scene {
         MenuBarExtra {
             MenuBarContent(viewModel: viewModel)
-                .frame(width: 450, height: 560)
         } label: {
             MenuBarLabel(viewModel: viewModel)
         }
@@ -682,6 +681,8 @@ final class TunnelEventBridge: @unchecked Sendable {
 
 struct MenuBarContent: View {
     @ObservedObject var viewModel: MenuBarViewModel
+    private let menuWidth: CGFloat = 450
+    private let minimumMenuHeight: CGFloat = 560
 
     struct EndpointGroup: Identifiable {
         let endpoint: String
@@ -761,7 +762,43 @@ struct MenuBarContent: View {
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .frame(width: menuWidth, height: adaptiveMenuHeight)
         .background(Color(nsColor: .windowBackgroundColor))
+    }
+
+    private var adaptiveMenuHeight: CGFloat {
+        min(maximumMenuHeight, max(minimumMenuHeight, preferredMenuHeight))
+    }
+
+    private var maximumMenuHeight: CGFloat {
+        let mouseLocation = NSEvent.mouseLocation
+        let activeScreen = NSScreen.screens.first { screen in
+            NSMouseInRect(mouseLocation, screen.frame, false)
+        } ?? NSScreen.main
+        let visibleHeight = activeScreen?.visibleFrame.height ?? 700
+        return floor(visibleHeight * 0.80)
+    }
+
+    private var preferredMenuHeight: CGFloat {
+        if viewModel.editorDraft != nil {
+            return 720
+        }
+
+        guard !viewModel.tunnels.isEmpty else {
+            return minimumMenuHeight
+        }
+
+        let listHeight = endpointGroups.reduce(CGFloat(0)) { total, group in
+            let tunnelCount = CGFloat(group.tunnels.count)
+            let dividerHeight = CGFloat(max(group.tunnels.count - 1, 0))
+            let groupHeaderAndSpacing: CGFloat = 32
+            let rowHeight: CGFloat = 54
+            let interGroupSpacing: CGFloat = 10
+            return total + groupHeaderAndSpacing + (tunnelCount * rowHeight) + dividerHeight + interGroupSpacing
+        }
+
+        let headerAndFooterChrome: CGFloat = 166
+        return headerAndFooterChrome + listHeight
     }
 
     private var header: some View {
