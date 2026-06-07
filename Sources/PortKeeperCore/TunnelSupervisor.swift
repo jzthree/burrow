@@ -206,23 +206,9 @@ public final class TunnelSupervisor: @unchecked Sendable {
         }
 
         let deadline = Date().addingTimeInterval(TimeInterval(max(tunnel.serverAliveInterval, 10)))
-        let stableDuration: TimeInterval = 1.5
         while process.isRunning && runState.currentDiagnostic() == nil && Date() < deadline {
             if probeTargets.contains(where: { processOwnsListener(process, port: $0.1) && canConnect(host: $0.0, port: $0.1) }) {
-                let stableUntil = Date().addingTimeInterval(stableDuration)
-                var remainedHealthy = true
-
-                while process.isRunning && runState.currentDiagnostic() == nil && Date() < stableUntil {
-                    if !probeTargets.contains(where: { processOwnsListener(process, port: $0.1) && canConnect(host: $0.0, port: $0.1) }) {
-                        remainedHealthy = false
-                        break
-                    }
-                    usleep(150_000)
-                }
-
-                if remainedHealthy && process.isRunning && runState.currentDiagnostic() == nil {
-                    return true
-                }
+                return true
             }
             usleep(200_000)
         }
