@@ -100,6 +100,15 @@ final class MenuBarViewModel: ObservableObject {
     }
     @Published var importCandidates: [SSHConfigImportCandidate]?
     @Published private(set) var launchAtLoginEnabled = false
+    /// When true, an intentional Quit leaves the VPN and tunnels running and
+    /// the app re-adopts them on next launch. When false (default), Quit tears
+    /// everything down. A crash/kill always leaves them running regardless.
+    @Published var keepRunningAfterQuit: Bool {
+        didSet {
+            UserDefaults.standard.set(keepRunningAfterQuit, forKey: Self.keepRunningKey)
+        }
+    }
+    private static let keepRunningKey = "keepRunningAfterQuit"
     private(set) var sshConfigHosts: [SSHConfigHost] = []
 
     private var editorWindowController: EditorWindowController?
@@ -124,6 +133,7 @@ final class MenuBarViewModel: ObservableObject {
     private var tunnelPromptAllowed: [String: Bool] = [:]
 
     init() {
+        keepRunningAfterQuit = UserDefaults.standard.bool(forKey: Self.keepRunningKey)
         loadConfig()
         sshConfigHosts = SSHConfigParser.parse()
         refreshLaunchAtLoginState()
@@ -146,9 +156,46 @@ final class MenuBarViewModel: ObservableObject {
             object: nil,
             queue: .main
         ) { [weak self] _ in
-            Task { @MainActor [weak self] in
-                self?.stopAll()
-                self?.stopAllGateways()
+            // willTerminate fires only on a clean exit (Quit, ⌘Q, logout) — not
+            // on a crash/SIGKILL — so this is exactly "intentional close".
+            MainActor.assumeIsolated {
+                self?.performShutdownTeardown()
+            }
+        }
+    }
+
+    /// Synchronously tears down tunnels and VPN gateways on an intentional
+    /// quit (unless the user opted to keep them running). Must be synchronous:
+    /// child ssh/openconnect processes survive the parent otherwise, and async
+    /// cleanup wouldn't finish before the app exits.
+    private func performShutdownTeardown() {
+        guard !keepRunningAfterQuit else {
+            return
+        }
+
+        // Cancelling a supervisor task runs its cancellation handler, which
+        // SIGTERMs the launched process synchronously.
+        for id in Array(tasks.keys) {
+            tasks[id]?.cancel()
+            tasks[id] = nil
+        }
+        for id in Array(gatewayTasks.keys) {
+            gatewayTasks[id]?.cancel()
+            gatewayTasks[id] = nil
+        }
+
+        guard let config = try? store.load() else {
+            return
+        }
+        // Kill VPN processes for every configured gateway — this also catches
+        // adopted/orphaned sessions that have no supervisor task to cancel.
+        for gateway in config.gateways {
+            GatewayPortReclaimer.killGatewayProcesses(socksPort: gateway.socksPort, server: gateway.server)
+        }
+        // Belt-and-suspenders for any ssh that outlived its SIGTERM.
+        for tunnel in config.tunnels {
+            if let prepared = try? preparedTunnelForLaunch(tunnel) {
+                try? PortKeeperRuntimeRegistry.reclaimOwnedProcess(for: prepared)
             }
         }
     }
@@ -595,8 +642,8 @@ final class MenuBarViewModel: ObservableObject {
     }
 
     func quit() {
-        stopAll()
-        stopAllGateways()
+        // Teardown happens in the willTerminate handler (gated by the
+        // keep-running setting), which also covers ⌘Q and logout.
         NSApp.terminate(nil)
     }
 
@@ -1823,6 +1870,10 @@ struct MenuBarContent: View {
                     Toggle("Start at Login", isOn: Binding(
                         get: { viewModel.launchAtLoginEnabled },
                         set: { viewModel.setLaunchAtLogin($0) }
+                    ))
+                    Toggle("Keep VPN & Tunnels Running After Quit", isOn: Binding(
+                        get: { viewModel.keepRunningAfterQuit },
+                        set: { viewModel.keepRunningAfterQuit = $0 }
                     ))
                     if viewModel.hasSSHInclude {
                         Button("Copy SSH Config Include Line") {

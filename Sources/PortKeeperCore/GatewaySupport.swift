@@ -233,6 +233,50 @@ public enum GatewayPortReclaimer {
         }
     }
 
+    /// Fully tears down a gateway's processes: the ocproxy holding the SOCKS
+    /// port and the openconnect process for the server (its parent, which
+    /// isn't itself listening on the port). Used for intentional shutdown.
+    public static func killGatewayProcesses(socksPort: Int, server: String, logger: @Sendable (String) -> Void = { _ in }) {
+        reclaimStaleListeners(port: socksPort, logger: logger)
+        for pid in openconnectPIDs(matchingServer: server) {
+            logger("terminating openconnect (pid \(pid)) for \(server)")
+            kill(pid, SIGTERM)
+            usleep(300_000)
+            if kill(pid, 0) == 0 {
+                kill(pid, SIGKILL)
+            }
+        }
+    }
+
+    /// openconnect processes whose argument list mentions the server host.
+    private static func openconnectPIDs(matchingServer server: String) -> [pid_t] {
+        let ps = Process()
+        ps.executableURL = URL(fileURLWithPath: "/bin/ps")
+        ps.arguments = ["-ax", "-o", "pid=,command="]
+        let pipe = Pipe()
+        ps.standardOutput = pipe
+        ps.standardError = Pipe()
+        do {
+            try ps.run()
+            ps.waitUntilExit()
+        } catch {
+            return []
+        }
+        let output = String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+        var pids: [pid_t] = []
+        for line in output.split(whereSeparator: \.isNewline) {
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            guard trimmed.contains("openconnect"), trimmed.contains(server) else {
+                continue
+            }
+            if let pidString = trimmed.split(separator: " ", maxSplits: 1).first,
+               let pid = pid_t(pidString) {
+                pids.append(pid)
+            }
+        }
+        return pids
+    }
+
     private static func listeningPIDs(port: Int) -> [pid_t] {
         let lsof = Process()
         lsof.executableURL = URL(fileURLWithPath: "/usr/sbin/lsof")
