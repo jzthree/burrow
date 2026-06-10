@@ -159,12 +159,12 @@ final class MenuBarViewModel: ObservableObject {
     }
 
     var menuBarTitle: String {
-        let runningCount = tunnels.filter(\.isRunning).count
-        return runningCount > 0 ? "Burrow \(runningCount)" : "Burrow"
+        let connectedCount = tunnels.filter { $0.connectionState == .connected }.count
+        return connectedCount > 0 ? "Burrow \(connectedCount)" : "Burrow"
     }
 
     var isAnyTunnelRunning: Bool {
-        tunnels.contains(where: \.isRunning)
+        tunnels.contains { $0.connectionState == .connected }
     }
 
     func loadConfig() {
@@ -1070,6 +1070,20 @@ final class MenuBarViewModel: ObservableObject {
     fileprivate func markGatewayConnected(named name: String) {
         samlSessionConnectedAt[name] = Date()
         samlReauthAttempts[name] = 0
+
+        // The gateway may have come up after a tunnel's wait-for-gateway window
+        // expired (slow SAML / manual connect). Re-launch its dependent tunnels
+        // that are still trying — enabled, not running, and not cleanly stopped
+        // by the user (which leaves them .disconnected).
+        let dependents = tunnels.filter {
+            $0.tunnel.gateway == name
+                && $0.isConfiguredEnabled
+                && !$0.isRunning
+                && $0.connectionState != .disconnected
+        }
+        for dependent in dependents {
+            startTunnel(named: dependent.id, allowPasswordPrompt: false)
+        }
     }
 
     fileprivate func finishGateway(named name: String) {
