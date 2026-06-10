@@ -999,21 +999,20 @@ final class MenuBarViewModel: ObservableObject {
             return
         }
 
-        // An open port alone isn't proof of health: it could be an orphaned
-        // ocproxy from a dead session. Trust it only when we own the gateway.
-        if gatewayTasks[gatewayName] != nil && PortProbe.canConnect(host: "127.0.0.1", port: gatewayConfig.socksPort) {
-            launchPreparedTunnel(prepared)
-            return
-        }
-
+        // startGateway is a no-op when the gateway already runs; calling it
+        // unconditionally covers both "bring it up" and "already up."
         guard startGateway(named: gatewayName, allowPasswordPrompt: allowGatewayPrompt) else {
             updateState(for: prepared.name, isRunning: false, state: .failed, message: "Gateway \(gatewayName) is not running")
             return
         }
 
+        let socksPort = gatewayConfig.socksPort
+        let targetHost = prepared.tunnel.host
+        let targetPort = prepared.tunnel.sshPort
+
         updateState(for: prepared.name, isRunning: false, state: .connecting, message: "Waiting for gateway \(gatewayName)")
         Task { @MainActor [weak self] in
-            let deadline = Date().addingTimeInterval(150)
+            let deadline = Date().addingTimeInterval(180)
             while Date() < deadline {
                 guard let self else {
                     return
@@ -1025,11 +1024,19 @@ final class MenuBarViewModel: ObservableObject {
                     self.updateState(for: prepared.name, isRunning: false, state: .failed, message: "Gateway \(gatewayName) did not connect")
                     return
                 }
-                if PortProbe.canConnect(host: "127.0.0.1", port: gatewayConfig.socksPort) {
+                // Readiness = the proxy can resolve and reach the tunnel's host,
+                // not merely that ocproxy's listener is open. ocproxy accepts
+                // connections seconds before the VPN's DNS is usable; launching
+                // ssh in that window fails as "could not resolve hostname" and
+                // shows up as a DNS error.
+                let reachable = await Task.detached {
+                    SOCKSProbe.canReach(proxyPort: socksPort, targetHost: targetHost, targetPort: targetPort)
+                }.value
+                if reachable {
                     self.launchPreparedTunnel(prepared)
                     return
                 }
-                try? await Task.sleep(for: .milliseconds(500))
+                try? await Task.sleep(for: .milliseconds(800))
             }
             self?.updateState(for: prepared.name, isRunning: false, state: .failed, message: "Timed out waiting for gateway \(gatewayName)")
         }
