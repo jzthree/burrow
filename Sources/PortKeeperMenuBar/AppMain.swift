@@ -839,7 +839,7 @@ final class MenuBarViewModel: ObservableObject {
                 // and headless auto-starts never show one at all.
                 let policy: GPSAMLAuthenticator.InteractionPolicy = allowPasswordPrompt
                     ? .showAfter(2.5)
-                    : .silentOnly(25)
+                    : .silentOnly(45)
                 updateGatewayState(for: name, isRunning: false, state: .connecting, message: "Signing in (SAML)")
                 let authenticator = GPSAMLAuthenticator(gateway: gateway)
                 activeSAMLAuthenticators[name] = authenticator
