@@ -22,8 +22,12 @@ command -v swift >/dev/null 2>&1 || fail "swift not found — install the Xcode 
 
 if [ -d "$SRC_DIR/.git" ]; then
   echo "Updating Burrow source in $SRC_DIR..."
-  git -C "$SRC_DIR" pull --ff-only
-else
+  if ! git -C "$SRC_DIR" pull --ff-only; then
+    echo "Update could not fast-forward (history changed upstream); re-cloning..."
+    rm -rf "$SRC_DIR"
+  fi
+fi
+if [ ! -d "$SRC_DIR/.git" ]; then
   echo "Cloning Burrow into $SRC_DIR..."
   mkdir -p "$(dirname "$SRC_DIR")"
   git clone --depth 1 "$REPO_URL" "$SRC_DIR"
