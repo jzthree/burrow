@@ -109,6 +109,7 @@ final class MenuBarViewModel: ObservableObject {
     private var pendingGatewayCredentialSaves: [String: PendingCredentialSave] = [:]
     private var invalidGatewayCredentialKeys: Set<TunnelCredentialKey> = []
     private var activeSAMLAuthenticators: [String: GPSAMLAuthenticator] = [:]
+    private var toolInstallWatchTask: Task<Void, Never>?
     private var hasStartedAutoConnect = false
     private var pendingCredentialSaves: [String: PendingCredentialSave] = [:]
     private var activeCredentialSources: [String: CredentialSource] = [:]
@@ -812,6 +813,20 @@ final class MenuBarViewModel: ObservableObject {
             return false
         }
 
+        let missingTools = GatewayToolsInstaller.missingTools
+        if !missingTools.isEmpty {
+            let missingList = missingTools.joined(separator: ", ")
+            guard allowPasswordPrompt else {
+                updateGatewayState(for: name, isRunning: false, state: .failed, message: "\(missingList) not installed — click Connect")
+                return false
+            }
+            updateGatewayState(for: name, isRunning: false, state: .failed, message: "\(missingList) not installed")
+            if GatewayToolsInstaller.promptAndInstall(missing: missingTools) {
+                watchForToolInstall(thenStart: name)
+            }
+            return false
+        }
+
         if gateway.usesSAML {
             guard allowPasswordPrompt else {
                 updateGatewayState(for: name, isRunning: false, state: .failed, message: "SAML sign-in needed — click Connect")
@@ -877,6 +892,28 @@ final class MenuBarViewModel: ObservableObject {
 
         spawnGatewaySupervisor(gateway, credential: credential, pendingSave: pendingSave)
         return true
+    }
+
+    /// Polls until the Homebrew install finishes, then connects the gateway.
+    private func watchForToolInstall(thenStart name: String) {
+        toolInstallWatchTask?.cancel()
+        updateGatewayState(for: name, isRunning: false, state: .connecting, message: "Waiting for Homebrew install to finish")
+        globalMessage = "Installing VPN tools in Terminal; \(name) connects when done."
+        toolInstallWatchTask = Task { @MainActor [weak self] in
+            let deadline = Date().addingTimeInterval(900)
+            while Date() < deadline, !Task.isCancelled {
+                if GatewayToolsInstaller.missingTools.isEmpty {
+                    self?.globalMessage = "VPN tools installed — connecting \(name)."
+                    self?.startGateway(named: name)
+                    return
+                }
+                try? await Task.sleep(for: .seconds(2))
+            }
+            guard !Task.isCancelled else {
+                return
+            }
+            self?.updateGatewayState(for: name, isRunning: false, state: .failed, message: "Install didn't finish — connect again once brew completes")
+        }
     }
 
     private func spawnGatewaySupervisor(_ gateway: GatewayConfig, credential: GatewayCredential, pendingSave: PendingCredentialSave? = nil) {

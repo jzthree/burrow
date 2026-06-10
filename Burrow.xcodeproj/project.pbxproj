@@ -7,51 +7,52 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
-		075AE427C0BF48FA6B7652F8 /* Theme.swift in Sources */ = {isa = PBXBuildFile; fileRef = 84EBE7B680236EF889C72545 /* Theme.swift */; };
-		0F318F0271F621191D2DD108 /* PasswordSupport.swift in Sources */ = {isa = PBXBuildFile; fileRef = C16AFD7A3BB7EBC3FCDB72A0 /* PasswordSupport.swift */; };
-		1556530B3DAD67E67769E776 /* Burrow.icns in Resources */ = {isa = PBXBuildFile; fileRef = 901A7B52FFB42387BE974536 /* Burrow.icns */; };
-		165CEF30F10565E66626C1F3 /* SSHConfigImport.swift in Sources */ = {isa = PBXBuildFile; fileRef = A7270B6637F861EEACF567FF /* SSHConfigImport.swift */; };
-		1F5059422364111500C5DA94 /* TunnelLaunchPreparer.swift in Sources */ = {isa = PBXBuildFile; fileRef = FA210146713377BB26C4A7D7 /* TunnelLaunchPreparer.swift */; };
-		28BB6CE6989F867CB9CEACB8 /* ConfigFileWatcher.swift in Sources */ = {isa = PBXBuildFile; fileRef = AE9C50A233DDE708AFECA3E0 /* ConfigFileWatcher.swift */; };
-		2E0D0A1E47BB822B0BA72F4F /* GatewaySupport.swift in Sources */ = {isa = PBXBuildFile; fileRef = 216D8BEBD4D6224B4EA0A8B8 /* GatewaySupport.swift */; };
-		329366EE50E8792AA7DE19FA /* EditorWindow.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0AF490894C9576CB872AB237 /* EditorWindow.swift */; };
-		3477D1F22D8C5897022ECEEE /* PortProbe.swift in Sources */ = {isa = PBXBuildFile; fileRef = 80B8E20E92F1CC6F909DC159 /* PortProbe.swift */; };
-		3F9EDCDC050F014E45A51E7E /* GatewayEditor.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3AC9705BD107F503DA05ADA6 /* GatewayEditor.swift */; };
-		4E187C3EB0FB20A06135FFEC /* GPSAMLAuth.swift in Sources */ = {isa = PBXBuildFile; fileRef = A25834F316A75B4334933246 /* GPSAMLAuth.swift */; };
-		5A3D899459CADEA81895AEA7 /* PortKeeperCore.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = D40ACF52EC81E12B8C47DF49 /* PortKeeperCore.framework */; };
-		84DBDE22722907F25C70D050 /* PortKeeperCore.framework in Embed Frameworks */ = {isa = PBXBuildFile; fileRef = D40ACF52EC81E12B8C47DF49 /* PortKeeperCore.framework */; settings = {ATTRIBUTES = (CodeSignOnCopy, RemoveHeadersOnCopy, ); }; };
-		8A6865726BBE6F7496580ABD /* SSHConfigParser.swift in Sources */ = {isa = PBXBuildFile; fileRef = ED786ADDA10A9E6BF242B2E0 /* SSHConfigParser.swift */; };
-		8B9ED0BF642D4A10CA4BC84A /* SSHCommandBuilder.swift in Sources */ = {isa = PBXBuildFile; fileRef = B77F743ECE9EE87D78983773 /* SSHCommandBuilder.swift */; };
-		AC0D5A1300453A8B1BDD563F /* Models.swift in Sources */ = {isa = PBXBuildFile; fileRef = ECB66FDD9912FA8498C12C9F /* Models.swift */; };
-		BAD5E8476973BA8763E9AF9D /* PortKeeperRuntimeRegistry.swift in Sources */ = {isa = PBXBuildFile; fileRef = 79BCB44250A0FA2E80B314C5 /* PortKeeperRuntimeRegistry.swift */; };
-		BD3B320BE1595670365E10EE /* BrowserLauncher.swift in Sources */ = {isa = PBXBuildFile; fileRef = D02BEB2D5A57B2919777013E /* BrowserLauncher.swift */; };
-		C2A80E41EE770FE8B8ECD0A9 /* Cocoa.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 32B57FC0633BC629768FBDE5 /* Cocoa.framework */; };
-		CA3CE12E749CA99DB6ECBA8E /* ConfigStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5A04FEA863785D7A006B780E /* ConfigStore.swift */; };
-		E064DE4EB29428FCBAD08839 /* MenuBarIcon.swift in Sources */ = {isa = PBXBuildFile; fileRef = 99A0364545F61AB938EF552C /* MenuBarIcon.swift */; };
-		E0F5BDDB39CD550A88FA4F0E /* VPNClientDetection.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6604E821B3BBA2BAE1D5F168 /* VPNClientDetection.swift */; };
-		F63C3A4022A70D7D8262F260 /* AppMain.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8E6C15BB98DD3213F1DC8667 /* AppMain.swift */; };
-		FCE10E7DEBEAD9627D572BEB /* TunnelSupervisor.swift in Sources */ = {isa = PBXBuildFile; fileRef = E7DD74FCEE4CBCD6FF558654 /* TunnelSupervisor.swift */; };
-		FD34531AE9B6D57EE2F62702 /* Cocoa.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 32B57FC0633BC629768FBDE5 /* Cocoa.framework */; };
+		019C53509046D955C9CD1ACD /* PortKeeperCore.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 76BCF82EF3E0E71B16CEAAE2 /* PortKeeperCore.framework */; };
+		105B0BBDB1281EB84B933954 /* ConfigFileWatcher.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7E11EC0BD247FE2C9F85048D /* ConfigFileWatcher.swift */; };
+		142F5391DA65B2BDBAD62979 /* PortKeeperCore.framework in Embed Frameworks */ = {isa = PBXBuildFile; fileRef = 76BCF82EF3E0E71B16CEAAE2 /* PortKeeperCore.framework */; settings = {ATTRIBUTES = (CodeSignOnCopy, RemoveHeadersOnCopy, ); }; };
+		1AF8138E7214169790C819D3 /* TunnelLaunchPreparer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 154EE4B38674A710E865E537 /* TunnelLaunchPreparer.swift */; };
+		261A43881691DBA968F02243 /* MenuBarIcon.swift in Sources */ = {isa = PBXBuildFile; fileRef = 98CDC0CFA8437C8584E71FDA /* MenuBarIcon.swift */; };
+		322E5C65A484A2A29E9FEB0F /* GatewaySupport.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1C4FE87B73AD045A6EEC812 /* GatewaySupport.swift */; };
+		326FB00381FCF94022FFA4F5 /* Models.swift in Sources */ = {isa = PBXBuildFile; fileRef = F6F8124D96E3BA7C8C68CEB2 /* Models.swift */; };
+		346FB53228A11AF3FDDED3E7 /* BrowserLauncher.swift in Sources */ = {isa = PBXBuildFile; fileRef = E9D1FF40DC9B61ABAFA0057A /* BrowserLauncher.swift */; };
+		49F5C6157371FD1DDBB6231C /* PortKeeperRuntimeRegistry.swift in Sources */ = {isa = PBXBuildFile; fileRef = 72CFC02BDCFC80C334C53EB0 /* PortKeeperRuntimeRegistry.swift */; };
+		5463887ED47818EEF9C5CA8A /* PortProbe.swift in Sources */ = {isa = PBXBuildFile; fileRef = F269098779DA0D789F6ABD01 /* PortProbe.swift */; };
+		55F0CD91854C4EF59CE66D25 /* Theme.swift in Sources */ = {isa = PBXBuildFile; fileRef = 665827290FD3AB873D0B2F91 /* Theme.swift */; };
+		643B31CDB6756ACFEE8CD232 /* PasswordSupport.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4D2827C97300B666981E16C5 /* PasswordSupport.swift */; };
+		6EE8F642A980221AE3A89D19 /* Cocoa.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 88F426A55DC1D9BEBA7DB494 /* Cocoa.framework */; };
+		70934C02040E5DF8CB0D683D /* SSHConfigParser.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1A9B910B7DB00564D88E141 /* SSHConfigParser.swift */; };
+		785ED8610FCCB4B99442268C /* Cocoa.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 88F426A55DC1D9BEBA7DB494 /* Cocoa.framework */; };
+		86C2E9643CDF21F85E5A66FF /* EditorWindow.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5679F0EFB2159929FBF3C9CB /* EditorWindow.swift */; };
+		9FB8772341B0B545D4E81382 /* TunnelSupervisor.swift in Sources */ = {isa = PBXBuildFile; fileRef = 05D74BAC00E5BAFAF63429D3 /* TunnelSupervisor.swift */; };
+		A77B2EF50F8EE1D69706B7A5 /* Burrow.icns in Resources */ = {isa = PBXBuildFile; fileRef = F7D42109CD5608062B065E81 /* Burrow.icns */; };
+		AE8741EC9CDB192D9D02F493 /* VPNClientDetection.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9A79A53739FC540DD2DF4875 /* VPNClientDetection.swift */; };
+		B31658A9567902DD02B90AC8 /* GatewayToolsInstaller.swift in Sources */ = {isa = PBXBuildFile; fileRef = 006420575CAE09B78125AF2F /* GatewayToolsInstaller.swift */; };
+		B3E2CA362A4C053E09044F3A /* SSHConfigImport.swift in Sources */ = {isa = PBXBuildFile; fileRef = EA0F9A756D73317A60B44B72 /* SSHConfigImport.swift */; };
+		BB74F98378CC363CE20D5DBE /* GatewayEditor.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2A0821B3C2E685D3F163B5AB /* GatewayEditor.swift */; };
+		BCE49B0B6CDBECFE256D2B81 /* AppMain.swift in Sources */ = {isa = PBXBuildFile; fileRef = A0AC8BFB7E0BCF58C53956D9 /* AppMain.swift */; };
+		D9DE4CD606B696F44D4EEE58 /* ConfigStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 427A456D9E517B490DF89BE0 /* ConfigStore.swift */; };
+		E25A9F7E904E85208632E5EB /* GPSAMLAuth.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9FF68916316C257E6A45DDE6 /* GPSAMLAuth.swift */; };
+		F7D76231DD57E8C1E035C733 /* SSHCommandBuilder.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4FCC5C0C9D4942F33AE60BB1 /* SSHCommandBuilder.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
-		C6D0D9E7DE514494FAD71B78 /* PBXContainerItemProxy */ = {
+		CBF716CE6AAA4ABE64FEE999 /* PBXContainerItemProxy */ = {
 			isa = PBXContainerItemProxy;
-			containerPortal = E392E68801DF1C3DA8F829A4 /* Project object */;
+			containerPortal = 729CF189B62ABB498F31C2A7 /* Project object */;
 			proxyType = 1;
-			remoteGlobalIDString = E51BF8BDB4FA079E7D36C33F;
+			remoteGlobalIDString = D4989A98BD339EE79350D6A1;
 			remoteInfo = PortKeeperCore;
 		};
 /* End PBXContainerItemProxy section */
 
 /* Begin PBXCopyFilesBuildPhase section */
-		BA962A5A14CD4D9C98DCD781 /* Embed Frameworks */ = {
+		0BFCFCBCFE2F26A5837F73C1 /* Embed Frameworks */ = {
 			isa = PBXCopyFilesBuildPhase;
 			buildActionMask = 2147483647;
 			dstPath = "";
 			dstSubfolderSpec = 10;
 			files = (
-				84DBDE22722907F25C70D050 /* PortKeeperCore.framework in Embed Frameworks */,
+				142F5391DA65B2BDBAD62979 /* PortKeeperCore.framework in Embed Frameworks */,
 			);
 			name = "Embed Frameworks";
 			runOnlyForDeploymentPostprocessing = 0;
@@ -59,149 +60,151 @@
 /* End PBXCopyFilesBuildPhase section */
 
 /* Begin PBXFileReference section */
-		0AF490894C9576CB872AB237 /* EditorWindow.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = EditorWindow.swift; sourceTree = "<group>"; };
-		216D8BEBD4D6224B4EA0A8B8 /* GatewaySupport.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = GatewaySupport.swift; sourceTree = "<group>"; };
-		32B57FC0633BC629768FBDE5 /* Cocoa.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = Cocoa.framework; path = Platforms/MacOSX.platform/Developer/SDKs/MacOSX15.0.sdk/System/Library/Frameworks/Cocoa.framework; sourceTree = DEVELOPER_DIR; };
-		33DA430D6C90A60DB743A2F3 /* Burrow.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Burrow.app; sourceTree = BUILT_PRODUCTS_DIR; };
-		3AC9705BD107F503DA05ADA6 /* GatewayEditor.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = GatewayEditor.swift; sourceTree = "<group>"; };
-		534D8FB6A367E1745359F1C3 /* Burrow-Info.plist */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.plist.xml; path = "Burrow-Info.plist"; sourceTree = "<group>"; };
-		5A04FEA863785D7A006B780E /* ConfigStore.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = ConfigStore.swift; sourceTree = "<group>"; };
-		6604E821B3BBA2BAE1D5F168 /* VPNClientDetection.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = VPNClientDetection.swift; sourceTree = "<group>"; };
-		79BCB44250A0FA2E80B314C5 /* PortKeeperRuntimeRegistry.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = PortKeeperRuntimeRegistry.swift; sourceTree = "<group>"; };
-		80B8E20E92F1CC6F909DC159 /* PortProbe.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = PortProbe.swift; sourceTree = "<group>"; };
-		84EBE7B680236EF889C72545 /* Theme.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = Theme.swift; sourceTree = "<group>"; };
-		8E6C15BB98DD3213F1DC8667 /* AppMain.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = AppMain.swift; sourceTree = "<group>"; };
-		901A7B52FFB42387BE974536 /* Burrow.icns */ = {isa = PBXFileReference; includeInIndex = 1; path = Burrow.icns; sourceTree = "<group>"; };
-		99A0364545F61AB938EF552C /* MenuBarIcon.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = MenuBarIcon.swift; sourceTree = "<group>"; };
-		A25834F316A75B4334933246 /* GPSAMLAuth.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = GPSAMLAuth.swift; sourceTree = "<group>"; };
-		A7270B6637F861EEACF567FF /* SSHConfigImport.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = SSHConfigImport.swift; sourceTree = "<group>"; };
-		AE9C50A233DDE708AFECA3E0 /* ConfigFileWatcher.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = ConfigFileWatcher.swift; sourceTree = "<group>"; };
-		B77F743ECE9EE87D78983773 /* SSHCommandBuilder.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = SSHCommandBuilder.swift; sourceTree = "<group>"; };
-		C16AFD7A3BB7EBC3FCDB72A0 /* PasswordSupport.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = PasswordSupport.swift; sourceTree = "<group>"; };
-		D02BEB2D5A57B2919777013E /* BrowserLauncher.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = BrowserLauncher.swift; sourceTree = "<group>"; };
-		D40ACF52EC81E12B8C47DF49 /* PortKeeperCore.framework */ = {isa = PBXFileReference; explicitFileType = wrapper.framework; includeInIndex = 0; path = PortKeeperCore.framework; sourceTree = BUILT_PRODUCTS_DIR; };
-		E7DD74FCEE4CBCD6FF558654 /* TunnelSupervisor.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = TunnelSupervisor.swift; sourceTree = "<group>"; };
-		ECB66FDD9912FA8498C12C9F /* Models.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = Models.swift; sourceTree = "<group>"; };
-		ED786ADDA10A9E6BF242B2E0 /* SSHConfigParser.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = SSHConfigParser.swift; sourceTree = "<group>"; };
-		FA210146713377BB26C4A7D7 /* TunnelLaunchPreparer.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = TunnelLaunchPreparer.swift; sourceTree = "<group>"; };
+		006420575CAE09B78125AF2F /* GatewayToolsInstaller.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = GatewayToolsInstaller.swift; sourceTree = "<group>"; };
+		05D74BAC00E5BAFAF63429D3 /* TunnelSupervisor.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = TunnelSupervisor.swift; sourceTree = "<group>"; };
+		154EE4B38674A710E865E537 /* TunnelLaunchPreparer.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = TunnelLaunchPreparer.swift; sourceTree = "<group>"; };
+		2A0821B3C2E685D3F163B5AB /* GatewayEditor.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = GatewayEditor.swift; sourceTree = "<group>"; };
+		427A456D9E517B490DF89BE0 /* ConfigStore.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = ConfigStore.swift; sourceTree = "<group>"; };
+		4D2827C97300B666981E16C5 /* PasswordSupport.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = PasswordSupport.swift; sourceTree = "<group>"; };
+		4FCC5C0C9D4942F33AE60BB1 /* SSHCommandBuilder.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = SSHCommandBuilder.swift; sourceTree = "<group>"; };
+		5679F0EFB2159929FBF3C9CB /* EditorWindow.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = EditorWindow.swift; sourceTree = "<group>"; };
+		665827290FD3AB873D0B2F91 /* Theme.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = Theme.swift; sourceTree = "<group>"; };
+		72CFC02BDCFC80C334C53EB0 /* PortKeeperRuntimeRegistry.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = PortKeeperRuntimeRegistry.swift; sourceTree = "<group>"; };
+		76BCF82EF3E0E71B16CEAAE2 /* PortKeeperCore.framework */ = {isa = PBXFileReference; explicitFileType = wrapper.framework; includeInIndex = 0; path = PortKeeperCore.framework; sourceTree = BUILT_PRODUCTS_DIR; };
+		78405DD938F5F935F286DA06 /* Burrow.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Burrow.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		7E11EC0BD247FE2C9F85048D /* ConfigFileWatcher.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = ConfigFileWatcher.swift; sourceTree = "<group>"; };
+		88F426A55DC1D9BEBA7DB494 /* Cocoa.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = Cocoa.framework; path = Platforms/MacOSX.platform/Developer/SDKs/MacOSX15.0.sdk/System/Library/Frameworks/Cocoa.framework; sourceTree = DEVELOPER_DIR; };
+		98CDC0CFA8437C8584E71FDA /* MenuBarIcon.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = MenuBarIcon.swift; sourceTree = "<group>"; };
+		9A79A53739FC540DD2DF4875 /* VPNClientDetection.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = VPNClientDetection.swift; sourceTree = "<group>"; };
+		9FF68916316C257E6A45DDE6 /* GPSAMLAuth.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = GPSAMLAuth.swift; sourceTree = "<group>"; };
+		A0AC8BFB7E0BCF58C53956D9 /* AppMain.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = AppMain.swift; sourceTree = "<group>"; };
+		A1C4FE87B73AD045A6EEC812 /* GatewaySupport.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = GatewaySupport.swift; sourceTree = "<group>"; };
+		A9024732D614504F454C743F /* Burrow-Info.plist */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.plist.xml; path = "Burrow-Info.plist"; sourceTree = "<group>"; };
+		B1A9B910B7DB00564D88E141 /* SSHConfigParser.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = SSHConfigParser.swift; sourceTree = "<group>"; };
+		E9D1FF40DC9B61ABAFA0057A /* BrowserLauncher.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = BrowserLauncher.swift; sourceTree = "<group>"; };
+		EA0F9A756D73317A60B44B72 /* SSHConfigImport.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = SSHConfigImport.swift; sourceTree = "<group>"; };
+		F269098779DA0D789F6ABD01 /* PortProbe.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = PortProbe.swift; sourceTree = "<group>"; };
+		F6F8124D96E3BA7C8C68CEB2 /* Models.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = Models.swift; sourceTree = "<group>"; };
+		F7D42109CD5608062B065E81 /* Burrow.icns */ = {isa = PBXFileReference; includeInIndex = 1; path = Burrow.icns; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
-		0E648CD6497C95E26BA6C179 /* Frameworks */ = {
+		7ADEDA770D31141B3B7B40D2 /* Frameworks */ = {
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
-				C2A80E41EE770FE8B8ECD0A9 /* Cocoa.framework in Frameworks */,
-				5A3D899459CADEA81895AEA7 /* PortKeeperCore.framework in Frameworks */,
+				6EE8F642A980221AE3A89D19 /* Cocoa.framework in Frameworks */,
+				019C53509046D955C9CD1ACD /* PortKeeperCore.framework in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
-		87BFA848CDAD3007789D38E0 /* Frameworks */ = {
+		8293E3D44A87E361D81ECBAA /* Frameworks */ = {
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
-				FD34531AE9B6D57EE2F62702 /* Cocoa.framework in Frameworks */,
+				785ED8610FCCB4B99442268C /* Cocoa.framework in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
 /* End PBXFrameworksBuildPhase section */
 
 /* Begin PBXGroup section */
-		290324568107A767A89A7DA8 /* PortKeeperCore */ = {
+		2E5CAA64C814181C858374AA /* XcodeSupport */ = {
 			isa = PBXGroup;
 			children = (
-				5A04FEA863785D7A006B780E /* ConfigStore.swift */,
-				216D8BEBD4D6224B4EA0A8B8 /* GatewaySupport.swift */,
-				ECB66FDD9912FA8498C12C9F /* Models.swift */,
-				79BCB44250A0FA2E80B314C5 /* PortKeeperRuntimeRegistry.swift */,
-				80B8E20E92F1CC6F909DC159 /* PortProbe.swift */,
-				B77F743ECE9EE87D78983773 /* SSHCommandBuilder.swift */,
-				ED786ADDA10A9E6BF242B2E0 /* SSHConfigParser.swift */,
-				FA210146713377BB26C4A7D7 /* TunnelLaunchPreparer.swift */,
-				E7DD74FCEE4CBCD6FF558654 /* TunnelSupervisor.swift */,
-			);
-			name = PortKeeperCore;
-			path = PortKeeperCore;
-			sourceTree = "<group>";
-		};
-		398F6B28BB44CAA6F915185C = {
-			isa = PBXGroup;
-			children = (
-				43EF26B1BB67C5EA79650AC5 /* Products */,
-				9AF444B7AF0C18F0CF441979 /* Frameworks */,
-				A8212AD4DB0FE327AF70B3A6 /* Sources */,
-				78D81BF82B0D9563AE927BFA /* XcodeSupport */,
-			);
-			sourceTree = "<group>";
-		};
-		43EF26B1BB67C5EA79650AC5 /* Products */ = {
-			isa = PBXGroup;
-			children = (
-				D40ACF52EC81E12B8C47DF49 /* PortKeeperCore.framework */,
-				33DA430D6C90A60DB743A2F3 /* Burrow.app */,
-			);
-			name = Products;
-			sourceTree = "<group>";
-		};
-		5112FB9B0A6DFB812D440A81 /* OS X */ = {
-			isa = PBXGroup;
-			children = (
-				32B57FC0633BC629768FBDE5 /* Cocoa.framework */,
-			);
-			name = "OS X";
-			sourceTree = "<group>";
-		};
-		78D81BF82B0D9563AE927BFA /* XcodeSupport */ = {
-			isa = PBXGroup;
-			children = (
-				534D8FB6A367E1745359F1C3 /* Burrow-Info.plist */,
-				901A7B52FFB42387BE974536 /* Burrow.icns */,
+				A9024732D614504F454C743F /* Burrow-Info.plist */,
+				F7D42109CD5608062B065E81 /* Burrow.icns */,
 			);
 			name = XcodeSupport;
 			path = XcodeSupport;
 			sourceTree = "<group>";
 		};
-		9AF444B7AF0C18F0CF441979 /* Frameworks */ = {
+		32E1E36BB63B9F9EA7844687 /* Products */ = {
 			isa = PBXGroup;
 			children = (
-				5112FB9B0A6DFB812D440A81 /* OS X */,
+				76BCF82EF3E0E71B16CEAAE2 /* PortKeeperCore.framework */,
+				78405DD938F5F935F286DA06 /* Burrow.app */,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+		65670B7F244B26CA0F062745 /* Frameworks */ = {
+			isa = PBXGroup;
+			children = (
+				C437D65BBB27FDC361E83F36 /* OS X */,
 			);
 			name = Frameworks;
 			sourceTree = "<group>";
 		};
-		A8212AD4DB0FE327AF70B3A6 /* Sources */ = {
+		AB7E4085B7B9279D8F2B9CE5 = {
 			isa = PBXGroup;
 			children = (
-				290324568107A767A89A7DA8 /* PortKeeperCore */,
-				D9EC72019ABDF2A4931872AC /* PortKeeperMenuBar */,
+				32E1E36BB63B9F9EA7844687 /* Products */,
+				65670B7F244B26CA0F062745 /* Frameworks */,
+				B9E7AFEEE246B1128AF85903 /* Sources */,
+				2E5CAA64C814181C858374AA /* XcodeSupport */,
 			);
-			name = Sources;
-			path = Sources;
 			sourceTree = "<group>";
 		};
-		D9EC72019ABDF2A4931872AC /* PortKeeperMenuBar */ = {
+		B0750E9879451F38E8B6AC9A /* PortKeeperMenuBar */ = {
 			isa = PBXGroup;
 			children = (
-				8E6C15BB98DD3213F1DC8667 /* AppMain.swift */,
-				D02BEB2D5A57B2919777013E /* BrowserLauncher.swift */,
-				AE9C50A233DDE708AFECA3E0 /* ConfigFileWatcher.swift */,
-				0AF490894C9576CB872AB237 /* EditorWindow.swift */,
-				A25834F316A75B4334933246 /* GPSAMLAuth.swift */,
-				3AC9705BD107F503DA05ADA6 /* GatewayEditor.swift */,
-				99A0364545F61AB938EF552C /* MenuBarIcon.swift */,
-				C16AFD7A3BB7EBC3FCDB72A0 /* PasswordSupport.swift */,
-				A7270B6637F861EEACF567FF /* SSHConfigImport.swift */,
-				84EBE7B680236EF889C72545 /* Theme.swift */,
-				6604E821B3BBA2BAE1D5F168 /* VPNClientDetection.swift */,
+				A0AC8BFB7E0BCF58C53956D9 /* AppMain.swift */,
+				E9D1FF40DC9B61ABAFA0057A /* BrowserLauncher.swift */,
+				7E11EC0BD247FE2C9F85048D /* ConfigFileWatcher.swift */,
+				5679F0EFB2159929FBF3C9CB /* EditorWindow.swift */,
+				9FF68916316C257E6A45DDE6 /* GPSAMLAuth.swift */,
+				2A0821B3C2E685D3F163B5AB /* GatewayEditor.swift */,
+				006420575CAE09B78125AF2F /* GatewayToolsInstaller.swift */,
+				98CDC0CFA8437C8584E71FDA /* MenuBarIcon.swift */,
+				4D2827C97300B666981E16C5 /* PasswordSupport.swift */,
+				EA0F9A756D73317A60B44B72 /* SSHConfigImport.swift */,
+				665827290FD3AB873D0B2F91 /* Theme.swift */,
+				9A79A53739FC540DD2DF4875 /* VPNClientDetection.swift */,
 			);
 			name = PortKeeperMenuBar;
 			path = PortKeeperMenuBar;
 			sourceTree = "<group>";
 		};
+		B9E7AFEEE246B1128AF85903 /* Sources */ = {
+			isa = PBXGroup;
+			children = (
+				C2BC43F33AA1779C8104E04F /* PortKeeperCore */,
+				B0750E9879451F38E8B6AC9A /* PortKeeperMenuBar */,
+			);
+			name = Sources;
+			path = Sources;
+			sourceTree = "<group>";
+		};
+		C2BC43F33AA1779C8104E04F /* PortKeeperCore */ = {
+			isa = PBXGroup;
+			children = (
+				427A456D9E517B490DF89BE0 /* ConfigStore.swift */,
+				A1C4FE87B73AD045A6EEC812 /* GatewaySupport.swift */,
+				F6F8124D96E3BA7C8C68CEB2 /* Models.swift */,
+				72CFC02BDCFC80C334C53EB0 /* PortKeeperRuntimeRegistry.swift */,
+				F269098779DA0D789F6ABD01 /* PortProbe.swift */,
+				4FCC5C0C9D4942F33AE60BB1 /* SSHCommandBuilder.swift */,
+				B1A9B910B7DB00564D88E141 /* SSHConfigParser.swift */,
+				154EE4B38674A710E865E537 /* TunnelLaunchPreparer.swift */,
+				05D74BAC00E5BAFAF63429D3 /* TunnelSupervisor.swift */,
+			);
+			name = PortKeeperCore;
+			path = PortKeeperCore;
+			sourceTree = "<group>";
+		};
+		C437D65BBB27FDC361E83F36 /* OS X */ = {
+			isa = PBXGroup;
+			children = (
+				88F426A55DC1D9BEBA7DB494 /* Cocoa.framework */,
+			);
+			name = "OS X";
+			sourceTree = "<group>";
+		};
 /* End PBXGroup section */
 
 /* Begin PBXHeadersBuildPhase section */
-		24D64F37E7D13D677CE97CBB /* Headers */ = {
+		60FA93B34DC315A5C2C1E88C /* Headers */ = {
 			isa = PBXHeadersBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
@@ -211,33 +214,14 @@
 /* End PBXHeadersBuildPhase section */
 
 /* Begin PBXNativeTarget section */
-		71FE4B43F30535A3A0BBD5E7 /* Burrow */ = {
+		D4989A98BD339EE79350D6A1 /* PortKeeperCore */ = {
 			isa = PBXNativeTarget;
-			buildConfigurationList = 887AAB0460C12544F789B48D /* Build configuration list for PBXNativeTarget "Burrow" */;
+			buildConfigurationList = FC7531CFCF26C586E59B1FDD /* Build configuration list for PBXNativeTarget "PortKeeperCore" */;
 			buildPhases = (
-				C35088A90C8B0B5F1564CB39 /* Sources */,
-				0E648CD6497C95E26BA6C179 /* Frameworks */,
-				07DBACFB761CD6E1B4245D01 /* Resources */,
-				BA962A5A14CD4D9C98DCD781 /* Embed Frameworks */,
-			);
-			buildRules = (
-			);
-			dependencies = (
-				7857E2B2CA6811AD736AD9C6 /* PBXTargetDependency */,
-			);
-			name = Burrow;
-			productName = Burrow;
-			productReference = 33DA430D6C90A60DB743A2F3 /* Burrow.app */;
-			productType = "com.apple.product-type.application";
-		};
-		E51BF8BDB4FA079E7D36C33F /* PortKeeperCore */ = {
-			isa = PBXNativeTarget;
-			buildConfigurationList = 0E3E2F9C133F372CB8700A78 /* Build configuration list for PBXNativeTarget "PortKeeperCore" */;
-			buildPhases = (
-				24D64F37E7D13D677CE97CBB /* Headers */,
-				DC6ACF0E24A2CE9F0FD7DF5D /* Sources */,
-				87BFA848CDAD3007789D38E0 /* Frameworks */,
-				68FA8FCA9CE93D755BBD98CE /* Resources */,
+				60FA93B34DC315A5C2C1E88C /* Headers */,
+				1EF50264E466500C5F6BD4BE /* Sources */,
+				8293E3D44A87E361D81ECBAA /* Frameworks */,
+				5EB22842DF2ECC2D3DF28E26 /* Resources */,
 			);
 			buildRules = (
 			);
@@ -245,20 +229,39 @@
 			);
 			name = PortKeeperCore;
 			productName = PortKeeperCore;
-			productReference = D40ACF52EC81E12B8C47DF49 /* PortKeeperCore.framework */;
+			productReference = 76BCF82EF3E0E71B16CEAAE2 /* PortKeeperCore.framework */;
 			productType = "com.apple.product-type.framework";
+		};
+		E677BD8AF779FE7CC8F5EC0F /* Burrow */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = F6915E8EE740B3A28D9320C6 /* Build configuration list for PBXNativeTarget "Burrow" */;
+			buildPhases = (
+				3CBDEC0AEC4850743B01EA7E /* Sources */,
+				7ADEDA770D31141B3B7B40D2 /* Frameworks */,
+				20044F91E4812164284CB3C5 /* Resources */,
+				0BFCFCBCFE2F26A5837F73C1 /* Embed Frameworks */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				7879182D9AB0ED573D03F3C1 /* PBXTargetDependency */,
+			);
+			name = Burrow;
+			productName = Burrow;
+			productReference = 78405DD938F5F935F286DA06 /* Burrow.app */;
+			productType = "com.apple.product-type.application";
 		};
 /* End PBXNativeTarget section */
 
 /* Begin PBXProject section */
-		E392E68801DF1C3DA8F829A4 /* Project object */ = {
+		729CF189B62ABB498F31C2A7 /* Project object */ = {
 			isa = PBXProject;
 			attributes = {
 				LastSwiftMigration = 9999;
 				LastSwiftUpdateCheck = 1600;
 				LastUpgradeCheck = 1600;
 			};
-			buildConfigurationList = 5D526047DC90B5A0C667A987 /* Build configuration list for PBXProject "Burrow" */;
+			buildConfigurationList = B859C23E56221F769FD61B48 /* Build configuration list for PBXProject "Burrow" */;
 			compatibilityVersion = "Xcode 3.2";
 			developmentRegion = en;
 			hasScannedForEncodings = 0;
@@ -266,29 +269,29 @@
 				en,
 				Base,
 			);
-			mainGroup = 398F6B28BB44CAA6F915185C;
+			mainGroup = AB7E4085B7B9279D8F2B9CE5;
 			minimizedProjectReferenceProxies = 0;
 			preferredProjectObjectVersion = 77;
-			productRefGroup = 43EF26B1BB67C5EA79650AC5 /* Products */;
+			productRefGroup = 32E1E36BB63B9F9EA7844687 /* Products */;
 			projectDirPath = "";
 			projectRoot = "";
 			targets = (
-				E51BF8BDB4FA079E7D36C33F /* PortKeeperCore */,
-				71FE4B43F30535A3A0BBD5E7 /* Burrow */,
+				D4989A98BD339EE79350D6A1 /* PortKeeperCore */,
+				E677BD8AF779FE7CC8F5EC0F /* Burrow */,
 			);
 		};
 /* End PBXProject section */
 
 /* Begin PBXResourcesBuildPhase section */
-		07DBACFB761CD6E1B4245D01 /* Resources */ = {
+		20044F91E4812164284CB3C5 /* Resources */ = {
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
-				1556530B3DAD67E67769E776 /* Burrow.icns in Resources */,
+				A77B2EF50F8EE1D69706B7A5 /* Burrow.icns in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
-		68FA8FCA9CE93D755BBD98CE /* Resources */ = {
+		5EB22842DF2ECC2D3DF28E26 /* Resources */ = {
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
@@ -298,53 +301,54 @@
 /* End PBXResourcesBuildPhase section */
 
 /* Begin PBXSourcesBuildPhase section */
-		C35088A90C8B0B5F1564CB39 /* Sources */ = {
+		1EF50264E466500C5F6BD4BE /* Sources */ = {
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
-				F63C3A4022A70D7D8262F260 /* AppMain.swift in Sources */,
-				BD3B320BE1595670365E10EE /* BrowserLauncher.swift in Sources */,
-				28BB6CE6989F867CB9CEACB8 /* ConfigFileWatcher.swift in Sources */,
-				329366EE50E8792AA7DE19FA /* EditorWindow.swift in Sources */,
-				4E187C3EB0FB20A06135FFEC /* GPSAMLAuth.swift in Sources */,
-				3F9EDCDC050F014E45A51E7E /* GatewayEditor.swift in Sources */,
-				E064DE4EB29428FCBAD08839 /* MenuBarIcon.swift in Sources */,
-				0F318F0271F621191D2DD108 /* PasswordSupport.swift in Sources */,
-				165CEF30F10565E66626C1F3 /* SSHConfigImport.swift in Sources */,
-				075AE427C0BF48FA6B7652F8 /* Theme.swift in Sources */,
-				E0F5BDDB39CD550A88FA4F0E /* VPNClientDetection.swift in Sources */,
+				D9DE4CD606B696F44D4EEE58 /* ConfigStore.swift in Sources */,
+				322E5C65A484A2A29E9FEB0F /* GatewaySupport.swift in Sources */,
+				326FB00381FCF94022FFA4F5 /* Models.swift in Sources */,
+				49F5C6157371FD1DDBB6231C /* PortKeeperRuntimeRegistry.swift in Sources */,
+				5463887ED47818EEF9C5CA8A /* PortProbe.swift in Sources */,
+				F7D76231DD57E8C1E035C733 /* SSHCommandBuilder.swift in Sources */,
+				70934C02040E5DF8CB0D683D /* SSHConfigParser.swift in Sources */,
+				1AF8138E7214169790C819D3 /* TunnelLaunchPreparer.swift in Sources */,
+				9FB8772341B0B545D4E81382 /* TunnelSupervisor.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
-		DC6ACF0E24A2CE9F0FD7DF5D /* Sources */ = {
+		3CBDEC0AEC4850743B01EA7E /* Sources */ = {
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
-				CA3CE12E749CA99DB6ECBA8E /* ConfigStore.swift in Sources */,
-				2E0D0A1E47BB822B0BA72F4F /* GatewaySupport.swift in Sources */,
-				AC0D5A1300453A8B1BDD563F /* Models.swift in Sources */,
-				BAD5E8476973BA8763E9AF9D /* PortKeeperRuntimeRegistry.swift in Sources */,
-				3477D1F22D8C5897022ECEEE /* PortProbe.swift in Sources */,
-				8B9ED0BF642D4A10CA4BC84A /* SSHCommandBuilder.swift in Sources */,
-				8A6865726BBE6F7496580ABD /* SSHConfigParser.swift in Sources */,
-				1F5059422364111500C5DA94 /* TunnelLaunchPreparer.swift in Sources */,
-				FCE10E7DEBEAD9627D572BEB /* TunnelSupervisor.swift in Sources */,
+				BCE49B0B6CDBECFE256D2B81 /* AppMain.swift in Sources */,
+				346FB53228A11AF3FDDED3E7 /* BrowserLauncher.swift in Sources */,
+				105B0BBDB1281EB84B933954 /* ConfigFileWatcher.swift in Sources */,
+				86C2E9643CDF21F85E5A66FF /* EditorWindow.swift in Sources */,
+				E25A9F7E904E85208632E5EB /* GPSAMLAuth.swift in Sources */,
+				BB74F98378CC363CE20D5DBE /* GatewayEditor.swift in Sources */,
+				B31658A9567902DD02B90AC8 /* GatewayToolsInstaller.swift in Sources */,
+				261A43881691DBA968F02243 /* MenuBarIcon.swift in Sources */,
+				643B31CDB6756ACFEE8CD232 /* PasswordSupport.swift in Sources */,
+				B3E2CA362A4C053E09044F3A /* SSHConfigImport.swift in Sources */,
+				55F0CD91854C4EF59CE66D25 /* Theme.swift in Sources */,
+				AE8741EC9CDB192D9D02F493 /* VPNClientDetection.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
 /* End PBXSourcesBuildPhase section */
 
 /* Begin PBXTargetDependency section */
-		7857E2B2CA6811AD736AD9C6 /* PBXTargetDependency */ = {
+		7879182D9AB0ED573D03F3C1 /* PBXTargetDependency */ = {
 			isa = PBXTargetDependency;
 			name = PortKeeperCore;
-			target = E51BF8BDB4FA079E7D36C33F /* PortKeeperCore */;
-			targetProxy = C6D0D9E7DE514494FAD71B78 /* PBXContainerItemProxy */;
+			target = D4989A98BD339EE79350D6A1 /* PortKeeperCore */;
+			targetProxy = CBF716CE6AAA4ABE64FEE999 /* PBXContainerItemProxy */;
 		};
 /* End PBXTargetDependency section */
 
 /* Begin XCBuildConfiguration section */
-		060EC927B272E6FF22D1EFBA /* Release */ = {
+		30A36D3A9D54B1927F2E8698 /* Debug */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = "";
@@ -363,64 +367,9 @@
 				SDKROOT = macosx;
 				SWIFT_VERSION = 6.0;
 			};
-			name = Release;
+			name = Debug;
 		};
-		088FDB133C048530188F9FEE /* Release */ = {
-			isa = XCBuildConfiguration;
-			buildSettings = {
-				ALWAYS_SEARCH_USER_PATHS = NO;
-				CLANG_ANALYZER_NONNULL = YES;
-				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
-				CLANG_CXX_LANGUAGE_STANDARD = "gnu++14";
-				CLANG_CXX_LIBRARY = "libc++";
-				CLANG_ENABLE_MODULES = YES;
-				CLANG_ENABLE_OBJC_ARC = YES;
-				CLANG_ENABLE_OBJC_WEAK = YES;
-				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
-				CLANG_WARN_BOOL_CONVERSION = YES;
-				CLANG_WARN_COMMA = YES;
-				CLANG_WARN_CONSTANT_CONVERSION = YES;
-				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
-				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
-				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
-				CLANG_WARN_EMPTY_BODY = YES;
-				CLANG_WARN_ENUM_CONVERSION = YES;
-				CLANG_WARN_INFINITE_RECURSION = YES;
-				CLANG_WARN_INT_CONVERSION = YES;
-				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
-				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
-				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
-				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
-				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
-				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
-				CLANG_WARN_STRICT_PROTOTYPES = YES;
-				CLANG_WARN_SUSPICIOUS_MOVE = YES;
-				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
-				CLANG_WARN_UNREACHABLE_CODE = YES;
-				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
-				COPY_PHASE_STRIP = NO;
-				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
-				ENABLE_NS_ASSERTIONS = NO;
-				ENABLE_STRICT_OBJC_MSGSEND = YES;
-				GCC_C_LANGUAGE_STANDARD = gnu11;
-				GCC_NO_COMMON_BLOCKS = YES;
-				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
-				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
-				GCC_WARN_UNDECLARED_SELECTOR = YES;
-				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
-				GCC_WARN_UNUSED_FUNCTION = YES;
-				GCC_WARN_UNUSED_VARIABLE = YES;
-				MACOSX_DEPLOYMENT_TARGET = 13.0;
-				MTL_ENABLE_DEBUG_INFO = NO;
-				MTL_FAST_MATH = YES;
-				PRODUCT_NAME = "$(TARGET_NAME)";
-				SWIFT_COMPILATION_MODE = wholemodule;
-				SWIFT_OPTIMIZATION_LEVEL = "-O";
-				SWIFT_VERSION = 6.0;
-			};
-			name = Release;
-		};
-		112963887E4A972FE5056F6A /* Release */ = {
+		56E13A0E729605190B400235 /* Release */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				CODE_SIGN_STYLE = Automatic;
@@ -446,7 +395,7 @@
 			};
 			name = Release;
 		};
-		1571316100FE3C0B5E1EBFE7 /* Debug */ = {
+		6430DA14326E032A448C956F /* Debug */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				ALWAYS_SEARCH_USER_PATHS = NO;
@@ -508,28 +457,7 @@
 			};
 			name = Debug;
 		};
-		207EC5AAFFE34FF4196EE68B /* Debug */ = {
-			isa = XCBuildConfiguration;
-			buildSettings = {
-				ASSETCATALOG_COMPILER_APPICON_NAME = "";
-				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
-				CODE_SIGN_STYLE = Automatic;
-				COMBINE_HIDPI_IMAGES = YES;
-				CURRENT_PROJECT_VERSION = 1;
-				ENABLE_APP_SANDBOX = NO;
-				GENERATE_INFOPLIST_FILE = NO;
-				INFOPLIST_FILE = "XcodeSupport/Burrow-Info.plist";
-				LD_RUNPATH_SEARCH_PATHS = "$(inherited) @executable_path/../Frameworks";
-				MACOSX_DEPLOYMENT_TARGET = 13.0;
-				MARKETING_VERSION = 1.0;
-				PRODUCT_BUNDLE_IDENTIFIER = com.jianzhou.burrow;
-				PRODUCT_NAME = Burrow;
-				SDKROOT = macosx;
-				SWIFT_VERSION = 6.0;
-			};
-			name = Debug;
-		};
-		35105F985946273E2EBD7AA4 /* Debug */ = {
+		723778BE8D567A4B7EFC6981 /* Debug */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				CODE_SIGN_STYLE = Automatic;
@@ -555,37 +483,113 @@
 			};
 			name = Debug;
 		};
+		8907AF44F01AA48F07CFD6B7 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = "";
+				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CODE_SIGN_STYLE = Automatic;
+				COMBINE_HIDPI_IMAGES = YES;
+				CURRENT_PROJECT_VERSION = 1;
+				ENABLE_APP_SANDBOX = NO;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = "XcodeSupport/Burrow-Info.plist";
+				LD_RUNPATH_SEARCH_PATHS = "$(inherited) @executable_path/../Frameworks";
+				MACOSX_DEPLOYMENT_TARGET = 13.0;
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.jianzhou.burrow;
+				PRODUCT_NAME = Burrow;
+				SDKROOT = macosx;
+				SWIFT_VERSION = 6.0;
+			};
+			name = Release;
+		};
+		F916A224D49AA90A4893CB6E /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++14";
+				CLANG_CXX_LIBRARY = "libc++";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				ENABLE_NS_ASSERTIONS = NO;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu11;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				MACOSX_DEPLOYMENT_TARGET = 13.0;
+				MTL_ENABLE_DEBUG_INFO = NO;
+				MTL_FAST_MATH = YES;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_COMPILATION_MODE = wholemodule;
+				SWIFT_OPTIMIZATION_LEVEL = "-O";
+				SWIFT_VERSION = 6.0;
+			};
+			name = Release;
+		};
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
-		0E3E2F9C133F372CB8700A78 /* Build configuration list for PBXNativeTarget "PortKeeperCore" */ = {
+		B859C23E56221F769FD61B48 /* Build configuration list for PBXProject "Burrow" */ = {
 			isa = XCConfigurationList;
 			buildConfigurations = (
-				112963887E4A972FE5056F6A /* Release */,
-				35105F985946273E2EBD7AA4 /* Debug */,
+				6430DA14326E032A448C956F /* Debug */,
+				F916A224D49AA90A4893CB6E /* Release */,
 			);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;
 		};
-		5D526047DC90B5A0C667A987 /* Build configuration list for PBXProject "Burrow" */ = {
+		F6915E8EE740B3A28D9320C6 /* Build configuration list for PBXNativeTarget "Burrow" */ = {
 			isa = XCConfigurationList;
 			buildConfigurations = (
-				1571316100FE3C0B5E1EBFE7 /* Debug */,
-				088FDB133C048530188F9FEE /* Release */,
+				8907AF44F01AA48F07CFD6B7 /* Release */,
+				30A36D3A9D54B1927F2E8698 /* Debug */,
 			);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;
 		};
-		887AAB0460C12544F789B48D /* Build configuration list for PBXNativeTarget "Burrow" */ = {
+		FC7531CFCF26C586E59B1FDD /* Build configuration list for PBXNativeTarget "PortKeeperCore" */ = {
 			isa = XCConfigurationList;
 			buildConfigurations = (
-				060EC927B272E6FF22D1EFBA /* Release */,
-				207EC5AAFFE34FF4196EE68B /* Debug */,
+				56E13A0E729605190B400235 /* Release */,
+				723778BE8D567A4B7EFC6981 /* Debug */,
 			);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;
 		};
 /* End XCConfigurationList section */
 	};
-	rootObject = E392E68801DF1C3DA8F829A4 /* Project object */;
+	rootObject = 729CF189B62ABB498F31C2A7 /* Project object */;
 }

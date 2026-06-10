@@ -26,19 +26,30 @@ It keeps tunnel definitions in one config file, runs them with the system `ssh`,
 - Passwords (SSH and VPN) live in the macOS Keychain, saved only after a successful connection.
 - No custom SSH or VPN stack: Burrow builds commands and supervises `/usr/bin/ssh` and `openconnect`.
 
+## Install
+
+One line — clones the source, builds the app, installs it to `~/Applications/Burrow.app`, and launches it (requires the Xcode Command Line Tools):
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/jzthree/Burrow/main/scripts/install.sh | bash
+```
+
+Re-run the same line any time to update. Prefer doing it by hand?
+
+```bash
+git clone https://github.com/jzthree/Burrow.git && cd Burrow
+./scripts/install-app.sh && open ~/Applications/Burrow.app
+```
+
 ## Requirements
 
-- macOS 13 or later.
+- macOS 13 or later, and the Xcode Command Line Tools to build (`xcode-select --install`).
 - **Tunnels need nothing extra.** Burrow supervises the system `/usr/bin/ssh`; there are no runtime dependencies for the core app.
-- **VPN gateways are optional** and need two open-source tools:
+- **VPN gateways are optional** and use two open-source tools:
   - [`openconnect`](https://www.infradead.org/openconnect/) (LGPL-2.1) — speaks the AnyConnect, GlobalProtect, Pulse, and Fortinet protocols.
   - [`ocproxy`](https://github.com/cernekee/ocproxy) — turns the VPN session into a local SOCKS5 listener, so no tun device or root is needed.
 
-  ```bash
-  brew install openconnect ocproxy
-  ```
-
-  Burrow looks for them in `/opt/homebrew/bin`, `/usr/local/bin`, `/opt/local/bin`, and `/usr/bin`, or at paths set via the `BURROW_OPENCONNECT` / `BURROW_OCPROXY` environment variables. If they are missing, gateways simply fail to start with a message telling you the install command — tunnels are unaffected.
+  You don't have to install them up front: the first time you connect a gateway, Burrow offers to run `brew install openconnect ocproxy` in a Terminal window and connects automatically when it finishes. Burrow looks for the tools in `/opt/homebrew/bin`, `/usr/local/bin`, `/opt/local/bin`, and `/usr/bin`, or at paths set via `BURROW_OPENCONNECT` / `BURROW_OCPROXY`. Tunnels are unaffected either way.
 
 ## Quick Start
 
