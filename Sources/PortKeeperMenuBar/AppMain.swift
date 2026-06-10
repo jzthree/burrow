@@ -1,6 +1,7 @@
 import AppKit
 import Combine
 import PortKeeperCore
+import ServiceManagement
 import SwiftUI
 
 @main
@@ -22,7 +23,11 @@ private struct MenuBarLabel: View {
     @ObservedObject var viewModel: MenuBarViewModel
 
     var body: some View {
-        Label(viewModel.menuBarTitle, systemImage: viewModel.menuBarSymbol)
+        Label {
+            Text(viewModel.menuBarTitle)
+        } icon: {
+            Image(nsImage: viewModel.isAnyTunnelRunning ? MenuBarIcon.active : MenuBarIcon.idle)
+        }
     }
 }
 
@@ -51,6 +56,18 @@ final class MenuBarViewModel: ObservableObject {
         var connectionState: ConnectionState
         var lastMessage: String
         var recentLogs: [String]
+        var retryAttempt: Int = 0
+        var nextRetryAt: Date? = nil
+        var failedAt: Date? = nil
+    }
+
+    struct GatewayState: Identifiable {
+        let id: String
+        let config: GatewayConfig
+        var isRunning: Bool
+        var connectionState: ConnectionState
+        var lastMessage: String
+        var recentLogs: [String]
     }
 
     private struct PreparedTunnelLaunch {
@@ -63,10 +80,35 @@ final class MenuBarViewModel: ObservableObject {
     let passwordStore = PasswordStore()
 
     @Published private(set) var tunnels: [TunnelState] = []
+    @Published private(set) var gateways: [GatewayState] = []
     @Published var globalMessage = ""
-    @Published var editorDraft: TunnelDraft?
+    @Published var editorDraft: TunnelDraft? {
+        didSet {
+            let draftChanged = oldValue?.id != editorDraft?.id
+            if draftChanged || (oldValue != nil) != (editorDraft != nil) {
+                syncEditorWindow()
+            }
+        }
+    }
+    @Published var gatewayDraft: GatewayDraft? {
+        didSet {
+            let draftChanged = oldValue?.id != gatewayDraft?.id
+            if draftChanged || (oldValue != nil) != (gatewayDraft != nil) {
+                syncEditorWindow()
+            }
+        }
+    }
+    @Published var importCandidates: [SSHConfigImportCandidate]?
+    @Published private(set) var launchAtLoginEnabled = false
+    private(set) var sshConfigHosts: [SSHConfigHost] = []
 
+    private var editorWindowController: EditorWindowController?
+    private var configWatcher: ConfigFileWatcher?
     private var tasks: [String: Task<Void, Never>] = [:]
+    private var gatewayTasks: [String: Task<Void, Never>] = [:]
+    private var pendingGatewayCredentialSaves: [String: PendingCredentialSave] = [:]
+    private var invalidGatewayCredentialKeys: Set<TunnelCredentialKey> = []
+    private var activeSAMLAuthenticators: [String: GPSAMLAuthenticator] = [:]
     private var hasStartedAutoConnect = false
     private var pendingCredentialSaves: [String: PendingCredentialSave] = [:]
     private var activeCredentialSources: [String: CredentialSource] = [:]
@@ -79,6 +121,9 @@ final class MenuBarViewModel: ObservableObject {
 
     init() {
         loadConfig()
+        sshConfigHosts = SSHConfigParser.parse()
+        refreshLaunchAtLoginState()
+        startConfigWatcher()
         Task { @MainActor [weak self] in
             try? await Task.sleep(for: .milliseconds(250))
             self?.startEnabledTunnelsIfNeeded()
@@ -99,6 +144,7 @@ final class MenuBarViewModel: ObservableObject {
         ) { [weak self] _ in
             Task { @MainActor [weak self] in
                 self?.stopAll()
+                self?.stopAllGateways()
             }
         }
     }
@@ -114,10 +160,8 @@ final class MenuBarViewModel: ObservableObject {
         return runningCount > 0 ? "Burrow \(runningCount)" : "Burrow"
     }
 
-    var menuBarSymbol: String {
+    var isAnyTunnelRunning: Bool {
         tunnels.contains(where: \.isRunning)
-            ? "point.3.filled.connected.trianglepath.dotted"
-            : "point.3.connected.trianglepath.dotted"
     }
 
     func loadConfig() {
@@ -135,9 +179,30 @@ final class MenuBarViewModel: ObservableObject {
                     isRunning: isRunning,
                     connectionState: connectionStateAfterReload(existingState: existingState, isRunning: isRunning),
                     lastMessage: lastMessageAfterReload(existingState: existingState, tunnel: tunnel, isRunning: isRunning),
-                    recentLogs: existingState?.recentLogs ?? []
+                    recentLogs: existingState?.recentLogs ?? [],
+                    retryAttempt: isRunning ? (existingState?.retryAttempt ?? 0) : 0,
+                    nextRetryAt: isRunning ? existingState?.nextRetryAt : nil,
+                    failedAt: isRunning ? nil : existingState?.failedAt
                 )
             }
+
+            let runningGateways = Set(gatewayTasks.keys)
+            let existingGatewaysByName = Dictionary(uniqueKeysWithValues: gateways.map { ($0.id, $0) })
+            gateways = config.gateways.map { gateway in
+                let existing = existingGatewaysByName[gateway.name]
+                let isRunning = runningGateways.contains(gateway.name)
+                return GatewayState(
+                    id: gateway.name,
+                    config: gateway,
+                    isRunning: isRunning,
+                    connectionState: isRunning
+                        ? (existing?.connectionState ?? .connecting)
+                        : (existing?.connectionState == .failed ? .failed : .disconnected),
+                    lastMessage: existing?.lastMessage ?? (isRunning ? "Connecting" : "Not connected"),
+                    recentLogs: existing?.recentLogs ?? []
+                )
+            }
+            writeSSHInclude(for: config.gateways)
 
             if tunnels.isEmpty {
                 globalMessage = "No tunnels configured yet."
@@ -147,6 +212,7 @@ final class MenuBarViewModel: ObservableObject {
             }
         } catch {
             tunnels = []
+            gateways = []
             globalMessage = "Failed to load config: \(error.localizedDescription)"
         }
     }
@@ -177,7 +243,26 @@ final class MenuBarViewModel: ObservableObject {
 
     func reloadConfig() {
         stopMissingTunnels()
+        stopMissingGateways()
         loadConfig()
+    }
+
+    private func startConfigWatcher() {
+        let watcher = ConfigFileWatcher(url: store.configURL) { [weak self] in
+            self?.handleConfigFileChange()
+        }
+        configWatcher = watcher
+        watcher.start()
+    }
+
+    private func handleConfigFileChange() {
+        let previousMessage = globalMessage
+        stopMissingTunnels()
+        stopMissingGateways()
+        loadConfig()
+        // Keep action feedback (e.g. "Saved x.") instead of the generic load summary
+        // when the watcher fires for our own writes.
+        globalMessage = previousMessage
     }
 
     func startEnabledTunnels() {
@@ -226,7 +311,7 @@ final class MenuBarViewModel: ObservableObject {
             return
         }
 
-        launchPreparedTunnel(preparedLaunch)
+        launchWhenGatewayReady(preparedLaunch, allowGatewayPrompt: allowPasswordPrompt)
     }
 
     private func startTunnels(_ selectedTunnels: [TunnelState], allowPasswordPrompt: Bool, preloadCredentials: Bool) {
@@ -255,7 +340,7 @@ final class MenuBarViewModel: ObservableObject {
         }
 
         for preparedLaunch in preparedLaunches {
-            launchPreparedTunnel(preparedLaunch)
+            launchWhenGatewayReady(preparedLaunch, allowGatewayPrompt: allowPasswordPrompt)
         }
     }
 
@@ -281,7 +366,10 @@ final class MenuBarViewModel: ObservableObject {
     ) -> PreparedTunnelLaunch? {
         let launchTunnel: TunnelConfig
         do {
-            launchTunnel = try preparedTunnelForLaunch(tunnel)
+            launchTunnel = GatewayLinker.applyingGatewayProxy(
+                to: try preparedTunnelForLaunch(tunnel),
+                gateways: gateways.map(\.config)
+            )
         } catch {
             updateState(for: name, isRunning: false, state: .failed, message: "SSH option setup failed: \(error.localizedDescription)")
             globalMessage = "Failed to prepare SSH options for \(name)."
@@ -355,6 +443,7 @@ final class MenuBarViewModel: ObservableObject {
         activeCredentialSources[name] = nil
         sawAuthenticationFailure.remove(name)
         authRePromptCounts[name] = 0
+        clearRetryIndicator(for: name, resetAttempt: true)
         updateState(for: name, isRunning: false, state: .disconnected, message: "Stopping")
         globalMessage = "Stopped \(name)."
     }
@@ -382,6 +471,7 @@ final class MenuBarViewModel: ObservableObject {
             globalMessage = "Tunnel '\(name)' not found."
             return
         }
+        gatewayDraft = nil
         editorDraft = TunnelDraft(tunnel: tunnel, originalName: tunnel.name)
     }
 
@@ -393,6 +483,7 @@ final class MenuBarViewModel: ObservableObject {
 
         var draft = TunnelDraft(tunnel: tunnel, originalName: nil)
         draft.name = uniqueDuplicateName(for: tunnel.name)
+        gatewayDraft = nil
         editorDraft = draft
         globalMessage = "Duplicating \(name)."
     }
@@ -430,7 +521,8 @@ final class MenuBarViewModel: ObservableObject {
     }
 
     func createTunnel() {
-        editorDraft = TunnelDraft.newTunnel(from: tunnels.map(\.tunnel))
+        gatewayDraft = nil
+        editorDraft = TunnelDraft.newTunnel(from: tunnels.map(\.tunnel), sshHosts: sshConfigHosts)
     }
 
     func closeEditor() {
@@ -498,7 +590,570 @@ final class MenuBarViewModel: ObservableObject {
 
     func quit() {
         stopAll()
+        stopAllGateways()
         NSApp.terminate(nil)
+    }
+
+    private func syncEditorWindow() {
+        let title: String?
+        if let draft = gatewayDraft {
+            title = draft.originalName.map { "Edit Gateway \($0)" } ?? "New VPN Gateway"
+        } else if let draft = editorDraft {
+            title = draft.originalName.map { "Edit \($0)" } ?? "New Tunnel"
+        } else {
+            title = nil
+        }
+
+        if let title {
+            if editorWindowController == nil {
+                editorWindowController = EditorWindowController(viewModel: self)
+            }
+            editorWindowController?.present(title: title)
+        } else {
+            editorWindowController?.dismiss()
+        }
+    }
+
+    func createGateway() {
+        editorDraft = nil
+        gatewayDraft = GatewayDraft.newGateway(from: gateways.map(\.config))
+    }
+
+    func openGatewayEditor(for name: String) {
+        guard let gateway = gateways.first(where: { $0.id == name })?.config else {
+            globalMessage = "Gateway '\(name)' not found."
+            return
+        }
+        editorDraft = nil
+        gatewayDraft = GatewayDraft(gateway: gateway, originalName: gateway.name)
+    }
+
+    func closeGatewayEditor() {
+        gatewayDraft = nil
+    }
+
+    func saveGatewayEditor() {
+        guard let draft = gatewayDraft else {
+            return
+        }
+
+        do {
+            let gateway = try draft.toGatewayConfig()
+            if let originalName = draft.originalName, originalName != gateway.name, gatewayTasks[originalName] != nil {
+                stopGateway(named: originalName)
+            } else if gatewayTasks[gateway.name] != nil {
+                stopGateway(named: gateway.name)
+            }
+            try store.upsertGateway(gateway, replacing: draft.originalName)
+            loadConfig()
+            globalMessage = "Saved gateway \(gateway.name)."
+            gatewayDraft = nil
+        } catch {
+            globalMessage = "Save failed: \(error.localizedDescription)"
+        }
+    }
+
+    func deleteGatewayEditorTarget() {
+        guard let draft = gatewayDraft, let originalName = draft.originalName else {
+            return
+        }
+        deleteGateway(named: originalName)
+        gatewayDraft = nil
+    }
+
+    func deleteGateway(named name: String) {
+        do {
+            if gatewayTasks[name] != nil || activeSAMLAuthenticators[name] != nil {
+                stopGateway(named: name)
+            }
+            try store.removeGateway(name: name)
+            loadConfig()
+            let dependents = tunnels.filter { $0.tunnel.gateway == name }.map(\.id)
+            globalMessage = dependents.isEmpty
+                ? "Deleted gateway \(name)."
+                : "Deleted gateway \(name). Tunnels still referencing it: \(dependents.joined(separator: ", "))."
+        } catch {
+            globalMessage = "Delete failed: \(error.localizedDescription)"
+        }
+    }
+
+    private var isBundledApp: Bool {
+        Bundle.main.bundlePath.hasSuffix(".app")
+    }
+
+    func refreshLaunchAtLoginState() {
+        launchAtLoginEnabled = isBundledApp && SMAppService.mainApp.status == .enabled
+    }
+
+    func setLaunchAtLogin(_ enabled: Bool) {
+        guard isBundledApp else {
+            globalMessage = "Start at Login needs the installed app bundle (run scripts/install-app.sh)."
+            return
+        }
+
+        do {
+            if enabled {
+                try SMAppService.mainApp.register()
+            } else {
+                try SMAppService.mainApp.unregister()
+            }
+            refreshLaunchAtLoginState()
+            globalMessage = enabled ? "Burrow will start at login." : "Burrow will no longer start at login."
+        } catch {
+            refreshLaunchAtLoginState()
+            globalMessage = "Start at Login change failed: \(error.localizedDescription)"
+        }
+    }
+
+    func beginSSHConfigImport() {
+        let hosts = SSHConfigParser.parse()
+        sshConfigHosts = hosts
+        let forwardHosts = hosts.filter { !$0.forwards.isEmpty }
+
+        guard !forwardHosts.isEmpty else {
+            globalMessage = hosts.isEmpty
+                ? "No usable Host entries found in ~/.ssh/config."
+                : "No hosts with forwards in ~/.ssh/config; \(hosts.count) host(s) now feed editor autofill."
+            return
+        }
+
+        var takenNames = Set(tunnels.map(\.id))
+        importCandidates = forwardHosts.map { host in
+            let name = Self.uniqueName(base: host.alias, existing: takenNames)
+            takenNames.insert(name)
+            return SSHConfigImportCandidate(
+                host: host,
+                include: !tunnels.contains { $0.id == host.alias },
+                tunnelName: name
+            )
+        }
+    }
+
+    func cancelSSHConfigImport() {
+        importCandidates = nil
+    }
+
+    func confirmSSHConfigImport() {
+        guard let candidates = importCandidates else {
+            return
+        }
+
+        var imported = 0
+        do {
+            for candidate in candidates where candidate.include {
+                try store.upsert(candidate.toTunnelConfig())
+                imported += 1
+            }
+            loadConfig()
+            globalMessage = "Imported \(imported) tunnel(s) from SSH config."
+        } catch {
+            loadConfig()
+            globalMessage = "Import failed: \(error.localizedDescription)"
+        }
+        importCandidates = nil
+    }
+
+    private static func uniqueName(base: String, existing: Set<String>) -> String {
+        guard existing.contains(base) else {
+            return base
+        }
+        var suffix = 2
+        while existing.contains("\(base)-\(suffix)") {
+            suffix += 1
+        }
+        return "\(base)-\(suffix)"
+    }
+
+    fileprivate func scheduleRetryIndicator(for name: String) {
+        guard let index = tunnels.firstIndex(where: { $0.id == name }) else {
+            return
+        }
+        tunnels[index].retryAttempt += 1
+        let delay = max(tunnels[index].tunnel.reconnectDelaySeconds, 0)
+        tunnels[index].nextRetryAt = Date().addingTimeInterval(TimeInterval(delay))
+    }
+
+    fileprivate func clearRetryIndicator(for name: String, resetAttempt: Bool) {
+        guard let index = tunnels.firstIndex(where: { $0.id == name }) else {
+            return
+        }
+        tunnels[index].nextRetryAt = nil
+        if resetAttempt {
+            tunnels[index].retryAttempt = 0
+        }
+    }
+
+    // MARK: - VPN gateways
+
+    var sshIncludePath: String {
+        store.configURL.deletingLastPathComponent().appendingPathComponent("ssh_include").path
+    }
+
+    var hasSSHInclude: Bool {
+        gateways.contains { !$0.config.sshHostPatterns.isEmpty }
+    }
+
+    private func writeSSHInclude(for gateways: [GatewayConfig]) {
+        let url = store.configURL.deletingLastPathComponent().appendingPathComponent("ssh_include")
+        if let text = GatewayLinker.sshIncludeText(for: gateways) {
+            try? text.write(to: url, atomically: true, encoding: .utf8)
+        } else {
+            try? FileManager.default.removeItem(at: url)
+        }
+    }
+
+    @discardableResult
+    func startGateway(named name: String, allowPasswordPrompt: Bool = true) -> Bool {
+        guard gatewayTasks[name] == nil else {
+            return true
+        }
+        guard let gateway = gateways.first(where: { $0.id == name })?.config else {
+            globalMessage = "Gateway '\(name)' not found."
+            return false
+        }
+
+        if gateway.usesSAML {
+            guard allowPasswordPrompt else {
+                updateGatewayState(for: name, isRunning: false, state: .failed, message: "SAML sign-in needed — click Connect")
+                return false
+            }
+
+            if gateway.vpnProtocol.lowercased() == "gp" {
+                guard activeSAMLAuthenticators[name] == nil else {
+                    return true
+                }
+                updateGatewayState(for: name, isRunning: false, state: .connecting, message: "Waiting for SAML sign-in")
+                let authenticator = GPSAMLAuthenticator(gateway: gateway)
+                activeSAMLAuthenticators[name] = authenticator
+                authenticator.begin { [weak self] result in
+                    guard let self else {
+                        return
+                    }
+                    self.activeSAMLAuthenticators[name] = nil
+                    switch result {
+                    case .success(let saml):
+                        self.spawnGatewaySupervisor(
+                            gateway,
+                            credential: .samlCookie(username: saml.username, cookie: saml.cookie, usergroup: saml.usergroup)
+                        )
+                    case .failure(let error):
+                        self.updateGatewayState(for: name, isRunning: false, state: .failed, message: error.localizedDescription)
+                    }
+                }
+                return true
+            }
+
+            // AnyConnect-style SAML: openconnect opens the default browser and
+            // receives the token on a localhost redirect.
+            spawnGatewaySupervisor(gateway, credential: .samlExternalBrowser)
+            globalMessage = "Gateway \(name): complete the sign-in in your browser."
+            return true
+        }
+
+        var credential: GatewayCredential = .none
+        var pendingSave: PendingCredentialSave?
+        if let credentialKey = TunnelCredentialKey(gateway: gateway) {
+            let isRetry = invalidGatewayCredentialKeys.contains(credentialKey)
+            let savedPassword = isRetry ? nil : ((try? passwordStore.password(for: credentialKey)) ?? nil)
+            if let savedPassword, !savedPassword.isEmpty {
+                credential = .password(savedPassword)
+            } else if allowPasswordPrompt {
+                guard let entered = PasswordPrompt.requestVPNPassword(
+                    gatewayName: gateway.name,
+                    server: gateway.server,
+                    user: credentialKey.user,
+                    retry: isRetry
+                ) else {
+                    updateGatewayState(for: name, isRunning: false, state: .disconnected, message: "Password entry cancelled")
+                    return false
+                }
+                credential = .password(entered)
+                pendingSave = PendingCredentialSave(key: credentialKey, password: entered)
+            } else {
+                updateGatewayState(for: name, isRunning: false, state: .failed, message: "No saved VPN password — connect manually once")
+                return false
+            }
+        }
+
+        spawnGatewaySupervisor(gateway, credential: credential, pendingSave: pendingSave)
+        return true
+    }
+
+    private func spawnGatewaySupervisor(_ gateway: GatewayConfig, credential: GatewayCredential, pendingSave: PendingCredentialSave? = nil) {
+        let name = gateway.name
+        guard gatewayTasks[name] == nil else {
+            return
+        }
+
+        pendingGatewayCredentialSaves[name] = pendingSave
+        updateGatewayState(for: name, isRunning: true, state: .connecting, message: "Connecting VPN")
+        let bridge = GatewayEventBridge(owner: self, gatewayName: name)
+        let task = Task.detached(priority: .userInitiated) {
+            let supervisor = GatewaySupervisor(
+                gateway: gateway,
+                credential: credential,
+                logger: { message in
+                    bridge.log(message)
+                },
+                eventHandler: { event in
+                    bridge.handle(event)
+                }
+            )
+            await supervisor.run()
+            bridge.finish()
+        }
+        gatewayTasks[name] = task
+        globalMessage = "Starting gateway \(name)."
+    }
+
+    func stopGateway(named name: String) {
+        if let authenticator = activeSAMLAuthenticators[name] {
+            activeSAMLAuthenticators[name] = nil
+            authenticator.cancel()
+        }
+
+        guard let task = gatewayTasks[name] else {
+            updateGatewayState(for: name, isRunning: false, state: .disconnected, message: "Not running")
+            return
+        }
+        task.cancel()
+        gatewayTasks[name] = nil
+        pendingGatewayCredentialSaves[name] = nil
+        updateGatewayState(for: name, isRunning: false, state: .disconnected, message: "Stopped")
+
+        let dependents = tunnels.filter { $0.tunnel.gateway == name && $0.isRunning }.map(\.id)
+        globalMessage = dependents.isEmpty
+            ? "Stopped gateway \(name)."
+            : "Stopped gateway \(name); dependent tunnels will keep retrying: \(dependents.joined(separator: ", "))."
+    }
+
+    func stopAllGateways() {
+        for name in Array(gatewayTasks.keys) {
+            stopGateway(named: name)
+        }
+    }
+
+    private func stopMissingGateways() {
+        let configuredNames = Set((try? store.load().gateways.map(\.name)) ?? [])
+        for name in gatewayTasks.keys where !configuredNames.contains(name) {
+            stopGateway(named: name)
+        }
+    }
+
+    /// Starts the tunnel once its gateway's SOCKS port answers, starting the
+    /// gateway first when needed.
+    private func launchWhenGatewayReady(_ prepared: PreparedTunnelLaunch, allowGatewayPrompt: Bool) {
+        guard let gatewayName = prepared.tunnel.gateway else {
+            launchPreparedTunnel(prepared)
+            return
+        }
+        guard let gatewayConfig = gateways.first(where: { $0.id == gatewayName })?.config else {
+            updateState(for: prepared.name, isRunning: false, state: .failed, message: "Gateway '\(gatewayName)' is not defined in the config")
+            return
+        }
+
+        if PortProbe.canConnect(host: "127.0.0.1", port: gatewayConfig.socksPort) {
+            launchPreparedTunnel(prepared)
+            return
+        }
+
+        guard startGateway(named: gatewayName, allowPasswordPrompt: allowGatewayPrompt) else {
+            updateState(for: prepared.name, isRunning: false, state: .failed, message: "Gateway \(gatewayName) is not running")
+            return
+        }
+
+        updateState(for: prepared.name, isRunning: false, state: .connecting, message: "Waiting for gateway \(gatewayName)")
+        Task { @MainActor [weak self] in
+            let deadline = Date().addingTimeInterval(150)
+            while Date() < deadline {
+                guard let self else {
+                    return
+                }
+                if self.tasks[prepared.name] != nil {
+                    return
+                }
+                if self.gatewayTasks[gatewayName] == nil && self.activeSAMLAuthenticators[gatewayName] == nil {
+                    self.updateState(for: prepared.name, isRunning: false, state: .failed, message: "Gateway \(gatewayName) did not connect")
+                    return
+                }
+                if PortProbe.canConnect(host: "127.0.0.1", port: gatewayConfig.socksPort) {
+                    self.launchPreparedTunnel(prepared)
+                    return
+                }
+                try? await Task.sleep(for: .milliseconds(500))
+            }
+            self?.updateState(for: prepared.name, isRunning: false, state: .failed, message: "Timed out waiting for gateway \(gatewayName)")
+        }
+    }
+
+    fileprivate func updateGatewayState(for name: String, isRunning: Bool, state: ConnectionState? = nil, message: String) {
+        guard let index = gateways.firstIndex(where: { $0.id == name }) else {
+            return
+        }
+        gateways[index].isRunning = isRunning
+        if let state {
+            gateways[index].connectionState = state
+        }
+        gateways[index].lastMessage = message
+    }
+
+    fileprivate func appendGatewayLog(for name: String, message: String) {
+        guard let index = gateways.firstIndex(where: { $0.id == name }) else {
+            return
+        }
+        let trimmed = message.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            return
+        }
+        gateways[index].recentLogs.append(trimmed)
+        if gateways[index].recentLogs.count > 20 {
+            gateways[index].recentLogs.removeFirst(gateways[index].recentLogs.count - 20)
+        }
+    }
+
+    fileprivate func finishGateway(named name: String) {
+        gatewayTasks[name] = nil
+        pendingGatewayCredentialSaves[name] = nil
+        let state: ConnectionState = gateways.first(where: { $0.id == name })?.connectionState == .failed ? .failed : .disconnected
+        updateGatewayState(for: name, isRunning: false, state: state, message: state == .failed ? "VPN connection failed" : "Stopped")
+    }
+
+    fileprivate func persistGatewayPasswordIfNeeded(for name: String) {
+        guard let pendingSave = pendingGatewayCredentialSaves[name] else {
+            return
+        }
+        do {
+            try passwordStore.save(password: pendingSave.password, for: pendingSave.key)
+            pendingGatewayCredentialSaves[name] = nil
+            invalidGatewayCredentialKeys.remove(pendingSave.key)
+            globalMessage = "Saved VPN password for \(pendingSave.key.account) in Keychain."
+        } catch {
+            globalMessage = "VPN connected, but failed to save password: \(error.localizedDescription)"
+        }
+    }
+
+    /// Opens a proxied browser instance through the gateway, starting the
+    /// gateway first when needed.
+    func openBrowser(_ browser: ChromiumBrowser, viaGateway name: String) {
+        guard let gateway = gateways.first(where: { $0.id == name })?.config else {
+            globalMessage = "Gateway '\(name)' not found."
+            return
+        }
+
+        if PortProbe.canConnect(host: "127.0.0.1", port: gateway.socksPort) {
+            launchBrowser(browser, through: gateway)
+            return
+        }
+
+        guard startGateway(named: name) else {
+            return
+        }
+        globalMessage = "Starting \(name); \(browser.displayName) opens when the VPN is up."
+        Task { @MainActor [weak self] in
+            let deadline = Date().addingTimeInterval(150)
+            while Date() < deadline {
+                guard let self else {
+                    return
+                }
+                if self.gatewayTasks[name] == nil && self.activeSAMLAuthenticators[name] == nil {
+                    self.globalMessage = "Gateway \(name) did not connect; browser not opened."
+                    return
+                }
+                if PortProbe.canConnect(host: "127.0.0.1", port: gateway.socksPort) {
+                    self.launchBrowser(browser, through: gateway)
+                    return
+                }
+                try? await Task.sleep(for: .milliseconds(500))
+            }
+            self?.globalMessage = "Timed out waiting for gateway \(name); browser not opened."
+        }
+    }
+
+    private func launchBrowser(_ browser: ChromiumBrowser, through gateway: GatewayConfig) {
+        do {
+            try ChromiumBrowserLauncher.launch(browser, through: gateway)
+            globalMessage = "Opened \(browser.displayName) via \(gateway.name) (socks :\(gateway.socksPort))."
+        } catch {
+            globalMessage = "Failed to open \(browser.displayName): \(error.localizedDescription)"
+        }
+    }
+
+    /// Assigns (or clears) the gateway for a set of tunnels and restarts the
+    /// running ones so the new route applies immediately.
+    func setGateway(_ gatewayName: String?, forTunnels names: [String]) {
+        do {
+            var config = try store.load()
+            var changed: [String] = []
+            for index in config.tunnels.indices where names.contains(config.tunnels[index].name) {
+                if config.tunnels[index].gateway != gatewayName {
+                    config.tunnels[index].gateway = gatewayName
+                    changed.append(config.tunnels[index].name)
+                }
+            }
+            guard !changed.isEmpty else {
+                return
+            }
+            try store.save(config)
+            loadConfig()
+
+            let routeLabel = gatewayName.map { "via \($0)" } ?? "directly"
+            let subject = changed.count == 1 ? changed[0] : "\(changed.count) tunnels"
+            globalMessage = "Routing \(subject) \(routeLabel)."
+
+            for name in changed where tasks[name] != nil {
+                restartTunnel(named: name)
+            }
+        } catch {
+            globalMessage = "Failed to change gateway: \(error.localizedDescription)"
+        }
+    }
+
+    fileprivate func handleGatewayCertificateUntrusted(for name: String, suggestedPin: String) {
+        guard let gateway = gateways.first(where: { $0.id == name })?.config else {
+            return
+        }
+        updateGatewayState(for: name, isRunning: false, state: .failed, message: "Server certificate not trusted")
+
+        let alert = NSAlert()
+        alert.messageText = "Trust the VPN server certificate for \(gateway.server)?"
+        alert.informativeText = "openconnect could not verify this server's certificate — it uses its own CA bundle, not the macOS Keychain, so this is common even when the official client connects fine.\n\nCertificate fingerprint:\n\(suggestedPin)\n\nTrusting pins exactly this certificate for this gateway (saved in its extra arguments)."
+        alert.alertStyle = .warning
+        alert.addButton(withTitle: "Trust and Reconnect")
+        alert.addButton(withTitle: "Cancel")
+
+        guard alert.runModal() == .alertFirstButtonReturn else {
+            globalMessage = "Gateway \(name): server certificate was not trusted."
+            return
+        }
+
+        do {
+            var updated = gateway
+            updated.extraArgs.removeAll {
+                $0 == "--servercert" || $0.hasPrefix("--servercert=") || $0.hasPrefix("pin-sha256:")
+            }
+            updated.extraArgs.append("--servercert=\(suggestedPin)")
+            try store.upsertGateway(updated, replacing: name)
+            loadConfig()
+            globalMessage = "Pinned certificate for \(name); reconnecting."
+            // Let the failed supervisor finish tearing down before relaunching.
+            Task { @MainActor [weak self] in
+                try? await Task.sleep(for: .milliseconds(400))
+                self?.startGateway(named: name)
+            }
+        } catch {
+            globalMessage = "Failed to save certificate pin: \(error.localizedDescription)"
+        }
+    }
+
+    fileprivate func handleGatewayAuthenticationFailure(for name: String) {
+        guard let gateway = gateways.first(where: { $0.id == name })?.config,
+              let credentialKey = TunnelCredentialKey(gateway: gateway) else {
+            return
+        }
+        invalidGatewayCredentialKeys.insert(credentialKey)
+        pendingGatewayCredentialSaves[name] = nil
+        try? passwordStore.deletePassword(for: credentialKey)
+        globalMessage = "VPN password for \(credentialKey.account) was rejected. Connect again to re-enter it."
     }
 
     private func connectionPreparation(
@@ -592,6 +1247,13 @@ final class MenuBarViewModel: ObservableObject {
         tunnels[index].isRunning = isRunning
         if let state {
             tunnels[index].connectionState = state
+            if state == .failed {
+                if !isRunning, tunnels[index].failedAt == nil {
+                    tunnels[index].failedAt = Date()
+                }
+            } else {
+                tunnels[index].failedAt = nil
+            }
         }
         tunnels[index].lastMessage = message
     }
@@ -619,6 +1281,7 @@ final class MenuBarViewModel: ObservableObject {
         }
         activeCredentialSources[name] = nil
         sawAuthenticationFailure.remove(name)
+        clearRetryIndicator(for: name, resetAttempt: true)
         let state: ConnectionState = tunnels.first(where: { $0.id == name })?.connectionState == .failed ? .failed : .disconnected
         updateState(for: name, isRunning: false, state: state, message: state == .failed ? "Connect failed" : "Stopped")
         if shouldPromptAgain {
@@ -736,10 +1399,12 @@ final class TunnelEventBridge: @unchecked Sendable {
         Task { @MainActor in
             switch event {
             case .starting:
+                self.owner?.clearRetryIndicator(for: self.tunnelName, resetAttempt: false)
                 self.owner?.updateState(for: self.tunnelName, isRunning: true, state: .connecting, message: "Connecting")
             case .connected:
                 self.owner?.persistPasswordIfNeeded(for: self.tunnelName)
                 self.owner?.resetAuthRePromptCount(for: self.tunnelName)
+                self.owner?.clearRetryIndicator(for: self.tunnelName, resetAttempt: true)
                 self.owner?.updateState(for: self.tunnelName, isRunning: true, state: .connected, message: "Connected")
             case .authenticationFailed(let message):
                 self.owner?.recordAuthenticationFailure(for: self.tunnelName)
@@ -747,9 +1412,11 @@ final class TunnelEventBridge: @unchecked Sendable {
                 self.owner?.globalMessage = "\(self.tunnelName): authentication failed. \(message)"
             case .exited(let code, let diagnostic):
                 let message = diagnostic.map { "ssh exited \(code): \($0); retrying" } ?? "ssh exited \(code); retrying"
+                self.owner?.scheduleRetryIndicator(for: self.tunnelName)
                 self.owner?.updateState(for: self.tunnelName, isRunning: true, state: .failed, message: message)
                 self.owner?.globalMessage = diagnostic.map { "\(self.tunnelName): \($0). Retrying." } ?? "\(self.tunnelName): ssh exited with code \(code). Retrying."
             case .failedToStart(let message):
+                self.owner?.scheduleRetryIndicator(for: self.tunnelName)
                 self.owner?.updateState(for: self.tunnelName, isRunning: true, state: .failed, message: "Connect failed; retrying: \(message)")
                 self.owner?.globalMessage = "\(self.tunnelName): \(message). Retrying."
             case .log:
@@ -761,6 +1428,54 @@ final class TunnelEventBridge: @unchecked Sendable {
     func finish() {
         Task { @MainActor in
             self.owner?.finishTunnel(named: self.tunnelName)
+        }
+    }
+}
+
+final class GatewayEventBridge: @unchecked Sendable {
+    weak var owner: MenuBarViewModel?
+    let gatewayName: String
+
+    init(owner: MenuBarViewModel, gatewayName: String) {
+        self.owner = owner
+        self.gatewayName = gatewayName
+    }
+
+    func log(_ message: String) {
+        Task { @MainActor in
+            self.owner?.appendGatewayLog(for: self.gatewayName, message: message)
+        }
+    }
+
+    func handle(_ event: GatewayRuntimeEvent) {
+        Task { @MainActor in
+            switch event {
+            case .starting:
+                self.owner?.updateGatewayState(for: self.gatewayName, isRunning: true, state: .connecting, message: "Connecting VPN")
+            case .connected:
+                self.owner?.persistGatewayPasswordIfNeeded(for: self.gatewayName)
+                self.owner?.updateGatewayState(for: self.gatewayName, isRunning: true, state: .connected, message: "Connected")
+                self.owner?.globalMessage = "Gateway \(self.gatewayName) connected."
+            case .certificateUntrusted(let suggestedPin):
+                self.owner?.handleGatewayCertificateUntrusted(for: self.gatewayName, suggestedPin: suggestedPin)
+            case .authenticationFailed(let message):
+                self.owner?.handleGatewayAuthenticationFailure(for: self.gatewayName)
+                self.owner?.updateGatewayState(for: self.gatewayName, isRunning: false, state: .failed, message: "Authentication failed: \(message)")
+            case .exited(let code, let diagnostic):
+                let message = diagnostic.map { "openconnect exited \(code): \($0); retrying" } ?? "openconnect exited \(code); retrying"
+                self.owner?.updateGatewayState(for: self.gatewayName, isRunning: true, state: .failed, message: message)
+            case .failedToStart(let message):
+                self.owner?.updateGatewayState(for: self.gatewayName, isRunning: false, state: .failed, message: message)
+                self.owner?.globalMessage = "Gateway \(self.gatewayName): \(message)"
+            case .log:
+                break
+            }
+        }
+    }
+
+    func finish() {
+        Task { @MainActor in
+            self.owner?.finishGateway(named: self.gatewayName)
         }
     }
 }
@@ -784,13 +1499,11 @@ struct MenuBarContent: View {
                 .padding(.top, 12)
                 .padding(.bottom, 10)
             Divider()
-            if let draft = viewModel.editorDraft {
-                TunnelEditorSheet(
-                    draft: binding(for: draft),
-                    suggestions: TunnelEditorSuggestions(tunnels: viewModel.tunnels.map(\.tunnel)),
-                    onCancel: { viewModel.closeEditor() },
-                    onSave: { viewModel.saveEditor() },
-                    onDelete: { viewModel.deleteEditorTunnel() }
+            if viewModel.importCandidates != nil {
+                SSHConfigImportView(
+                    candidates: importCandidatesBinding,
+                    onCancel: { viewModel.cancelSSHConfigImport() },
+                    onImport: { viewModel.confirmSSHConfigImport() }
                 )
                 .padding(12)
             } else {
@@ -800,9 +1513,18 @@ struct MenuBarContent: View {
                 } else {
                     ScrollView {
                         VStack(alignment: .leading, spacing: 10) {
+                            if !viewModel.gateways.isEmpty {
+                                gatewaysSection
+                            }
                             ForEach(endpointGroups) { group in
                                 VStack(alignment: .leading, spacing: 5) {
-                                    EndpointHeader(group: group)
+                                    EndpointHeader(
+                                        group: group,
+                                        gatewayNames: viewModel.gateways.map(\.id),
+                                        onSelectGateway: { gatewayName in
+                                            viewModel.setGateway(gatewayName, forTunnels: group.tunnels.map(\.id))
+                                        }
+                                    )
 
                                     VStack(alignment: .leading, spacing: 0) {
                                         ForEach(Array(group.tunnels.enumerated()), id: \.element.id) { index, tunnel in
@@ -813,13 +1535,15 @@ struct MenuBarContent: View {
                                             }
                                             TunnelRow(
                                                 tunnel: tunnel,
+                                                gatewayNames: viewModel.gateways.map(\.id),
                                                 onStart: { viewModel.startTunnel(named: tunnel.id) },
                                                 onStop: { viewModel.stopTunnel(named: tunnel.id) },
                                                 onRestart: { viewModel.restartTunnel(named: tunnel.id) },
                                                 onEdit: { viewModel.openEditor(for: tunnel.id) },
                                                 onDuplicate: { viewModel.duplicateTunnel(named: tunnel.id) },
                                                 onDelete: { viewModel.deleteTunnel(named: tunnel.id) },
-                                                onToggleAutoConnect: { viewModel.setAutoConnect(named: tunnel.id, enabled: $0) }
+                                                onToggleAutoConnect: { viewModel.setAutoConnect(named: tunnel.id, enabled: $0) },
+                                                onSetGateway: { viewModel.setGateway($0, forTunnels: [tunnel.id]) }
                                             )
                                         }
                                     }
@@ -829,7 +1553,7 @@ struct MenuBarContent: View {
                                     )
                                     .overlay(
                                         RoundedRectangle(cornerRadius: 16, style: .continuous)
-                                            .stroke(Color.black.opacity(0.035), lineWidth: 1)
+                                            .stroke(Color.primary.opacity(0.06), lineWidth: 1)
                                     )
                                     .shadow(color: Color.black.opacity(0.045), radius: 6, x: 0, y: 3)
                                 }
@@ -844,7 +1568,7 @@ struct MenuBarContent: View {
                 footer
                     .padding(.horizontal, 12)
                     .padding(.vertical, 10)
-                    .background(Color(nsColor: .controlBackgroundColor).opacity(0.42))
+                    .background(Color.primary.opacity(0.035))
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
@@ -866,8 +1590,8 @@ struct MenuBarContent: View {
     }
 
     private var preferredMenuHeight: CGFloat {
-        if viewModel.editorDraft != nil {
-            return 720
+        if viewModel.importCandidates != nil {
+            return 620
         }
 
         guard !viewModel.tunnels.isEmpty else {
@@ -883,29 +1607,25 @@ struct MenuBarContent: View {
             return total + groupHeaderAndSpacing + (tunnelCount * rowHeight) + dividerHeight + interGroupSpacing
         }
 
+        let gatewaysHeight: CGFloat = viewModel.gateways.isEmpty
+            ? 0
+            : 32 + CGFloat(viewModel.gateways.count) * 54 + CGFloat(max(viewModel.gateways.count - 1, 0)) + 10
+
         let headerAndFooterChrome: CGFloat = 166
-        return headerAndFooterChrome + listHeight
+        return headerAndFooterChrome + gatewaysHeight + listHeight
     }
 
     private var header: some View {
         VStack(alignment: .leading, spacing: 7) {
             HStack {
-                if viewModel.editorDraft != nil {
-                    Button("Back") {
-                        viewModel.closeEditor()
-                    }
-                    .buttonStyle(.bordered)
-                    .controlSize(.small)
-                } else {
-                    Text("Burrow")
-                        .font(.system(size: 20, weight: .bold))
-                        .tracking(-0.45)
-                }
+                Text("Burrow")
+                    .font(.system(size: 20, weight: .bold))
+                    .tracking(-0.45)
                 Spacer()
-                if viewModel.editorDraft == nil {
+                if viewModel.importCandidates == nil {
                     HealthSummaryPill(tunnels: viewModel.tunnels)
                 } else {
-                    HeaderPill(text: "Editing tunnel")
+                    HeaderPill(text: "Import")
                 }
             }
             Text(viewModel.globalMessage)
@@ -920,7 +1640,7 @@ struct MenuBarContent: View {
         VStack(alignment: .leading, spacing: 7) {
             Text("No tunnels saved.")
                 .font(.system(size: 13, weight: .medium))
-            Text("Create tunnels with the CLI or edit the central config, then reload here.")
+            Text("Click New Tunnel below to create one, or use Settings → Import from SSH Config to pull in existing forwards.")
                 .font(.system(size: 11))
                 .foregroundStyle(.secondary)
         }
@@ -941,40 +1661,121 @@ struct MenuBarContent: View {
                 }
                 Spacer()
                 Button {
+                    viewModel.createGateway()
+                } label: {
+                    Label("New VPN", systemImage: "lock.shield")
+                }
+                Button {
                     viewModel.createTunnel()
                 } label: {
                     Label("New Tunnel", systemImage: "plus")
                 }
                 .buttonStyle(.borderedProminent)
-                .tint(.black)
+                .tint(.burrowPrimaryButton)
             }
 
             HStack(spacing: 8) {
                 Menu {
-                    Button("Reload", action: viewModel.reloadConfig)
+                    Button("New VPN Gateway…", action: viewModel.createGateway)
+                    Button("Import from SSH Config…", action: viewModel.beginSSHConfigImport)
+                    Toggle("Start at Login", isOn: Binding(
+                        get: { viewModel.launchAtLoginEnabled },
+                        set: { viewModel.setLaunchAtLogin($0) }
+                    ))
+                    if viewModel.hasSSHInclude {
+                        Button("Copy SSH Config Include Line") {
+                            NSPasteboard.general.clearContents()
+                            NSPasteboard.general.setString("Include \"\(viewModel.sshIncludePath)\"", forType: .string)
+                            viewModel.globalMessage = "Copied — paste at the top of ~/.ssh/config to route hosts through gateways."
+                        }
+                    }
                     Divider()
+                    Button("Reload", action: viewModel.reloadConfig)
                     Button("Edit JSON", action: viewModel.openConfig)
                     Button("Reveal File", action: viewModel.revealConfigFolder)
+                    Divider()
+                    Button("Quit Burrow") {
+                        viewModel.quit()
+                    }
                 } label: {
                     Label("Settings", systemImage: "gearshape")
                 }
                 .menuStyle(.borderlessButton)
 
                 Spacer()
-
-                Button("Quit") {
-                    viewModel.quit()
-                }
             }
             .font(.system(size: 11))
         }
         .controlSize(.small)
     }
 
-    private func binding(for draft: TunnelDraft) -> Binding<TunnelDraft> {
+    private var gatewaysSection: some View {
+        VStack(alignment: .leading, spacing: 5) {
+            HStack(spacing: 8) {
+                Image(systemName: "lock.shield")
+                    .font(.system(size: 8, weight: .semibold))
+                    .foregroundStyle(.secondary.opacity(0.64))
+                    .frame(width: 17, height: 17)
+                    .background(
+                        RoundedRectangle(cornerRadius: 6, style: .continuous)
+                            .fill(Color.secondary.opacity(0.055))
+                    )
+                Text(verbatim: "vpn gateways")
+                    .font(.system(size: 10, weight: .bold, design: .monospaced))
+                    .tracking(0.15)
+                    .foregroundStyle(Color.secondary.opacity(0.62))
+                Spacer(minLength: 4)
+                Button {
+                    viewModel.createGateway()
+                } label: {
+                    Image(systemName: "plus")
+                        .font(.system(size: 9, weight: .bold))
+                        .foregroundStyle(.secondary.opacity(0.7))
+                        .frame(width: 17, height: 17)
+                        .background(
+                            RoundedRectangle(cornerRadius: 6, style: .continuous)
+                                .fill(Color.secondary.opacity(0.055))
+                        )
+                }
+                .buttonStyle(.plain)
+                .help("New VPN gateway")
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 1)
+
+            VStack(alignment: .leading, spacing: 0) {
+                ForEach(Array(viewModel.gateways.enumerated()), id: \.element.id) { index, gateway in
+                    if index > 0 {
+                        Divider()
+                            .opacity(0.34)
+                            .padding(.leading, 42)
+                    }
+                    GatewayRow(
+                        gateway: gateway,
+                        onStart: { viewModel.startGateway(named: gateway.id) },
+                        onStop: { viewModel.stopGateway(named: gateway.id) },
+                        onEdit: { viewModel.openGatewayEditor(for: gateway.id) },
+                        onDelete: { viewModel.deleteGateway(named: gateway.id) },
+                        onOpenBrowser: { viewModel.openBrowser($0, viaGateway: gateway.id) }
+                    )
+                }
+            }
+            .background(
+                RoundedRectangle(cornerRadius: 16, style: .continuous)
+                    .fill(Color(nsColor: .controlBackgroundColor).opacity(0.54))
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 16, style: .continuous)
+                    .stroke(Color.primary.opacity(0.06), lineWidth: 1)
+            )
+            .shadow(color: Color.black.opacity(0.045), radius: 6, x: 0, y: 3)
+        }
+    }
+
+    private var importCandidatesBinding: Binding<[SSHConfigImportCandidate]> {
         Binding(
-            get: { viewModel.editorDraft ?? draft },
-            set: { viewModel.editorDraft = $0 }
+            get: { viewModel.importCandidates ?? [] },
+            set: { viewModel.importCandidates = $0 }
         )
     }
 
@@ -982,7 +1783,7 @@ struct MenuBarContent: View {
         var groups: [EndpointGroup] = []
 
         for tunnel in viewModel.tunnels {
-            let endpoint = "\(tunnel.tunnel.host):\(String(tunnel.tunnel.sshPort))"
+            let endpoint = tunnel.tunnel.host
             if let index = groups.firstIndex(where: { $0.endpoint == endpoint }) {
                 var tunnels = groups[index].tunnels
                 tunnels.append(tunnel)
@@ -998,6 +1799,8 @@ struct MenuBarContent: View {
 
 private struct EndpointHeader: View {
     let group: MenuBarContent.EndpointGroup
+    let gatewayNames: [String]
+    let onSelectGateway: (String?) -> Void
 
     var body: some View {
         HStack(spacing: 8) {
@@ -1015,12 +1818,78 @@ private struct EndpointHeader: View {
                 .foregroundStyle(Color.secondary.opacity(0.62))
                 .lineLimit(1)
                 .truncationMode(.middle)
+            if !gatewayNames.isEmpty {
+                gatewayPickerChip
+            }
             Spacer(minLength: 4)
             EndpointHealthDots(tunnels: group.tunnels)
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 1)
         .help(group.endpoint)
+    }
+
+    /// "" = direct, a name = that gateway, nil = tunnels in this group differ.
+    private var uniformGatewaySelection: String? {
+        let values = Set(group.tunnels.map { $0.tunnel.gateway ?? "" })
+        return values.count == 1 ? values.first : nil
+    }
+
+    private var gatewayPickerChip: some View {
+        Menu {
+            Picker("Route this host", selection: Binding(
+                get: { uniformGatewaySelection ?? "__mixed__" },
+                set: { selected in
+                    onSelectGateway(selected.isEmpty ? nil : selected)
+                }
+            )) {
+                Text("Direct — no VPN").tag("")
+                ForEach(gatewayNames, id: \.self) { name in
+                    Text("via \(name)").tag(name)
+                }
+            }
+            .pickerStyle(.inline)
+            .labelsHidden()
+        } label: {
+            HStack(spacing: 3) {
+                Image(systemName: "lock.shield")
+                    .font(.system(size: 7.5, weight: .semibold))
+                Text(verbatim: chipLabel)
+                    .font(.system(size: 9.5, weight: .bold, design: .monospaced))
+                    .lineLimit(1)
+                Image(systemName: "chevron.down")
+                    .font(.system(size: 6, weight: .bold))
+            }
+            .foregroundStyle(chipIsActive ? Color.burrowAccent.opacity(0.9) : Color.secondary.opacity(0.62))
+            .padding(.horizontal, 7)
+            .frame(height: 18)
+            .background(
+                Capsule(style: .continuous)
+                    .fill(chipIsActive ? Color.burrowAccentHalo.opacity(0.7) : Color.secondary.opacity(0.055))
+            )
+        }
+        .menuStyle(.borderlessButton)
+        .menuIndicator(.hidden)
+        .fixedSize()
+        .help("Which VPN gateway tunnels to this host connect through")
+    }
+
+    private var chipLabel: String {
+        switch uniformGatewaySelection {
+        case .some(""):
+            return "direct"
+        case .some(let name):
+            return name
+        case nil:
+            return "mixed"
+        }
+    }
+
+    private var chipIsActive: Bool {
+        if let selection = uniformGatewaySelection, !selection.isEmpty {
+            return true
+        }
+        return false
     }
 }
 
@@ -1095,10 +1964,18 @@ private struct HealthSummaryPill: View {
 
     var body: some View {
         HStack(spacing: 8) {
-            summaryBadge(count: upCount, color: .green)
-            summaryBadge(count: connectingCount, color: .orange)
-            summaryBadge(count: failedCount, color: .red)
-            summaryBadge(count: waitingCount, color: .gray)
+            if upCount > 0 {
+                summaryBadge(count: upCount, color: .green)
+            }
+            if connectingCount > 0 {
+                summaryBadge(count: connectingCount, color: .orange)
+            }
+            if failedCount > 0 {
+                summaryBadge(count: failedCount, color: .red)
+            }
+            if upCount == 0 && connectingCount == 0 && failedCount == 0 {
+                summaryBadge(count: waitingCount, color: .gray)
+            }
         }
         .help("\(upCount) up, \(connectingCount) starting, \(failedCount) failed, \(waitingCount) waiting")
     }
@@ -1149,8 +2026,167 @@ private struct CompactPressButtonStyle: ButtonStyle {
     }
 }
 
+private struct GatewayRow: View {
+    let gateway: MenuBarViewModel.GatewayState
+    let onStart: () -> Void
+    let onStop: () -> Void
+    let onEdit: () -> Void
+    let onDelete: () -> Void
+    var onOpenBrowser: (ChromiumBrowser) -> Void = { _ in }
+    @State private var isPrimaryHovered = false
+
+    var body: some View {
+        HStack(alignment: .center, spacing: 10) {
+            ZStack {
+                Circle()
+                    .fill(statusColor.opacity(0.10))
+                    .frame(width: 18, height: 18)
+                Circle()
+                    .fill(statusColor)
+                    .frame(width: 8, height: 8)
+            }
+
+            VStack(alignment: .leading, spacing: 4) {
+                Text(gateway.config.name)
+                    .font(.system(size: 13.4, weight: .bold))
+                    .foregroundStyle(.primary.opacity(0.92))
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                if gateway.connectionState == .failed {
+                    Text(verbatim: gateway.lastMessage)
+                        .font(.system(size: 11.2, weight: .medium, design: .monospaced))
+                        .foregroundStyle(Color.burrowFailure.opacity(0.9))
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                } else {
+                    Text(verbatim: "\(gateway.config.server) · socks :\(String(gateway.config.socksPort))")
+                        .font(.system(size: 11.2, weight: .medium, design: .monospaced))
+                        .monospacedDigit()
+                        .foregroundStyle(.secondary.opacity(0.95))
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                }
+            }
+            .layoutPriority(1)
+            .help(GatewayCommandBuilder.render(gateway.config))
+
+            Spacer(minLength: 6)
+
+            HStack(spacing: 5) {
+                primaryButton
+                menu
+            }
+            .frame(width: 100, alignment: .trailing)
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 9)
+    }
+
+    @ViewBuilder
+    private var primaryButton: some View {
+        if gateway.isRunning {
+            Button(action: onStop) {
+                Text("Stop")
+                    .font(.system(size: 11, weight: .bold))
+                    .frame(width: 68, height: 28)
+                    .foregroundStyle(isPrimaryHovered ? Color.burrowFailure : Color.primary.opacity(0.82))
+                    .background(
+                        Capsule(style: .continuous)
+                            .fill(isPrimaryHovered ? Color.red.opacity(0.10) : Color.primary.opacity(0.05))
+                    )
+                    .overlay(
+                        Capsule(style: .continuous)
+                            .stroke(isPrimaryHovered ? Color.burrowFailure.opacity(0.35) : Color.primary.opacity(0.12), lineWidth: 1)
+                    )
+            }
+            .buttonStyle(CompactPressButtonStyle())
+            .onHover { hovering in
+                withAnimation(.easeOut(duration: 0.12)) {
+                    isPrimaryHovered = hovering
+                }
+            }
+        } else {
+            Button(action: onStart) {
+                Text("Connect")
+                    .font(.system(size: 11, weight: .bold))
+                    .minimumScaleFactor(0.82)
+                    .frame(width: 68, height: 28)
+                    .foregroundStyle(.white)
+                    .background(
+                        Capsule(style: .continuous)
+                            .fill(
+                                LinearGradient(
+                                    colors: [
+                                        Color(red: 0.26, green: 0.19, blue: 0.84),
+                                        Color(red: 0.19, green: 0.42, blue: 0.94),
+                                    ],
+                                    startPoint: .leading,
+                                    endPoint: .trailing
+                                )
+                            )
+                    )
+            }
+            .buttonStyle(CompactPressButtonStyle())
+        }
+    }
+
+    private var menu: some View {
+        Menu {
+            Button("Edit", action: onEdit)
+            let browsers = ChromiumBrowserLauncher.installed()
+            if !browsers.isEmpty {
+                Divider()
+                ForEach(browsers) { browser in
+                    Button("Open \(browser.displayName) via VPN") {
+                        onOpenBrowser(browser)
+                    }
+                }
+            }
+            Divider()
+            Button("Copy SOCKS Address") {
+                copy("127.0.0.1:\(gateway.config.socksPort)")
+            }
+            Button("Copy ssh ProxyCommand Option") {
+                copy("-o ProxyCommand='\(GatewayLinker.proxyCommand(for: gateway.config))'")
+            }
+            Button("Copy openconnect Command") {
+                copy(GatewayCommandBuilder.render(gateway.config))
+            }
+            Divider()
+            Button("Delete", role: .destructive, action: onDelete)
+        } label: {
+            Image(systemName: "ellipsis")
+                .font(.system(size: 11.5, weight: .heavy))
+                .foregroundStyle(Color.secondary.opacity(0.60))
+                .frame(width: 20, height: 28)
+        }
+        .menuStyle(.borderlessButton)
+        .menuIndicator(.hidden)
+        .frame(width: 20, height: 28, alignment: .trailing)
+    }
+
+    private var statusColor: Color {
+        switch gateway.connectionState {
+        case .connected:
+            return .green
+        case .connecting:
+            return .orange
+        case .disconnected:
+            return .gray
+        case .failed:
+            return .red
+        }
+    }
+
+    private func copy(_ text: String) {
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(text, forType: .string)
+    }
+}
+
 struct TunnelRow: View {
     let tunnel: MenuBarViewModel.TunnelState
+    var gatewayNames: [String] = []
     let onStart: () -> Void
     let onStop: () -> Void
     let onRestart: () -> Void
@@ -1158,12 +2194,13 @@ struct TunnelRow: View {
     let onDuplicate: () -> Void
     let onDelete: () -> Void
     let onToggleAutoConnect: (Bool) -> Void
-    @State private var isFailureTooltipVisible = false
+    var onSetGateway: (String?) -> Void = { _ in }
     @State private var isIdentityTooltipVisible = false
     @State private var isDetailsPresented = false
     @State private var isAutoHovered = false
     @State private var isPrimaryHovered = false
     @State private var isMenuHovered = false
+    @State private var identityHoverTask: Task<Void, Never>?
 
     var body: some View {
         HStack(alignment: .center, spacing: 10) {
@@ -1177,13 +2214,28 @@ struct TunnelRow: View {
                     .truncationMode(.middle)
                     .layoutPriority(1)
 
-                routeSummaryView
+                if tunnel.connectionState == .failed {
+                    failureStatusView
+                } else {
+                    routeWithSSHSuffix
+                }
             }
             .layoutPriority(1)
             .contentShape(Rectangle())
             .onHover { hovering in
-                withAnimation(.easeInOut(duration: 0.08)) {
-                    isIdentityTooltipVisible = hovering
+                identityHoverTask?.cancel()
+                if hovering {
+                    identityHoverTask = Task { @MainActor in
+                        try? await Task.sleep(for: .milliseconds(500))
+                        guard !Task.isCancelled else { return }
+                        withAnimation(.easeInOut(duration: 0.08)) {
+                            isIdentityTooltipVisible = true
+                        }
+                    }
+                } else {
+                    withAnimation(.easeInOut(duration: 0.08)) {
+                        isIdentityTooltipVisible = false
+                    }
                 }
             }
             .popover(isPresented: $isIdentityTooltipVisible, arrowEdge: .top) {
@@ -1193,12 +2245,11 @@ struct TunnelRow: View {
             Spacer(minLength: 6)
 
             HStack(spacing: 5) {
-                failureInfoSlot
                 autoConnectButton
                 primaryActionButton
                 rowMenu
             }
-            .frame(width: 183, alignment: .trailing)
+            .frame(width: 134, alignment: .trailing)
             .layoutPriority(2)
         }
         .padding(.horizontal, 12)
@@ -1249,19 +2300,20 @@ struct TunnelRow: View {
                 .monospacedDigit()
                 .foregroundStyle(.secondary)
                 .lineLimit(3)
+            if let presentation = failurePresentation {
+                Divider()
+                Text(presentation.codeLine)
+                    .font(.system(size: 10.5, weight: .semibold, design: .monospaced))
+                    .foregroundStyle(presentation.color)
+                Text(presentation.hintLine)
+                    .font(.system(size: 10.5))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(3)
+            }
         }
-        .padding(.horizontal, 9)
-        .padding(.vertical, 7)
+        .padding(.horizontal, 11)
+        .padding(.vertical, 9)
         .frame(maxWidth: 330, alignment: .leading)
-        .background(
-            RoundedRectangle(cornerRadius: 9, style: .continuous)
-                .fill(Color(nsColor: .windowBackgroundColor))
-                .shadow(color: .black.opacity(0.14), radius: 8, x: 0, y: 4)
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: 9, style: .continuous)
-                .stroke(Color.black.opacity(0.08), lineWidth: 1)
-        )
     }
 
     @ViewBuilder
@@ -1280,6 +2332,69 @@ struct TunnelRow: View {
         }
     }
 
+    /// How long a stopped tunnel keeps showing its failure diagnosis before the
+    /// row reverts to the route; the diagnosis stays in the hover card and Details.
+    private static let failureDisplayWindow: TimeInterval = 60
+
+    private var routeWithSSHSuffix: some View {
+        HStack(spacing: 6) {
+            routeSummaryView
+            if tunnel.tunnel.sshPort != 22 {
+                Text(verbatim: "· ssh :\(String(tunnel.tunnel.sshPort))")
+                    .font(.system(size: 10, weight: .medium, design: .monospaced))
+                    .foregroundStyle(.secondary.opacity(0.45))
+                    .lineLimit(1)
+            }
+            if let gatewayName = tunnel.tunnel.gateway {
+                Text(verbatim: "· via \(gatewayName)")
+                    .font(.system(size: 10, weight: .medium, design: .monospaced))
+                    .foregroundStyle(.secondary.opacity(0.45))
+                    .lineLimit(1)
+            }
+        }
+    }
+
+    private var failureStatusView: some View {
+        TimelineView(.periodic(from: .now, by: 1)) { context in
+            if shouldShowFailureStatus(at: context.date) {
+                Text(verbatim: failureStatusText(at: context.date))
+                    .font(.system(size: 11.2, weight: .medium, design: .monospaced))
+                    .monospacedDigit()
+                    .foregroundStyle(Color.burrowFailure.opacity(0.9))
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+            } else {
+                routeWithSSHSuffix
+            }
+        }
+    }
+
+    private func shouldShowFailureStatus(at date: Date) -> Bool {
+        if tunnel.isRunning {
+            return true
+        }
+        guard let failedAt = tunnel.failedAt else {
+            return false
+        }
+        return date.timeIntervalSince(failedAt) < Self.failureDisplayWindow
+    }
+
+    private func failureStatusText(at date: Date) -> String {
+        let category = failurePresentation?.category ?? "failed"
+
+        if tunnel.isRunning, let nextRetryAt = tunnel.nextRetryAt {
+            let remaining = max(0, Int(nextRetryAt.timeIntervalSince(date).rounded(.up)))
+            let attemptText = tunnel.retryAttempt > 1 ? "retry \(tunnel.retryAttempt)" : "retry"
+            return remaining > 0 ? "\(category) · \(attemptText) in \(remaining)s" : "\(category) · retrying now"
+        }
+        if tunnel.isRunning {
+            return "\(category) · retrying"
+        }
+
+        let detail = failurePresentation?.codeLine ?? "connection failed"
+        return detail.lowercased() == category.lowercased() ? category : detail
+    }
+
     @ViewBuilder
     private func routeView(for forward: ForwardSpec) -> some View {
         switch forward.kind {
@@ -1287,41 +2402,45 @@ struct TunnelRow: View {
             routeLine(
                 first: String(forward.listenPort),
                 second: compactDestinationText(for: forward),
-                arrow: "chevron.right"
+                arrow: "chevron.right",
+                copyAddress: localAddress(for: forward)
             )
         case .remote:
             routeLine(
                 first: compactDestinationText(for: forward),
                 second: String(forward.listenPort),
-                arrow: "chevron.left"
+                arrow: "chevron.left",
+                copyAddress: nil
             )
         case .dynamic:
             HStack(spacing: 4) {
                 Text(verbatim: "SOCKS")
-                Text(verbatim: String(forward.listenPort))
+                    .font(.system(size: 11.2, weight: .medium, design: .monospaced))
+                    .foregroundStyle(.secondary.opacity(0.95))
+                CopyPortChip(label: String(forward.listenPort), address: localAddress(for: forward))
             }
-            .font(.system(size: 11.2, weight: .medium, design: .monospaced))
-            .monospacedDigit()
-            .foregroundStyle(.secondary.opacity(0.95))
             .lineLimit(1)
-            .truncationMode(.tail)
         }
     }
 
-    private func routeLine(first: String, second: String, arrow: String) -> some View {
+    private func routeLine(first: String, second: String, arrow: String, copyAddress: String?) -> some View {
         HStack(spacing: 7) {
-            Text(verbatim: first)
-                .font(.system(size: 11.2, weight: .bold, design: .monospaced))
-                .monospacedDigit()
-                .foregroundStyle(.secondary.opacity(0.95))
-                .lineLimit(1)
-                .fixedSize(horizontal: true, vertical: false)
-                .padding(.horizontal, 6)
-                .frame(height: 21)
-                .background(
-                    RoundedRectangle(cornerRadius: 5, style: .continuous)
-                        .fill(Color.secondary.opacity(0.065))
-                )
+            if let copyAddress {
+                CopyPortChip(label: first, address: copyAddress)
+            } else {
+                Text(verbatim: first)
+                    .font(.system(size: 11.2, weight: .bold, design: .monospaced))
+                    .monospacedDigit()
+                    .foregroundStyle(.secondary.opacity(0.95))
+                    .lineLimit(1)
+                    .fixedSize(horizontal: true, vertical: false)
+                    .padding(.horizontal, 6)
+                    .frame(height: 21)
+                    .background(
+                        RoundedRectangle(cornerRadius: 5, style: .continuous)
+                            .fill(Color.secondary.opacity(0.065))
+                    )
+            }
 
             Image(systemName: arrow)
                 .font(.system(size: 8, weight: .bold))
@@ -1334,6 +2453,12 @@ struct TunnelRow: View {
                 .lineLimit(1)
                 .truncationMode(.tail)
         }
+    }
+
+    private func localAddress(for forward: ForwardSpec) -> String {
+        let bind = forward.bindAddress?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let host = bind.isEmpty || isLoopbackHost(bind) || bind == "*" || bind == "0.0.0.0" ? "localhost" : bind
+        return "\(host):\(forward.listenPort)"
     }
 
     private var compactRouteSummary: String {
@@ -1398,6 +2523,37 @@ struct TunnelRow: View {
             Button("Details") {
                 isDetailsPresented = true
             }
+            if !copyableForwards.isEmpty {
+                Divider()
+                ForEach(Array(copyableForwards.enumerated()), id: \.offset) { _, forward in
+                    Button("Copy \(localAddress(for: forward))") {
+                        copyToPasteboard(localAddress(for: forward))
+                    }
+                }
+                ForEach(Array(browsableForwards.enumerated()), id: \.offset) { _, forward in
+                    Button("Open http://\(localAddress(for: forward))") {
+                        if let url = URL(string: "http://\(localAddress(for: forward))") {
+                            NSWorkspace.shared.open(url)
+                        }
+                    }
+                }
+            }
+            if tunnel.isRunning && tunnel.connectionState == .failed {
+                Divider()
+                Button("Stop Retrying", action: onStop)
+            }
+            if !gatewayNames.isEmpty {
+                Divider()
+                Picker("Gateway", selection: Binding(
+                    get: { tunnel.tunnel.gateway ?? "" },
+                    set: { onSetGateway($0.isEmpty ? nil : $0) }
+                )) {
+                    Text("Direct — no VPN").tag("")
+                    ForEach(gatewayNames, id: \.self) { name in
+                        Text("via \(name)").tag(name)
+                    }
+                }
+            }
             Divider()
             Button("Restart", action: onRestart)
             Button("Edit", action: onEdit)
@@ -1436,30 +2592,23 @@ struct TunnelRow: View {
         Button {
             onToggleAutoConnect(!tunnel.isConfiguredEnabled)
         } label: {
-            HStack(spacing: 3) {
-                Image(systemName: tunnel.isConfiguredEnabled ? "bolt.fill" : "bolt.slash.fill")
-                    .font(.system(size: 10, weight: .semibold))
-                Text("Auto")
-                    .font(.system(size: 10.5, weight: .bold))
-                    .lineLimit(1)
-                    .minimumScaleFactor(0.85)
-            }
-                .frame(width: 56, height: 28)
-                .foregroundStyle(tunnel.isConfiguredEnabled ? Color(red: 0.27, green: 0.20, blue: 0.83) : Color.secondary)
+            Image(systemName: "bolt.fill")
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(
+                    tunnel.isConfiguredEnabled
+                        ? Color.burrowAccent
+                        : Color.secondary.opacity(isAutoHovered ? 0.55 : 0.30)
+                )
+                .frame(width: 28, height: 28)
                 .background(
-                    Capsule(style: .continuous)
+                    Circle()
                         .fill(
                             tunnel.isConfiguredEnabled
-                                ? Color(red: 0.94, green: 0.95, blue: 1.0).opacity(isAutoHovered ? 1.0 : 0.82)
-                                : Color.secondary.opacity(isAutoHovered ? 0.085 : 0.055)
+                                ? Color.burrowAccentHalo.opacity(isAutoHovered ? 1.0 : 0.75)
+                                : Color.secondary.opacity(isAutoHovered ? 0.09 : 0.0)
                         )
                 )
-                .overlay(
-                    Capsule(style: .continuous)
-                        .stroke(tunnel.isConfiguredEnabled ? Color(red: 0.74, green: 0.80, blue: 1.0).opacity(isAutoHovered ? 0.82 : 0.52) : Color.secondary.opacity(isAutoHovered ? 0.16 : 0.10), lineWidth: 1)
-                )
-                .shadow(color: Color(red: 0.27, green: 0.20, blue: 0.83).opacity(tunnel.isConfiguredEnabled ? (isAutoHovered ? 0.16 : 0.07) : 0), radius: isAutoHovered ? 8 : 5, x: 0, y: isAutoHovered ? 4 : 2)
-                .scaleEffect(isAutoHovered ? 1.015 : 1.0)
+                .scaleEffect(isAutoHovered ? 1.05 : 1.0)
         }
         .buttonStyle(CompactPressButtonStyle())
         .onHover { hovering in
@@ -1467,8 +2616,8 @@ struct TunnelRow: View {
                 isAutoHovered = hovering
             }
         }
-        .frame(width: 56, height: 28)
-        .help(tunnel.isConfiguredEnabled ? "Auto-connect enabled" : "Auto-connect disabled")
+        .frame(width: 28, height: 28)
+        .help(tunnel.isConfiguredEnabled ? "Auto-connect on — click to turn off" : "Auto-connect off — click to turn on")
     }
 
     @ViewBuilder
@@ -1482,16 +2631,15 @@ struct TunnelRow: View {
                     .lineLimit(1)
                     .minimumScaleFactor(0.85)
                     .frame(width: 68, height: 28)
-                    .foregroundStyle(isPrimaryHovered ? Color(red: 0.82, green: 0.10, blue: 0.08) : Color.primary.opacity(0.82))
+                    .foregroundStyle(isPrimaryHovered ? Color.burrowFailure : Color.primary.opacity(0.82))
                     .background(
                         Capsule(style: .continuous)
-                            .fill(isPrimaryHovered ? Color(red: 1.0, green: 0.96, blue: 0.955) : Color(nsColor: .windowBackgroundColor))
+                            .fill(isPrimaryHovered ? Color.red.opacity(0.10) : Color.primary.opacity(0.05))
                     )
                     .overlay(
                         Capsule(style: .continuous)
-                            .stroke(isPrimaryHovered ? Color(red: 0.95, green: 0.20, blue: 0.18).opacity(0.24) : Color.secondary.opacity(0.18), lineWidth: 1)
+                            .stroke(isPrimaryHovered ? Color.burrowFailure.opacity(0.35) : Color.primary.opacity(0.12), lineWidth: 1)
                     )
-                    .shadow(color: Color.black.opacity(isPrimaryHovered ? 0.14 : 0.08), radius: isPrimaryHovered ? 6 : 4, x: 0, y: isPrimaryHovered ? 3 : 2)
                     .scaleEffect(isPrimaryHovered ? 1.015 : 1.0)
             }
             .buttonStyle(CompactPressButtonStyle())
@@ -1537,62 +2685,6 @@ struct TunnelRow: View {
         }
     }
 
-    private var failureInfoSlot: some View {
-        Group {
-            if failurePresentation != nil {
-                Image(systemName: "info.circle.fill")
-                    .font(.system(size: 10.5, weight: .semibold))
-                    .foregroundStyle(Color(red: 1.0, green: 0.36, blue: 0.35))
-                    .frame(width: 24, height: 28)
-                    .background(
-                        RoundedRectangle(cornerRadius: 11, style: .continuous)
-                            .fill(Color(red: 1.0, green: 0.36, blue: 0.35).opacity(0.14))
-                    )
-            } else {
-                Color.clear
-            }
-        }
-        .frame(width: 24, height: 28)
-        .contentShape(Rectangle())
-        .onHover { hovering in
-            if failurePresentation == nil {
-                isFailureTooltipVisible = false
-            } else {
-                withAnimation(.easeInOut(duration: 0.08)) {
-                    isFailureTooltipVisible = hovering
-                }
-            }
-        }
-        .popover(isPresented: $isFailureTooltipVisible, arrowEdge: .top) {
-            if let presentation = failurePresentation {
-                failureTooltip(presentation)
-            }
-        }
-    }
-
-    private func failureTooltip(_ presentation: TunnelFailurePresentation) -> some View {
-        VStack(alignment: .leading, spacing: 3) {
-            Text(presentation.codeLine)
-                .font(.system(size: 10, weight: .semibold, design: .monospaced))
-                .foregroundStyle(presentation.color)
-            Text(presentation.hintLine)
-                .font(.system(size: 10))
-                .foregroundStyle(Color(red: 0.36, green: 0.14, blue: 0.12))
-        }
-        .padding(.horizontal, 8)
-        .padding(.vertical, 7)
-        .frame(width: 220, alignment: .leading)
-        .background(
-            RoundedRectangle(cornerRadius: 9, style: .continuous)
-                .fill(Color(nsColor: .windowBackgroundColor))
-                .shadow(color: .black.opacity(0.14), radius: 8, x: 0, y: 4)
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: 9, style: .continuous)
-                .stroke(Color.black.opacity(0.08), lineWidth: 1)
-        )
-    }
-
     private var failurePresentation: TunnelFailurePresentation? {
         TunnelFailureClassifier.presentation(for: tunnel)
     }
@@ -1600,6 +2692,72 @@ struct TunnelRow: View {
     private var sshCommandText: String {
         let prepared = (try? TunnelLaunchPreparer.prepare(tunnel.tunnel)) ?? tunnel.tunnel
         return SSHCommandBuilder.render(prepared)
+    }
+
+    private var copyableForwards: [ForwardSpec] {
+        tunnel.tunnel.forwards.filter { $0.kind != .remote }
+    }
+
+    private var browsableForwards: [ForwardSpec] {
+        tunnel.tunnel.forwards.filter { $0.kind == .local }
+    }
+
+    private func copyToPasteboard(_ text: String) {
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(text, forType: .string)
+    }
+}
+
+private struct CopyPortChip: View {
+    let label: String
+    let address: String
+    @State private var showCopied = false
+    @State private var revertTask: Task<Void, Never>?
+    @State private var isHovered = false
+
+    var body: some View {
+        Button {
+            NSPasteboard.general.clearContents()
+            NSPasteboard.general.setString(address, forType: .string)
+            revertTask?.cancel()
+            showCopied = true
+            revertTask = Task { @MainActor in
+                try? await Task.sleep(for: .milliseconds(1100))
+                guard !Task.isCancelled else { return }
+                showCopied = false
+            }
+        } label: {
+            HStack(spacing: 3) {
+                if showCopied {
+                    Image(systemName: "checkmark")
+                        .font(.system(size: 8, weight: .bold))
+                        .foregroundStyle(.green)
+                } else if isHovered {
+                    Image(systemName: "doc.on.doc")
+                        .font(.system(size: 8, weight: .semibold))
+                        .foregroundStyle(.secondary.opacity(0.7))
+                }
+                Text(verbatim: label)
+                    .font(.system(size: 11.2, weight: .bold, design: .monospaced))
+                    .monospacedDigit()
+                    .foregroundStyle(showCopied ? Color.green.opacity(0.9) : Color.secondary.opacity(0.95))
+            }
+            .lineLimit(1)
+            .fixedSize(horizontal: true, vertical: false)
+            .padding(.horizontal, 6)
+            .frame(height: 21)
+            .background(
+                RoundedRectangle(cornerRadius: 5, style: .continuous)
+                    .fill(showCopied ? Color.green.opacity(0.12) : Color.secondary.opacity(isHovered ? 0.12 : 0.065))
+            )
+        }
+        .buttonStyle(.plain)
+        .onHover { hovering in
+            withAnimation(.easeOut(duration: 0.1)) {
+                isHovered = hovering
+            }
+        }
+        .help("Copy \(address)")
     }
 }
 
@@ -1763,7 +2921,7 @@ private enum TunnelFailureClassifier {
                 category: "auth failed",
                 codeLine: "authentication failed",
                 hintLine: "Check the saved username or password for this endpoint.",
-                color: Color(red: 0.68, green: 0.12, blue: 0.10)
+                color: .burrowFailure
             )
         }
 
@@ -1772,7 +2930,7 @@ private enum TunnelFailureClassifier {
                 category: "port conflict",
                 codeLine: "local port unavailable",
                 hintLine: "Another process is already listening on this local port.",
-                color: Color(red: 0.72, green: 0.18, blue: 0.10)
+                color: .burrowFailure
             )
         }
 
@@ -1781,7 +2939,7 @@ private enum TunnelFailureClassifier {
                 category: "dns issue",
                 codeLine: "host not resolvable",
                 hintLine: "Check VPN, DNS, or the current network environment.",
-                color: Color(red: 0.68, green: 0.12, blue: 0.10)
+                color: .burrowFailure
             )
         }
 
@@ -1790,7 +2948,7 @@ private enum TunnelFailureClassifier {
                 category: "network issue",
                 codeLine: "network unavailable",
                 hintLine: "Check VPN, remote reachability, or firewall rules.",
-                color: Color(red: 0.68, green: 0.12, blue: 0.10)
+                color: .burrowFailure
             )
         }
 
@@ -1799,7 +2957,7 @@ private enum TunnelFailureClassifier {
                 category: "host key issue",
                 codeLine: "host key rejected",
                 hintLine: "Review the known-hosts entry for this endpoint.",
-                color: Color(red: 0.68, green: 0.12, blue: 0.10)
+                color: .burrowFailure
             )
         }
 
@@ -1808,7 +2966,7 @@ private enum TunnelFailureClassifier {
                 category: "ssh exited",
                 codeLine: "ssh exited 255",
                 hintLine: "Usually VPN, DNS, host reachability, or SSH policy.",
-                color: Color(red: 0.68, green: 0.12, blue: 0.10)
+                color: .burrowFailure
             )
         }
 
@@ -1825,7 +2983,7 @@ private enum TunnelFailureClassifier {
             category: "failed",
             codeLine: message.isEmpty ? "connection failed" : message,
             hintLine: "Open details for the SSH command and last message.",
-            color: Color(red: 0.68, green: 0.12, blue: 0.10)
+            color: .burrowFailure
         )
     }
 
@@ -1836,6 +2994,8 @@ private enum TunnelFailureClassifier {
 
 struct TunnelEditorSuggestions {
     let tunnels: [TunnelConfig]
+    let sshHosts: [SSHConfigHost]
+    var gatewayNames: [String] = []
     let hosts: [String]
     let users: [String]
     let sshPorts: [String]
@@ -1846,13 +3006,30 @@ struct TunnelEditorSuggestions {
     let destinationPorts: [String]
     let nextAvailableLocalPort: Int
 
-    init(tunnels: [TunnelConfig]) {
+    init(tunnels: [TunnelConfig], sshHosts: [SSHConfigHost] = [], gatewayNames: [String] = []) {
         self.tunnels = tunnels
-        self.hosts = Self.ranked(tunnels.map(\.host))
-        self.users = Self.ranked(tunnels.compactMap(\.user), appending: [NSUserName()])
-        self.sshPorts = Self.ranked(tunnels.map { String($0.sshPort) }, appending: ["22"])
-        self.identityFiles = Self.ranked(tunnels.compactMap(\.identityFile), appending: Self.commonIdentityFiles())
-        self.jumpHosts = Self.ranked(tunnels.compactMap(\.jumpHost))
+        self.sshHosts = sshHosts
+        self.gatewayNames = gatewayNames
+        self.hosts = Self.ranked(
+            tunnels.map(\.host),
+            appending: sshHosts.map(\.alias) + sshHosts.compactMap(\.hostName)
+        )
+        self.users = Self.ranked(
+            tunnels.compactMap(\.user),
+            appending: sshHosts.compactMap(\.user) + [NSUserName()]
+        )
+        self.sshPorts = Self.ranked(
+            tunnels.map { String($0.sshPort) },
+            appending: sshHosts.compactMap { $0.port.map(String.init) } + ["22"]
+        )
+        self.identityFiles = Self.ranked(
+            tunnels.compactMap(\.identityFile),
+            appending: sshHosts.compactMap(\.identityFile) + Self.commonIdentityFiles()
+        )
+        self.jumpHosts = Self.ranked(
+            tunnels.compactMap(\.jumpHost),
+            appending: sshHosts.compactMap(\.proxyJump)
+        )
 
         let forwards = tunnels.flatMap(\.forwards)
         self.bindAddresses = Self.ranked(forwards.compactMap(\.bindAddress), appending: ["localhost", "127.0.0.1"])
@@ -1866,12 +3043,23 @@ struct TunnelEditorSuggestions {
 
     func preferredSSHPort(for host: String) -> String? {
         let normalizedHost = normalized(host)
-        return Self.ranked(
+        let fromTunnels = Self.ranked(
             tunnels
                 .filter { normalized($0.host) == normalizedHost }
                 .map { String($0.sshPort) }
         )
         .first
+        return fromTunnels ?? sshHostMatch(host)?.port.map(String.init)
+    }
+
+    private func sshHostMatch(_ host: String) -> SSHConfigHost? {
+        let normalizedHost = normalized(host)
+        guard !normalizedHost.isEmpty else {
+            return nil
+        }
+        return sshHosts.first {
+            normalized($0.alias) == normalizedHost || normalized($0.effectiveHost) == normalizedHost
+        }
     }
 
     func preferredUser(for host: String, sshPort: String) -> String? {
@@ -1885,12 +3073,13 @@ struct TunnelEditorSuggestions {
             return user
         }
 
-        return Self.ranked(
+        let fromTunnels = Self.ranked(
             tunnels
                 .filter { normalized($0.host) == normalizedHost }
                 .compactMap(\.user)
         )
         .first
+        return fromTunnels ?? sshHostMatch(host)?.user
     }
 
     func preferredIdentity(for host: String, user: String) -> String? {
@@ -1904,22 +3093,24 @@ struct TunnelEditorSuggestions {
             return identity
         }
 
-        return Self.ranked(
+        let fromTunnels = Self.ranked(
             tunnels
                 .filter { normalized($0.host) == normalizedHost }
                 .compactMap(\.identityFile)
         )
         .first
+        return fromTunnels ?? sshHostMatch(host)?.identityFile
     }
 
     func preferredJumpHost(for host: String) -> String? {
         let normalizedHost = normalized(host)
-        return Self.ranked(
+        let fromTunnels = Self.ranked(
             tunnels
                 .filter { normalized($0.host) == normalizedHost }
                 .compactMap(\.jumpHost)
         )
         .first
+        return fromTunnels ?? sshHostMatch(host)?.proxyJump
     }
 
     private func normalized(_ value: String) -> String {
@@ -1952,9 +3143,16 @@ struct TunnelEditorSuggestions {
         }
         .compactMap { canonical[$0] }
 
-        return rankedValues + defaults.filter { defaultValue in
-            !rankedValues.contains { $0.caseInsensitiveCompare(defaultValue) == .orderedSame }
+        var seen = Set(rankedValues.map { $0.lowercased() })
+        var appendedDefaults: [String] = []
+        for defaultValue in defaults {
+            let trimmed = defaultValue.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty, seen.insert(trimmed.lowercased()).inserted else {
+                continue
+            }
+            appendedDefaults.append(trimmed)
         }
+        return rankedValues + appendedDefaults
     }
 
     private static func commonIdentityFiles() -> [String] {
@@ -2061,6 +3259,7 @@ struct TunnelDraft: Identifiable {
     var enabled: Bool
     var extraSSHOptionsText: String
     var forwards: [ForwardDraft]
+    var gateway: String
 
     init(tunnel: TunnelConfig, originalName: String?) {
         self.id = UUID()
@@ -2077,10 +3276,11 @@ struct TunnelDraft: Identifiable {
         self.enabled = tunnel.enabled
         self.extraSSHOptionsText = tunnel.extraSSHOptions.joined(separator: "\n")
         self.forwards = tunnel.forwards.map(ForwardDraft.init)
+        self.gateway = tunnel.gateway ?? ""
     }
 
-    static func newTunnel(from existingTunnels: [TunnelConfig] = []) -> TunnelDraft {
-        let suggestions = TunnelEditorSuggestions(tunnels: existingTunnels)
+    static func newTunnel(from existingTunnels: [TunnelConfig] = [], sshHosts: [SSHConfigHost] = []) -> TunnelDraft {
+        let suggestions = TunnelEditorSuggestions(tunnels: existingTunnels, sshHosts: sshHosts)
         let localPort = suggestions.nextAvailableLocalPort
         let destinationPort = suggestions.destinationPorts.first ?? "3000"
         let defaultName = uniqueName(
@@ -2167,7 +3367,8 @@ struct TunnelDraft: Identifiable {
             serverAliveCountMax: aliveCountValue,
             reconnectDelaySeconds: reconnectDelayValue,
             enabled: enabled,
-            extraSSHOptions: sshOptions
+            extraSSHOptions: sshOptions,
+            gateway: gateway.nonEmptyValue
         )
     }
 }
@@ -2175,6 +3376,7 @@ struct TunnelDraft: Identifiable {
 struct TunnelEditorSheet: View {
     @Binding var draft: TunnelDraft
     let suggestions: TunnelEditorSuggestions
+    var conflictChecker: PortConflictChecker?
     let onCancel: () -> Void
     let onSave: () -> Void
     let onDelete: () -> Void
@@ -2279,6 +3481,24 @@ struct TunnelEditorSheet: View {
                         Spacer()
                     }
                 }
+                if !suggestions.gatewayNames.isEmpty {
+                    GridRow {
+                        editorLabel("Gateway")
+                        HStack(spacing: 8) {
+                            Picker("Gateway", selection: $draft.gateway) {
+                                Text("None").tag("")
+                                ForEach(suggestions.gatewayNames, id: \.self) { name in
+                                    Text(name).tag(name)
+                                }
+                            }
+                            .labelsHidden()
+                            .controlSize(.small)
+                            .frame(width: 160)
+                            .help("Route this tunnel's ssh connection through a Burrow VPN gateway")
+                            Spacer()
+                        }
+                    }
+                }
             }
         }
     }
@@ -2304,6 +3524,10 @@ struct TunnelEditorSheet: View {
                 ForwardEditorCard(
                     forward: $forward,
                     suggestions: suggestions,
+                    conflictChecker: conflictChecker,
+                    otherListenPorts: draft.forwards
+                        .filter { $0.id != forward.id && $0.kind != .remote }
+                        .compactMap { Int($0.listenPort) },
                     canRemove: draft.forwards.count > 1,
                     onRemove: {
                         draft.forwards.removeAll { $0.id == forward.id }
@@ -2472,7 +3696,7 @@ private struct EditorSection<Content: View>: View {
         )
         .overlay(
             RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .stroke(Color.black.opacity(0.035), lineWidth: 1)
+                .stroke(Color.primary.opacity(0.06), lineWidth: 1)
         )
     }
 }
@@ -2480,9 +3704,12 @@ private struct EditorSection<Content: View>: View {
 private struct ForwardEditorCard: View {
     @Binding var forward: TunnelDraft.ForwardDraft
     let suggestions: TunnelEditorSuggestions
+    var conflictChecker: PortConflictChecker?
+    var otherListenPorts: [Int] = []
     let canRemove: Bool
     let onRemove: () -> Void
     @State private var isAdvancedExpanded = false
+    @State private var conflictWarning: String?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -2499,6 +3726,13 @@ private struct ForwardEditorCard: View {
             }
 
             routeFields
+
+            if let conflictWarning {
+                Label(conflictWarning, systemImage: "exclamationmark.triangle.fill")
+                    .font(.system(size: 10.5, weight: .medium))
+                    .foregroundStyle(.orange)
+                    .lineLimit(2)
+            }
 
             DisclosureGroup(isExpanded: $isAdvancedExpanded) {
                 Grid(alignment: .leading, horizontalSpacing: 10, verticalSpacing: 8) {
@@ -2534,6 +3768,45 @@ private struct ForwardEditorCard: View {
             RoundedRectangle(cornerRadius: 10, style: .continuous)
                 .fill(Color.secondary.opacity(0.045))
         )
+        .task(id: conflictProbeKey) {
+            await refreshConflictWarning()
+        }
+    }
+
+    private var conflictProbeKey: String {
+        "\(forward.kind.rawValue)|\(forward.listenPort)|\(otherListenPorts.map(String.init).joined(separator: ","))"
+    }
+
+    private func refreshConflictWarning() async {
+        conflictWarning = nil
+        guard forward.kind != .remote,
+              let checker = conflictChecker,
+              let port = Int(forward.listenPort.trimmingCharacters(in: .whitespaces)),
+              port > 0 else {
+            return
+        }
+
+        try? await Task.sleep(for: .milliseconds(300))
+        guard !Task.isCancelled else {
+            return
+        }
+
+        if otherListenPorts.contains(port) {
+            conflictWarning = "Another forward in this tunnel already uses port \(port)."
+            return
+        }
+        if let message = checker.savedTunnelConflict(port: port) {
+            conflictWarning = message
+            return
+        }
+        guard !checker.portHeldByEditedTunnel(port) else {
+            return
+        }
+
+        let inUse = await Task.detached { checker.isPortInUseLocally(port) }.value
+        if !Task.isCancelled && inUse {
+            conflictWarning = "Something is already listening on 127.0.0.1:\(port)."
+        }
     }
 
     @ViewBuilder

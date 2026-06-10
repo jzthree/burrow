@@ -8,6 +8,23 @@ struct TunnelCredentialKey: Hashable {
     let port: Int
     let user: String
 
+    init(host: String, port: Int, user: String) {
+        self.host = host
+        self.port = port
+        self.user = user
+    }
+
+    init?(gateway: GatewayConfig) {
+        guard let user = gateway.user?.trimmingCharacters(in: .whitespacesAndNewlines), !user.isEmpty else {
+            return nil
+        }
+        // 443 = the TLS port openconnect VPNs answer on; keeps the keychain
+        // account label meaningful ("user@vpn.host:443").
+        self.host = gateway.server
+        self.port = 443
+        self.user = user
+    }
+
     init?(tunnel: TunnelConfig) {
         guard let user = tunnel.user?.trimmingCharacters(in: .whitespacesAndNewlines), !user.isEmpty else {
             return nil
@@ -245,6 +262,35 @@ final class PasswordStore {
 }
 
 enum PasswordPrompt {
+    @MainActor
+    static func requestVPNPassword(gatewayName: String, server: String, user: String, retry: Bool) -> String? {
+        let alert = NSAlert()
+        if retry {
+            alert.messageText = "Wrong VPN password for \(user)@\(server)"
+            alert.informativeText = "The previous password was rejected by the VPN gateway (Burrow gateway: \(gatewayName)).\n\nEnter the VPN password you use with the official client for \(server)."
+            alert.alertStyle = .warning
+        } else {
+            alert.messageText = "VPN password for \(user)@\(server)"
+            alert.informativeText = "Burrow is connecting the VPN gateway “\(gatewayName)” with openconnect.\n\nEnter the VPN password you use with the official client for \(server). If your login needs a second factor (e.g. Duo), approve it when prompted on your device.\n\nThe password is stored in your macOS Keychain after the first successful connection."
+        }
+
+        alert.addButton(withTitle: "Connect")
+        alert.addButton(withTitle: "Cancel")
+
+        let field = NSSecureTextField(frame: NSRect(x: 0, y: 0, width: 320, height: 24))
+        field.placeholderString = "VPN password for \(user)@\(server)"
+        alert.accessoryView = field
+        alert.window.initialFirstResponder = field
+
+        let response = alert.runModal()
+        guard response == .alertFirstButtonReturn else {
+            return nil
+        }
+
+        let password = field.stringValue.trimmingCharacters(in: .newlines)
+        return password.isEmpty ? nil : password
+    }
+
     @MainActor
     static func requestPassword(for key: TunnelCredentialKey, tunnelName: String?, retry: Bool) -> String? {
         let alert = NSAlert()
