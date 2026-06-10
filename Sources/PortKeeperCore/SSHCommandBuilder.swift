@@ -5,6 +5,14 @@ public enum SSHCommandBuilder {
         var args: [String] = [
             "-N",
             "-o", "ExitOnForwardFailure=yes",
+            // Burrow supervises a foreground ssh. A user's ControlMaster/auto-mux
+            // settings (common, plus ControlPersist) make ssh fork to background
+            // and a detached master hold the forward — Burrow then sees the
+            // parent "exit", retries, and collides with the orphaned listener.
+            // Force a dedicated, non-multiplexed connection so the process we
+            // launch is the process that owns the tunnel.
+            "-o", "ControlMaster=no",
+            "-o", "ControlPath=none",
             "-o", "ServerAliveInterval=\(tunnel.serverAliveInterval)",
             "-o", "ServerAliveCountMax=\(tunnel.serverAliveCountMax)",
             "-p", "\(tunnel.sshPort)",

@@ -50,6 +50,9 @@ final class EventRecorder: @unchecked Sendable {
     let args = SSHCommandBuilder.buildArguments(for: tunnel)
 
     #expect(args.contains("-N"))
+    // Multiplexing must be disabled so Burrow supervises a foreground ssh.
+    #expect(args.contains("ControlMaster=no"))
+    #expect(args.contains("ControlPath=none"))
     #expect(args.contains("alice@bastion.example.com"))
     #expect(args.contains("jump.example.com"))
     #expect(args.contains("127.0.0.1:15432:127.0.0.1:5432"))
