@@ -177,11 +177,21 @@ struct CLI {
             guard let tunnel = config.tunnels.first(where: { $0.name == tunnelName }) else {
                 throw CLIError("tunnel '\(tunnelName)' was not found")
             }
-            selected = [try TunnelLaunchPreparer.prepare(tunnel)]
+            selected = [GatewayLinker.applyingGatewayProxy(to: try TunnelLaunchPreparer.prepare(tunnel), gateways: config.gateways)]
         } else if arguments.contains("--all") || arguments.isEmpty {
-            selected = try config.tunnels.filter(\.enabled).map { try TunnelLaunchPreparer.prepare($0) }
+            selected = try config.tunnels.filter(\.enabled).map {
+                GatewayLinker.applyingGatewayProxy(to: try TunnelLaunchPreparer.prepare($0), gateways: config.gateways)
+            }
         } else {
             throw CLIError("usage: burrow run [--all|<name>]")
+        }
+
+        for tunnel in selected {
+            if let gatewayName = tunnel.gateway,
+               let gateway = config.gateways.first(where: { $0.name == gatewayName }),
+               !PortProbe.canConnect(host: "127.0.0.1", port: gateway.socksPort) {
+                print("warning: \(tunnel.name) uses gateway '\(gatewayName)' but nothing is listening on 127.0.0.1:\(gateway.socksPort). Start it in the Burrow app or run openconnect manually.")
+            }
         }
 
         guard !selected.isEmpty else {

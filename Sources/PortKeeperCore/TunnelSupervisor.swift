@@ -207,7 +207,7 @@ public final class TunnelSupervisor: @unchecked Sendable {
 
         let deadline = Date().addingTimeInterval(TimeInterval(max(tunnel.serverAliveInterval, 10)))
         while process.isRunning && runState.currentDiagnostic() == nil && Date() < deadline {
-            if probeTargets.contains(where: { processOwnsListener(process, port: $0.1) && canConnect(host: $0.0, port: $0.1) }) {
+            if probeTargets.contains(where: { processOwnsListener(process, port: $0.1) && PortProbe.canConnect(host: $0.0, port: $0.1) }) {
                 return true
             }
             usleep(200_000)
@@ -249,41 +249,6 @@ public final class TunnelSupervisor: @unchecked Sendable {
             return "127.0.0.1"
         }
         return host ?? "127.0.0.1"
-    }
-
-    private func canConnect(host: String, port: Int) -> Bool {
-        var hints = addrinfo(
-            ai_flags: AI_ADDRCONFIG,
-            ai_family: AF_UNSPEC,
-            ai_socktype: SOCK_STREAM,
-            ai_protocol: IPPROTO_TCP,
-            ai_addrlen: 0,
-            ai_canonname: nil,
-            ai_addr: nil,
-            ai_next: nil
-        )
-
-        var result: UnsafeMutablePointer<addrinfo>?
-        let status = getaddrinfo(host, String(port), &hints, &result)
-        guard status == 0, let firstResult = result else {
-            return false
-        }
-        defer { freeaddrinfo(firstResult) }
-
-        var pointer: UnsafeMutablePointer<addrinfo>? = firstResult
-        while let current = pointer {
-            let socketFD = socket(current.pointee.ai_family, current.pointee.ai_socktype, current.pointee.ai_protocol)
-            if socketFD >= 0 {
-                let connectResult = connect(socketFD, current.pointee.ai_addr, current.pointee.ai_addrlen)
-                close(socketFD)
-                if connectResult == 0 {
-                    return true
-                }
-            }
-            pointer = current.pointee.ai_next
-        }
-
-        return false
     }
 
     private func terminateCurrentProcess() {

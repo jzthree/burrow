@@ -64,6 +64,34 @@ public struct ConfigStore: Sendable {
         try save(config)
     }
 
+    public func upsertGateway(_ gateway: GatewayConfig, replacing originalName: String? = nil) throws {
+        var config = try load()
+        let replacementName = originalName ?? gateway.name
+        if let index = config.gateways.firstIndex(where: { $0.name == replacementName }) {
+            config.gateways[index] = gateway
+            for duplicateIndex in config.gateways.indices.reversed() where duplicateIndex != index && config.gateways[duplicateIndex].name == gateway.name {
+                config.gateways.remove(at: duplicateIndex)
+            }
+        } else if let index = config.gateways.firstIndex(where: { $0.name == gateway.name }) {
+            config.gateways[index] = gateway
+        } else {
+            config.gateways.append(gateway)
+        }
+        try save(config)
+    }
+
+    @discardableResult
+    public func removeGateway(name: String) throws -> Bool {
+        var config = try load()
+        let originalCount = config.gateways.count
+        config.gateways.removeAll { $0.name == name }
+        if config.gateways.count != originalCount {
+            try save(config)
+            return true
+        }
+        return false
+    }
+
     public func remove(name: String) throws -> Bool {
         var config = try load()
         let originalCount = config.tunnels.count

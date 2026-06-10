@@ -375,3 +375,210 @@ private func waitUntil(timeout: TimeInterval, condition: @escaping @Sendable () 
 
     throw WaitTimeoutError()
 }
+
+@Test func sshConfigParserReadsHostBlocksAndForwards() async throws {
+    let contents = """
+    # global defaults
+    Host *
+      ServerAliveInterval 60
+
+    Host prod-db prod-*
+      HostName bastion.example.com
+      User alice
+      Port 2222
+      IdentityFile ~/.ssh/id_ed25519
+      ProxyJump jump.example.com
+      LocalForward 15432 db.internal:5432
+      LocalForward 127.0.0.1:6379 localhost:6379
+      DynamicForward 1080
+
+    Host plain
+      User bob
+    """
+
+    let hosts = SSHConfigParser.parse(contents: contents)
+
+    #expect(hosts.map(\.alias) == ["prod-db", "plain"])
+
+    let prod = try #require(hosts.first)
+    #expect(prod.effectiveHost == "bastion.example.com")
+    #expect(prod.user == "alice")
+    #expect(prod.port == 2222)
+    #expect(prod.identityFile == "~/.ssh/id_ed25519")
+    #expect(prod.proxyJump == "jump.example.com")
+    #expect(prod.forwards.count == 3)
+    #expect(prod.forwards[0].kind == .local)
+    #expect(prod.forwards[0].listenPort == 15432)
+    #expect(prod.forwards[0].destinationHost == "db.internal")
+    #expect(prod.forwards[0].destinationPort == 5432)
+    #expect(prod.forwards[1].bindAddress == "127.0.0.1")
+    #expect(prod.forwards[2].kind == .dynamic)
+    #expect(prod.forwards[2].listenPort == 1080)
+
+    let plain = hosts[1]
+    #expect(plain.effectiveHost == "plain")
+    #expect(plain.user == "bob")
+    #expect(plain.forwards.isEmpty)
+}
+
+@Test func sshConfigParserHandlesEqualsSyntaxAndComments() async throws {
+    let contents = """
+    Host=web
+      HostName = web.example.com
+      # Port comment
+      Port = 22
+    """
+
+    let hosts = SSHConfigParser.parse(contents: contents)
+    let web = try #require(hosts.first)
+    #expect(web.alias == "web")
+    #expect(web.hostName == "web.example.com")
+    #expect(web.port == 22)
+}
+
+@Test func sshConfigParserFollowsIncludes() async throws {
+    let tempDirectory = FileManager.default.temporaryDirectory
+        .appendingPathComponent("burrow-sshconfig-\(UUID().uuidString)", isDirectory: true)
+    try FileManager.default.createDirectory(at: tempDirectory, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: tempDirectory) }
+
+    let includedURL = tempDirectory.appendingPathComponent("extra.conf")
+    try """
+    Host included-host
+      HostName included.example.com
+    """.write(to: includedURL, atomically: true, encoding: .utf8)
+
+    let mainURL = tempDirectory.appendingPathComponent("config")
+    try """
+    Include extra.conf
+
+    Host main-host
+      HostName main.example.com
+    """.write(to: mainURL, atomically: true, encoding: .utf8)
+
+    let hosts = SSHConfigParser.parse(fileAt: mainURL)
+    #expect(hosts.map(\.alias).sorted() == ["included-host", "main-host"])
+}
+
+@Test func configWithoutGatewaysStillDecodes() async throws {
+    let legacyJSON = """
+    {"version": 1, "tunnels": []}
+    """
+    let config = try JSONDecoder().decode(AppConfig.self, from: Data(legacyJSON.utf8))
+    #expect(config.gateways.isEmpty)
+    #expect(config.tunnels.isEmpty)
+}
+
+@Test func gatewayConfigDecodesWithDefaults() async throws {
+    let json = """
+    {"name": "campus", "protocol": "gp", "server": "vpn.example.edu", "user": "alice", "socksPort": 11080}
+    """
+    let gateway = try JSONDecoder().decode(GatewayConfig.self, from: Data(json.utf8))
+    #expect(gateway.vpnProtocol == "gp")
+    #expect(gateway.sshHostPatterns.isEmpty)
+    #expect(gateway.reconnectDelaySeconds == 5)
+}
+
+@Test func gatewayLinkerInjectsProxyCommand() async throws {
+    let gateway = GatewayConfig(name: "campus", vpnProtocol: "gp", server: "vpn.example.edu", socksPort: 11080)
+    let tunnel = TunnelConfig(
+        name: "db",
+        host: "internal.example.edu",
+        forwards: [ForwardSpec(kind: .local, listenPort: 5432, destinationHost: "localhost", destinationPort: 5432)],
+        gateway: "campus"
+    )
+
+    let routed = GatewayLinker.applyingGatewayProxy(to: tunnel, gateways: [gateway])
+    #expect(routed.extraSSHOptions.contains("ProxyCommand=/usr/bin/nc -X 5 -x 127.0.0.1:11080 %h %p"))
+
+    let args = SSHCommandBuilder.buildArguments(for: routed)
+    #expect(args.contains("ProxyCommand=/usr/bin/nc -X 5 -x 127.0.0.1:11080 %h %p"))
+}
+
+@Test func gatewayLinkerRespectsUserProxyCommand() async throws {
+    let gateway = GatewayConfig(name: "campus", vpnProtocol: "gp", server: "vpn.example.edu", socksPort: 11080)
+    let tunnel = TunnelConfig(
+        name: "db",
+        host: "internal.example.edu",
+        forwards: [ForwardSpec(kind: .local, listenPort: 5432, destinationHost: "localhost", destinationPort: 5432)],
+        extraSSHOptions: ["ProxyCommand=custom %h %p"],
+        gateway: "campus"
+    )
+
+    let routed = GatewayLinker.applyingGatewayProxy(to: tunnel, gateways: [gateway])
+    #expect(routed.extraSSHOptions == ["ProxyCommand=custom %h %p"])
+}
+
+@Test func gatewayLinkerSkipsTunnelsWithoutGateway() async throws {
+    let gateway = GatewayConfig(name: "campus", vpnProtocol: "gp", server: "vpn.example.edu", socksPort: 11080)
+    let tunnel = TunnelConfig(
+        name: "db",
+        host: "plain.example.com",
+        forwards: [ForwardSpec(kind: .local, listenPort: 5432, destinationHost: "localhost", destinationPort: 5432)]
+    )
+
+    let routed = GatewayLinker.applyingGatewayProxy(to: tunnel, gateways: [gateway])
+    #expect(routed.extraSSHOptions.isEmpty)
+}
+
+@Test func gatewayCommandBuilderBuildsOpenconnectArguments() async throws {
+    let gateway = GatewayConfig(
+        name: "campus",
+        vpnProtocol: "gp",
+        server: "vpn.example.edu",
+        user: "alice",
+        socksPort: 11080,
+        extraArgs: ["--servercert", "pin-sha256:abc"]
+    )
+
+    let args = GatewayCommandBuilder.buildArguments(for: gateway, ocproxyPath: "/opt/homebrew/bin/ocproxy", credential: .password("secret"))
+    #expect(args.contains("--protocol=gp"))
+    #expect(args.contains("--user=alice"))
+    #expect(args.contains("--passwd-on-stdin"))
+    #expect(args.contains("--script-tun"))
+    #expect(args.contains("/opt/homebrew/bin/ocproxy -D 11080"))
+    #expect(args.contains("--servercert"))
+    #expect(args.last == "vpn.example.edu")
+}
+
+@Test func gatewayLinkerGeneratesSSHIncludeForHostPatterns() async throws {
+    let gateways = [
+        GatewayConfig(name: "campus", vpnProtocol: "gp", server: "vpn.example.edu", socksPort: 11080, sshHostPatterns: ["*.example.edu", "172.18.*"]),
+        GatewayConfig(name: "lab", vpnProtocol: "anyconnect", server: "vpn.lab.org", socksPort: 11081),
+    ]
+
+    let text = try #require(GatewayLinker.sshIncludeText(for: gateways))
+    #expect(text.contains("Match host *.example.edu,172.18.*"))
+    #expect(text.contains("ProxyCommand /usr/bin/nc -X 5 -x 127.0.0.1:11080 %h %p"))
+    #expect(!text.contains("11081"))
+
+    #expect(GatewayLinker.sshIncludeText(for: [gateways[1]]) == nil)
+}
+
+@Test func gatewayCommandBuilderHandlesSAMLCredentials() async throws {
+    let gateway = GatewayConfig(name: "campus", vpnProtocol: "gp", server: "vpn.example.edu", socksPort: 11080, authMode: "saml")
+
+    let cookieArgs = GatewayCommandBuilder.buildArguments(
+        for: gateway,
+        ocproxyPath: "/opt/homebrew/bin/ocproxy",
+        credential: .samlCookie(username: "alice@example.edu", cookie: "abc", usergroup: "gateway:prelogin-cookie")
+    )
+    #expect(cookieArgs.contains("--user=alice@example.edu"))
+    #expect(cookieArgs.contains("--usergroup=gateway:prelogin-cookie"))
+    #expect(cookieArgs.contains("--passwd-on-stdin"))
+
+    let browserArgs = GatewayCommandBuilder.buildArguments(
+        for: gateway,
+        ocproxyPath: "/opt/homebrew/bin/ocproxy",
+        credential: .samlExternalBrowser
+    )
+    #expect(browserArgs.contains("--external-browser=/usr/bin/open"))
+    #expect(!browserArgs.contains("--passwd-on-stdin"))
+}
+
+@Test func gatewaySupervisorExtractsServerCertPin() async throws {
+    let line = "To trust this server in future, perhaps add this to your command line:  --servercert pin-sha256:0Yt0jETVKnZxPLLqkjVdCfsdtF/CNqo04gQpkznFPGI="
+    #expect(GatewaySupervisor.extractServerCertPin(from: line) == "pin-sha256:0Yt0jETVKnZxPLLqkjVdCfsdtF/CNqo04gQpkznFPGI=")
+    #expect(GatewaySupervisor.extractServerCertPin(from: "--servercert=pin-sha256:abc=") == "pin-sha256:abc=")
+    #expect(GatewaySupervisor.extractServerCertPin(from: "no cert here") == nil)
+}
