@@ -69,10 +69,17 @@ struct ProfileEditorSheet: View {
 
             ScrollView {
                 VStack(alignment: .leading, spacing: 10) {
-                    if !gatewayNames.isEmpty {
-                        section(title: "VPN Gateways", items: gatewayNames, selection: $draft.selectedGateways)
-                    }
                     section(title: "Tunnels", items: tunnelNames, selection: $draft.selectedTunnels)
+                    if !gatewayNames.isEmpty {
+                        VStack(alignment: .leading, spacing: 4) {
+                            section(title: "VPN Gateways", items: gatewayNames, selection: $draft.selectedGateways)
+                            Text("A tunnel's gateway starts automatically when needed — include a gateway here only so the profile also stops it.")
+                                .font(.system(size: 10))
+                                .foregroundStyle(.secondary)
+                                .lineLimit(3)
+                                .padding(.horizontal, 2)
+                        }
+                    }
                 }
                 .padding(.vertical, 2)
             }

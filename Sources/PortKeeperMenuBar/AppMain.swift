@@ -737,6 +737,16 @@ final class MenuBarViewModel: ObservableObject {
         }
     }
 
+    func deleteProfile(named name: String) {
+        do {
+            try store.removeProfile(name: name)
+            loadConfig()
+            globalMessage = "Deleted profile \(name)."
+        } catch {
+            globalMessage = "Delete failed: \(error.localizedDescription)"
+        }
+    }
+
     func deleteProfileEditorTarget() {
         guard let draft = profileDraft, let originalName = draft.originalName else {
             profileDraft = nil
@@ -2146,13 +2156,10 @@ struct MenuBarContent: View {
 
                 Divider()
 
-                // Manage (day-to-day profile start/stop lives in the chips)
-                Button("New VPN Gateway…", action: viewModel.createGateway)
-                Menu("Profiles") {
-                    Button("New Profile…", action: viewModel.createProfile)
-                    let profiles = viewModel.profiles
-                    if !profiles.isEmpty {
-                        Divider()
+                // Manage (creates live in the footer; chips start/stop profiles)
+                let profiles = viewModel.profiles
+                if !profiles.isEmpty {
+                    Menu("Profiles") {
                         ForEach(profiles) { profile in
                             Button("Edit \(profile.name)…") {
                                 viewModel.openProfileEditor(for: profile.name)
@@ -2205,8 +2212,16 @@ struct MenuBarContent: View {
 
             Spacer()
 
-            // The one prominent action; other creates live in Settings and on
-            // the section headers' + buttons.
+            Button {
+                viewModel.createGateway()
+            } label: {
+                Label("New VPN", systemImage: "lock.shield")
+            }
+            Button {
+                viewModel.createProfile()
+            } label: {
+                Label("New Profile", systemImage: "square.stack")
+            }
             Button {
                 viewModel.createTunnel()
             } label: {
@@ -2226,10 +2241,26 @@ struct MenuBarContent: View {
                     ProfileChip(
                         name: profile.name,
                         state: viewModel.profileRunState(profile),
+                        onStart: { viewModel.startProfile(named: profile.name) },
+                        onStop: { viewModel.stopProfile(named: profile.name) },
                         onToggle: { viewModel.toggleProfile(named: profile.name) },
-                        onEdit: { viewModel.openProfileEditor(for: profile.name) }
+                        onEdit: { viewModel.openProfileEditor(for: profile.name) },
+                        onDelete: { viewModel.deleteProfile(named: profile.name) }
                     )
                 }
+                // Ghost chip: quick path to another profile.
+                Button(action: { viewModel.createProfile() }) {
+                    Image(systemName: "plus")
+                        .font(.system(size: 9, weight: .bold))
+                        .foregroundStyle(.secondary.opacity(0.6))
+                        .frame(width: 24, height: 24)
+                        .background(
+                            Capsule(style: .continuous)
+                                .strokeBorder(Color.primary.opacity(0.12), style: StrokeStyle(lineWidth: 1, dash: [3, 2.5]))
+                        )
+                }
+                .buttonStyle(.plain)
+                .help("New profile")
             }
             .padding(.horizontal, 14)
             .padding(.vertical, 7)
@@ -2569,8 +2600,11 @@ private struct CompactPressButtonStyle: ButtonStyle {
 private struct ProfileChip: View {
     let name: String
     let state: MenuBarViewModel.ProfileRunState
+    let onStart: () -> Void
+    let onStop: () -> Void
     let onToggle: () -> Void
     let onEdit: () -> Void
+    let onDelete: () -> Void
     @State private var isHovered = false
 
     var body: some View {
@@ -2603,7 +2637,12 @@ private struct ProfileChip: View {
         }
         .help(helpText)
         .contextMenu {
+            Button("Start", action: onStart)
+            Button("Stop", action: onStop)
+            Divider()
             Button("Edit…", action: onEdit)
+            Divider()
+            Button("Delete", role: .destructive, action: onDelete)
         }
     }
 
