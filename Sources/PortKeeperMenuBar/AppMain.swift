@@ -1962,7 +1962,7 @@ final class GatewayEventBridge: @unchecked Sendable {
 struct MenuBarContent: View {
     @ObservedObject var viewModel: MenuBarViewModel
     private let menuWidth: CGFloat = 450
-    private let minimumMenuHeight: CGFloat = 560
+    private let minimumMenuHeight: CGFloat = 400
 
     struct EndpointGroup: Identifiable {
         let endpoint: String
@@ -2100,7 +2100,8 @@ struct MenuBarContent: View {
 
         let profileChipsHeight: CGFloat = viewModel.profiles.isEmpty ? 0 : 40
 
-        let headerAndFooterChrome: CGFloat = 166
+        // Footer is a single row now.
+        let headerAndFooterChrome: CGFloat = 134
         return headerAndFooterChrome + profileChipsHeight + gatewaysHeight + listHeight
     }
 
@@ -2136,98 +2137,86 @@ struct MenuBarContent: View {
     }
 
     private var footer: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            HStack(spacing: 8) {
-                // Bulk actions: compact, icon-only — rarer once profiles exist.
-                Button {
-                    viewModel.startEnabledTunnels()
-                } label: {
-                    Image(systemName: "play.fill")
-                }
-                .help("Start all enabled tunnels")
-                Button {
-                    viewModel.stopAll()
-                } label: {
-                    Image(systemName: "stop.fill")
-                }
-                .help("Stop all tunnels")
+        HStack(spacing: 8) {
+            Menu {
+                // Bulk actions: auto-connect covers daily use, so these live
+                // here as plain-named occasional tools.
+                Button("Connect All Tunnels", action: viewModel.startAll)
+                Button("Stop All Tunnels", action: viewModel.stopAll)
 
-                Spacer()
+                Divider()
 
-                // One create button: click = New Tunnel (the common case),
-                // menu holds the occasional creates.
-                Menu {
-                    Button("New VPN Gateway…", action: viewModel.createGateway)
+                // Manage (day-to-day profile start/stop lives in the chips)
+                Menu("Profiles") {
                     Button("New Profile…", action: viewModel.createProfile)
-                } label: {
-                    Label("New Tunnel", systemImage: "plus")
-                } primaryAction: {
-                    viewModel.createTunnel()
-                }
-                .buttonStyle(.borderedProminent)
-                .tint(.burrowPrimaryButton)
-                .fixedSize()
-            }
-
-            HStack(spacing: 8) {
-                Menu {
-                    // Manage (day-to-day start/stop lives in the profile chips)
-                    Menu("Profiles") {
-                        Button("New Profile…", action: viewModel.createProfile)
-                        let profiles = viewModel.profiles
-                        if !profiles.isEmpty {
-                            Divider()
-                            ForEach(profiles) { profile in
-                                Button("Edit \(profile.name)…") {
-                                    viewModel.openProfileEditor(for: profile.name)
-                                }
+                    let profiles = viewModel.profiles
+                    if !profiles.isEmpty {
+                        Divider()
+                        ForEach(profiles) { profile in
+                            Button("Edit \(profile.name)…") {
+                                viewModel.openProfileEditor(for: profile.name)
                             }
                         }
                     }
-                    Button("Import Tunnels from SSH Config…", action: viewModel.beginSSHConfigImport)
+                }
+                Button("Import Tunnels from SSH Config…", action: viewModel.beginSSHConfigImport)
 
-                    Divider()
+                Divider()
 
-                    // Preferences
-                    Toggle("Start at Login", isOn: Binding(
-                        get: { viewModel.launchAtLoginEnabled },
-                        set: { viewModel.setLaunchAtLogin($0) }
-                    ))
-                    Toggle("Keep Running After Quit", isOn: Binding(
-                        get: { viewModel.keepRunningAfterQuit },
-                        set: { viewModel.keepRunningAfterQuit = $0 }
-                    ))
+                // Preferences
+                Toggle("Start at Login", isOn: Binding(
+                    get: { viewModel.launchAtLoginEnabled },
+                    set: { viewModel.setLaunchAtLogin($0) }
+                ))
+                Toggle("Keep Running After Quit", isOn: Binding(
+                    get: { viewModel.keepRunningAfterQuit },
+                    set: { viewModel.keepRunningAfterQuit = $0 }
+                ))
 
-                    Divider()
+                Divider()
 
-                    // Config file
-                    Menu("Config File") {
-                        Button("Reload", action: viewModel.reloadConfig)
-                        Button("Edit JSON…", action: viewModel.openConfig)
-                        Button("Reveal in Finder", action: viewModel.revealConfigFolder)
-                        if viewModel.hasSSHInclude {
-                            Divider()
-                            Button("Copy SSH Config Include Line") {
-                                NSPasteboard.general.clearContents()
-                                NSPasteboard.general.setString("Include \"\(viewModel.sshIncludePath)\"", forType: .string)
-                                viewModel.globalMessage = "Copied — paste at the top of ~/.ssh/config to route hosts through gateways."
-                            }
+                // Config file
+                Menu("Config File") {
+                    Button("Reload", action: viewModel.reloadConfig)
+                    Button("Edit JSON…", action: viewModel.openConfig)
+                    Button("Reveal in Finder", action: viewModel.revealConfigFolder)
+                    if viewModel.hasSSHInclude {
+                        Divider()
+                        Button("Copy SSH Config Include Line") {
+                            NSPasteboard.general.clearContents()
+                            NSPasteboard.general.setString("Include \"\(viewModel.sshIncludePath)\"", forType: .string)
+                            viewModel.globalMessage = "Copied — paste at the top of ~/.ssh/config to route hosts through gateways."
                         }
                     }
-
-                    Divider()
-
-                    Button("Quit Burrow") {
-                        viewModel.quit()
-                    }
-                } label: {
-                    Label("Settings", systemImage: "gearshape")
                 }
-                .menuStyle(.borderlessButton)
 
-                Spacer()
+                Divider()
+
+                Button("Quit Burrow") {
+                    viewModel.quit()
+                }
+            } label: {
+                Label("Settings", systemImage: "gearshape")
+                    .font(.system(size: 11))
             }
-            .font(.system(size: 11))
+            .menuStyle(.borderlessButton)
+            .fixedSize()
+
+            Spacer()
+
+            // One create button: click = New Tunnel (the common case),
+            // menu holds the occasional creates.
+            Menu {
+                Button("New VPN Gateway…", action: viewModel.createGateway)
+                Button("New Profile…", action: viewModel.createProfile)
+            } label: {
+                Label("New Tunnel", systemImage: "plus")
+            } primaryAction: {
+                viewModel.createTunnel()
+            }
+            .buttonStyle(.borderedProminent)
+            .tint(.burrowPrimaryButton)
+            .fixedSize()
         }
         .controlSize(.small)
     }
@@ -2397,9 +2386,9 @@ private struct EndpointHeader: View {
                     onSelectGateway(selected.isEmpty ? nil : selected)
                 }
             )) {
-                Text("Direct — no VPN").tag("")
+                Text("Direct (No VPN)").tag("")
                 ForEach(gatewayNames, id: \.self) { name in
-                    Text("via \(name)").tag(name)
+                    Text("Via \(name)").tag(name)
                 }
             }
             .pickerStyle(.inline)
@@ -2744,7 +2733,7 @@ private struct GatewayRow: View {
 
     private var menu: some View {
         Menu {
-            Button("Edit", action: onEdit)
+            Button("Edit…", action: onEdit)
             let browsers = ChromiumBrowserLauncher.installed()
             if !browsers.isEmpty {
                 Divider()
@@ -2755,16 +2744,16 @@ private struct GatewayRow: View {
                 }
             }
             Divider()
-            Button("Copy ssh-via-VPN Command") {
+            Button("Copy SSH Command Template") {
                 copy("ssh -o ProxyCommand='\(GatewayLinker.proxyCommand(for: gateway.config))' USER@HOST")
             }
             Button("Copy SOCKS Address") {
                 copy("127.0.0.1:\(gateway.config.socksPort)")
             }
-            Button("Copy ssh ProxyCommand Option") {
+            Button("Copy SSH ProxyCommand Option") {
                 copy("-o ProxyCommand='\(GatewayLinker.proxyCommand(for: gateway.config))'")
             }
-            Button("Copy openconnect Command") {
+            Button("Copy OpenConnect Command") {
                 copy(GatewayCommandBuilder.render(gateway.config))
             }
             Divider()
@@ -3172,19 +3161,19 @@ struct TunnelRow: View {
                     get: { tunnel.tunnel.gateway ?? "" },
                     set: { onSetGateway($0.isEmpty ? nil : $0) }
                 )) {
-                    Text("Direct — no VPN").tag("")
+                    Text("Direct (No VPN)").tag("")
                     ForEach(gatewayNames, id: \.self) { name in
-                        Text("via \(name)").tag(name)
+                        Text("Via \(name)").tag(name)
                     }
                 }
             }
             Divider()
             Button("Open SSH in Terminal", action: onOpenSSH)
-            Button("Copy ssh Command", action: onCopySSH)
+            Button("Copy SSH Command", action: onCopySSH)
             Divider()
             Button("Restart", action: onRestart)
-            Button("Edit", action: onEdit)
-            Button("Duplicate", action: onDuplicate)
+            Button("Edit…", action: onEdit)
+            Button("Duplicate…", action: onDuplicate)
             Divider()
             Button("Delete", role: .destructive, action: onDelete)
         } label: {
