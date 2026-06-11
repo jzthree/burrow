@@ -2269,19 +2269,16 @@ struct MenuBarContent: View {
 
     private var gatewaysSection: some View {
         VStack(alignment: .leading, spacing: 5) {
-            HStack(spacing: 8) {
-                Image(systemName: "lock.shield")
-                    .font(.system(size: 8, weight: .semibold))
-                    .foregroundStyle(.secondary.opacity(0.64))
-                    .frame(width: 17, height: 17)
-                    .background(
-                        RoundedRectangle(cornerRadius: 6, style: .continuous)
-                            .fill(Color.secondary.opacity(0.055))
-                    )
-                Text(verbatim: "vpn gateways")
-                    .font(.system(size: 10, weight: .bold, design: .monospaced))
-                    .tracking(0.15)
-                    .foregroundStyle(Color.secondary.opacity(0.62))
+            // A section *title* (sidebar-header style) — deliberately distinct
+            // from host group headers, which show data in monospace.
+            HStack(spacing: 5) {
+                Image(systemName: "lock.shield.fill")
+                    .font(.system(size: 9, weight: .semibold))
+                    .foregroundStyle(Color.burrowAccent.opacity(0.55))
+                Text("VPN")
+                    .font(.system(size: 10.5, weight: .semibold))
+                    .tracking(0.9)
+                    .foregroundStyle(.secondary)
                 Spacer(minLength: 4)
                 Button {
                     viewModel.createGateway()
@@ -2322,9 +2319,15 @@ struct MenuBarContent: View {
                 RoundedRectangle(cornerRadius: 16, style: .continuous)
                     .fill(Color(nsColor: .controlBackgroundColor).opacity(0.54))
             )
+            .background(
+                // Faint indigo wash marks gateways as VPN infrastructure,
+                // matching the bolt/Connect accent language.
+                RoundedRectangle(cornerRadius: 16, style: .continuous)
+                    .fill(Color.burrowAccentHalo.opacity(0.30))
+            )
             .overlay(
                 RoundedRectangle(cornerRadius: 16, style: .continuous)
-                    .stroke(Color.primary.opacity(0.06), lineWidth: 1)
+                    .stroke(Color.burrowAccent.opacity(0.10), lineWidth: 1)
             )
             .shadow(color: Color.black.opacity(0.045), radius: 6, x: 0, y: 3)
         }
