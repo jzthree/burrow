@@ -884,23 +884,14 @@ final class MenuBarViewModel: ObservableObject {
                 guard activeSAMLAuthenticators[name] == nil else {
                     return true
                 }
-                // The IdP session persists in the web view, so sign-in usually
-                // completes silently. A user-initiated connect (or auto-reconnect
-                // after a drop) reveals the sign-in window only if the session has
-                // actually expired (a login form appears) or after a generous
-                // fallback; a headless launch auto-start never shows a window and
-                // falls back to "click Connect".
-                // Both paths try silently first and reveal the sign-in window
-                // only when the IdP needs a real interaction (e.g. an Entra
-                // account picker). Launch auto-start uses a longer silent grace
-                // so a quick valid session stays fully invisible.
-                let policy: GPSAMLAuthenticator.InteractionPolicy = allowPasswordPrompt
-                    ? .showAfter(12)
-                    : .showAfter(20)
+                // A user-initiated connect (or auto-reconnect after a drop) opens
+                // the SAML sign-in window for the user to complete. A headless
+                // launch auto-start does not pop a window — it reports that a
+                // sign-in is needed so the gateway shows "click Connect".
                 updateGatewayState(for: name, isRunning: false, state: .connecting, message: "Signing in (SAML)")
                 let authenticator = GPSAMLAuthenticator(gateway: gateway)
                 activeSAMLAuthenticators[name] = authenticator
-                authenticator.begin(policy: policy) { [weak self] result in
+                authenticator.begin(interactive: allowPasswordPrompt) { [weak self] result in
                     guard let self else {
                         return
                     }

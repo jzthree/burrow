@@ -34,34 +34,29 @@ final class GPSAMLAuthenticator: NSObject, WKNavigationDelegate, NSWindowDelegat
         }
     }
 
-    /// The IdP session persists in the web view's storage, so sign-in often
-    /// completes with no interaction. The policy controls whether and when
-    /// the window becomes visible.
-    enum InteractionPolicy {
-        case showImmediately
-        /// Try silently; reveal the window if not finished after the delay.
-        case showAfter(TimeInterval)
-        /// Never show a window; fail with `.interactionRequired` on timeout.
-        case silentOnly(TimeInterval)
-    }
-
     private let gateway: GatewayConfig
     private var window: NSWindow?
     private var webView: WKWebView?
     private var completion: ((Result<SAMLResult, Error>) -> Void)?
     private var headerUsername: String?
-    private var policy: InteractionPolicy = .showImmediately
-    private var revealTask: Task<Void, Never>?
-    private var isRevealed = false
+    private var pendingUsergroup = "gateway:prelogin-cookie"
 
     init(gateway: GatewayConfig) {
         self.gateway = gateway
     }
 
-
-    func begin(policy: InteractionPolicy = .showImmediately, completion: @escaping (Result<SAMLResult, Error>) -> Void) {
-        self.policy = policy
+    /// Opens the sign-in window and runs the SAML flow. `interactive == false`
+    /// (used by headless launch auto-start) skips the window and reports that a
+    /// sign-in is needed, so the gateway shows "click Connect" instead of
+    /// popping a browser window at startup. The persistent web data store keeps
+    /// the IdP session, so a still-valid session is usually a quick click; an
+    /// expired one is a full sign-in — either way the user drives it.
+    func begin(interactive: Bool = true, completion: @escaping (Result<SAMLResult, Error>) -> Void) {
         self.completion = completion
+        guard interactive else {
+            finish(.failure(SAMLError.interactionRequired))
+            return
+        }
         Task { @MainActor in
             do {
                 let prelogin = try await fetchPrelogin()
@@ -162,16 +157,7 @@ final class GPSAMLAuthenticator: NSObject, WKNavigationDelegate, NSWindowDelegat
         window.isReleasedWhenClosed = false
         window.level = .floating
         window.delegate = self
-        // Keep the window on-screen but fully transparent and click-through so
-        // WebKit treats it as visible and runs the IdP's redirect JavaScript
-        // normally (a never-shown or off-screen window gets its timers and
-        // rendering throttled — the main reason silent sign-in was flaky). We
-        // make it visible only if a login form actually appears (session
-        // expired), via reveal().
         window.center()
-        window.alphaValue = 0
-        window.ignoresMouseEvents = true
-        window.orderFrontRegardless()
         self.window = window
         self.pendingUsergroup = prelogin.cookieUsergroup
 
@@ -184,59 +170,10 @@ final class GPSAMLAuthenticator: NSObject, WKNavigationDelegate, NSWindowDelegat
             return
         }
 
-        switch policy {
-        case .showImmediately:
-            reveal()
-        case .showAfter(let delay):
-            // Safety fallback only — interaction detection usually reveals or
-            // resolves well before this fires.
-            revealTask = Task { @MainActor [weak self] in
-                try? await Task.sleep(for: .seconds(delay))
-                guard let self, !Task.isCancelled, self.completion != nil else {
-                    return
-                }
-                self.reveal()
-            }
-        case .silentOnly(let timeout):
-            revealTask = Task { @MainActor [weak self] in
-                try? await Task.sleep(for: .seconds(timeout))
-                guard let self, !Task.isCancelled, self.completion != nil else {
-                    return
-                }
-                self.finish(.failure(SAMLError.interactionRequired))
-            }
-        }
-    }
-
-    private func reveal() {
-        guard let window, !isRevealed else {
-            return
-        }
-        isRevealed = true
-        revealTask?.cancel()
         MenuBarPopover.dismiss()
-        window.alphaValue = 1
-        window.ignoresMouseEvents = false
-        window.center()
         window.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
     }
-
-    /// The IdP session is stale and a login form is showing. Reveal the window
-    /// for the user (interactive policies), or give up (silent policy).
-    private func handleInteractionNeeded() {
-        guard completion != nil, !isRevealed else {
-            return
-        }
-        switch policy {
-        case .showImmediately, .showAfter:
-            reveal()
-        case .silentOnly:
-            finish(.failure(SAMLError.interactionRequired))
-        }
-    }
-
-    private var pendingUsergroup = "gateway:prelogin-cookie"
 
     func webView(
         _ webView: WKWebView,
@@ -273,120 +210,11 @@ final class GPSAMLAuthenticator: NSObject, WKNavigationDelegate, NSWindowDelegat
             }
             if let cookie = self.firstTag("prelogin-cookie", in: html) {
                 self.deliver(cookie: cookie, usergroup: "gateway:prelogin-cookie")
-                return
             } else if let cookie = self.firstTag("portal-userauthcookie", in: html) {
                 self.deliver(cookie: cookie, usergroup: "portal:portal-userauthcookie")
-                return
-            }
-
-            // No token yet. If the page is a real credential prompt, the cached
-            // IdP session is stale — surface it for the user. If it's an Entra/
-            // Azure interstitial (account picker, "stay signed in?"), advance it
-            // automatically so silent sign-in completes. Otherwise it's a mid-
-            // flow redirect; keep waiting for the next navigation.
-            if self.looksLikeLoginForm(html) {
-                self.handleInteractionNeeded()
-            } else {
-                self.tryAutoAdvance(webView, html: html)
             }
         }
     }
-
-    private var autoAdvanceCount = 0
-
-    /// Clicks through known Entra/Azure interstitials (account tile, "stay
-    /// signed in?") so a valid IdP session completes without user interaction.
-    /// Falls back to revealing the window if it can't make progress.
-    private func tryAutoAdvance(_ webView: WKWebView, html: String) {
-        let lowered = html.lowercased()
-        guard autoAdvanceCount < 6 else {
-            handleInteractionNeeded()
-            return
-        }
-
-        let email = (gateway.user ?? headerUsername ?? "")
-        let js: String
-        if lowered.contains("pick an account") || lowered.contains("aria-label=\"pick an account\"") {
-            js = """
-            (function(){
-              function fire(el){el.click();['mousedown','mouseup','click'].forEach(function(ev){
-                el.dispatchEvent(new MouseEvent(ev,{bubbles:true,cancelable:true,view:window}));});}
-              var email=\(jsStringLiteral(email)).toLowerCase();
-              // The clickable account is a [role=button] / div.table whose
-              // data-test-id is the email — NOT the .tile/.row list wrapper.
-              var btn=null;
-              if(email){btn=document.querySelector('[data-test-id="'+email+'"]');}
-              if(!btn){var bs=document.querySelectorAll('[role="button"][data-test-id], div.table[role="button"], [data-test-id]');
-                for(var i=0;i<bs.length;i++){var id=(bs[i].getAttribute('data-test-id')||'');
-                  if(id.indexOf('@')>=0){btn=bs[i];break;}}}
-              if(!btn){btn=document.querySelector('[data-test-id*="@"]');}
-              if(btn){fire(btn);return 'clicked:'+(btn.getAttribute('data-test-id')||btn.className).slice(0,40);}
-              return 'no-btn';
-            })()
-            """
-        } else if lowered.contains("stay signed in") || lowered.contains("kmsi") {
-            js = """
-            (function(){
-              function fire(el){['mousedown','mouseup','click'].forEach(function(ev){
-                el.dispatchEvent(new MouseEvent(ev,{bubbles:true,cancelable:true,view:window}));});}
-              var b=document.querySelectorAll('input[type=submit],button,[role="button"]');
-              for(var i=0;i<b.length;i++){var v=((b[i].value||'')+' '+(b[i].innerText||'')).toLowerCase();
-                if(v.indexOf('yes')>=0){fire(b[i]);return 'stay-yes';}}
-              if(b.length){fire(b[0]);return 'stay-first';}
-              return 'no-btn';
-            })()
-            """
-        } else {
-            // Unknown non-credential page that isn't progressing — let the user look.
-            handleInteractionNeeded()
-            return
-        }
-
-        autoAdvanceCount += 1
-        webView.evaluateJavaScript(js) { result, _ in
-        }
-
-        // Auto-advance is best-effort: some IdPs (notably Entra/Azure account
-        // pickers) reject synthetic clicks, so for interactive policies reveal
-        // the window shortly after so the user can finish with one real click
-        // (their account — no password). If the auto-click did navigate, the
-        // next page either yields the cookie (done) or we handle it there.
-        switch policy {
-        case .showImmediately, .showAfter:
-            revealTask?.cancel()
-            revealTask = Task { @MainActor [weak self] in
-                try? await Task.sleep(for: .milliseconds(1800))
-                guard let self, !Task.isCancelled, self.completion != nil, !self.isRevealed else {
-                    return
-                }
-                self.reveal()
-            }
-        case .silentOnly:
-            break
-        }
-    }
-
-    private func jsStringLiteral(_ s: String) -> String {
-        let escaped = s
-            .replacingOccurrences(of: "\\", with: "\\\\")
-            .replacingOccurrences(of: "'", with: "\\'")
-            .replacingOccurrences(of: "\n", with: "")
-        return "'\(escaped)'"
-    }
-
-    private func looksLikeLoginForm(_ html: String) -> Bool {
-        let lowered = html.lowercased()
-        guard lowered.contains("type=\"password\"") || lowered.contains("type='password'") else {
-            return false
-        }
-        // A bare auto-submit form often contains a hidden password placeholder;
-        // require a sign-in affordance too to avoid false positives mid-redirect.
-        return lowered.contains("login") || lowered.contains("sign in") || lowered.contains("signin")
-            || lowered.contains("username") || lowered.contains("u_name") || lowered.contains("okta")
-            || lowered.contains("microsoftonline") || lowered.contains("passwd")
-    }
-
-
 
     func windowWillClose(_ notification: Notification) {
         if completion != nil {
@@ -411,8 +239,6 @@ final class GPSAMLAuthenticator: NSObject, WKNavigationDelegate, NSWindowDelegat
             return
         }
         self.completion = nil
-        revealTask?.cancel()
-        revealTask = nil
         if closeWindow {
             window?.delegate = nil
             window?.close()
