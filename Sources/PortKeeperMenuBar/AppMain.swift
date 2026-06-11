@@ -334,6 +334,7 @@ final class MenuBarViewModel: ObservableObject {
                 )
             }
             writeSSHInclude(for: config.gateways)
+            profilesCache = config.profiles
 
             if tunnels.isEmpty {
                 globalMessage = "No tunnels configured yet."
@@ -613,8 +614,66 @@ final class MenuBarViewModel: ObservableObject {
 
     // MARK: - Profiles
 
+    @Published private(set) var profilesCache: [Profile] = []
+
     var profiles: [Profile] {
-        (try? store.load().profiles) ?? []
+        profilesCache
+    }
+
+    enum ProfileRunState {
+        case up
+        case partial
+        case down
+    }
+
+    func profileRunState(_ profile: Profile) -> ProfileRunState {
+        let tunnelStates = tunnels.filter { profile.tunnels.contains($0.id) }
+        let gatewayStates = gateways.filter { profile.gateways.contains($0.id) }
+        let total = tunnelStates.count + gatewayStates.count
+        guard total > 0 else {
+            return .down
+        }
+        let upCount = tunnelStates.filter { $0.connectionState == .connected }.count
+            + gatewayStates.filter { $0.connectionState == .connected }.count
+        if upCount == total {
+            return .up
+        }
+        if upCount > 0 || tunnelStates.contains(where: \.isRunning) || gatewayStates.contains(where: \.isRunning) {
+            return .partial
+        }
+        return .down
+    }
+
+    func toggleProfile(named name: String) {
+        guard let profile = profilesCache.first(where: { $0.name == name }) else {
+            return
+        }
+        let anyActive = tunnels.contains { profile.tunnels.contains($0.id) && $0.isRunning }
+            || gateways.contains { profile.gateways.contains($0.id) && $0.isRunning }
+        if anyActive {
+            stopProfile(named: name)
+        } else {
+            startProfile(named: name)
+        }
+    }
+
+    /// New-tunnel editor prefilled from an existing host's siblings (user,
+    /// port, identity, jump host, gateway), so adding another forward to a
+    /// known host is mostly just picking ports.
+    func createTunnel(forHost host: String) {
+        gatewayDraft = nil
+        profileDraft = nil
+        let siblings = tunnels.map(\.tunnel)
+        var draft = TunnelDraft.newTunnel(from: siblings, sshHosts: sshConfigHosts)
+        draft.host = host
+        if let sibling = siblings.first(where: { $0.host == host }) {
+            draft.user = sibling.user ?? draft.user
+            draft.sshPort = String(sibling.sshPort)
+            draft.identityFile = sibling.identityFile ?? draft.identityFile
+            draft.jumpHost = sibling.jumpHost ?? draft.jumpHost
+            draft.gateway = sibling.gateway ?? ""
+        }
+        editorDraft = draft
     }
 
     func startProfile(named name: String) {
@@ -1931,6 +1990,11 @@ struct MenuBarContent: View {
                     emptyState
                         .padding(16)
                 } else {
+                    if !viewModel.profiles.isEmpty {
+                        profileChipsRow
+                        Divider()
+                            .opacity(0.5)
+                    }
                     ScrollView {
                         VStack(alignment: .leading, spacing: 10) {
                             if !viewModel.gateways.isEmpty {
@@ -1943,7 +2007,8 @@ struct MenuBarContent: View {
                                         gatewayNames: viewModel.gateways.map(\.id),
                                         onSelectGateway: { gatewayName in
                                             viewModel.setGateway(gatewayName, forTunnels: group.tunnels.map(\.id))
-                                        }
+                                        },
+                                        onAddTunnel: { viewModel.createTunnel(forHost: group.endpoint) }
                                     )
 
                                     VStack(alignment: .leading, spacing: 0) {
@@ -2033,8 +2098,10 @@ struct MenuBarContent: View {
             ? 0
             : 32 + CGFloat(viewModel.gateways.count) * 54 + CGFloat(max(viewModel.gateways.count - 1, 0)) + 10
 
+        let profileChipsHeight: CGFloat = viewModel.profiles.isEmpty ? 0 : 40
+
         let headerAndFooterChrome: CGFloat = 166
-        return headerAndFooterChrome + gatewaysHeight + listHeight
+        return headerAndFooterChrome + profileChipsHeight + gatewaysHeight + listHeight
     }
 
     private var header: some View {
@@ -2071,45 +2138,48 @@ struct MenuBarContent: View {
     private var footer: some View {
         VStack(alignment: .leading, spacing: 10) {
             HStack(spacing: 8) {
+                // Bulk actions: compact, icon-only — rarer once profiles exist.
                 Button {
                     viewModel.startEnabledTunnels()
                 } label: {
-                    Label("Start Enabled", systemImage: "play.fill")
+                    Image(systemName: "play.fill")
                 }
+                .help("Start all enabled tunnels")
                 Button {
                     viewModel.stopAll()
                 } label: {
-                    Label("Stop All", systemImage: "stop.fill")
+                    Image(systemName: "stop.fill")
                 }
+                .help("Stop all tunnels")
+
                 Spacer()
-                Button {
-                    viewModel.createGateway()
-                } label: {
-                    Label("New VPN", systemImage: "lock.shield")
-                }
-                Button {
-                    viewModel.createTunnel()
+
+                // One create button: click = New Tunnel (the common case),
+                // menu holds the occasional creates.
+                Menu {
+                    Button("New VPN Gateway…", action: viewModel.createGateway)
+                    Button("New Profile…", action: viewModel.createProfile)
                 } label: {
                     Label("New Tunnel", systemImage: "plus")
+                } primaryAction: {
+                    viewModel.createTunnel()
                 }
                 .buttonStyle(.borderedProminent)
                 .tint(.burrowPrimaryButton)
+                .fixedSize()
             }
 
             HStack(spacing: 8) {
                 Menu {
-                    // Manage
+                    // Manage (day-to-day start/stop lives in the profile chips)
                     Menu("Profiles") {
                         Button("New Profile…", action: viewModel.createProfile)
                         let profiles = viewModel.profiles
                         if !profiles.isEmpty {
                             Divider()
                             ForEach(profiles) { profile in
-                                Menu(profile.name) {
-                                    Button("Start", action: { viewModel.startProfile(named: profile.name) })
-                                    Button("Stop", action: { viewModel.stopProfile(named: profile.name) })
-                                    Divider()
-                                    Button("Edit…", action: { viewModel.openProfileEditor(for: profile.name) })
+                                Button("Edit \(profile.name)…") {
+                                    viewModel.openProfileEditor(for: profile.name)
                                 }
                             }
                         }
@@ -2160,6 +2230,24 @@ struct MenuBarContent: View {
             .font(.system(size: 11))
         }
         .controlSize(.small)
+    }
+
+    /// One-click scenes: each chip starts/stops its profile; dot shows state.
+    private var profileChipsRow: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 6) {
+                ForEach(viewModel.profiles) { profile in
+                    ProfileChip(
+                        name: profile.name,
+                        state: viewModel.profileRunState(profile),
+                        onToggle: { viewModel.toggleProfile(named: profile.name) },
+                        onEdit: { viewModel.openProfileEditor(for: profile.name) }
+                    )
+                }
+            }
+            .padding(.horizontal, 14)
+            .padding(.vertical, 7)
+        }
     }
 
     private var gatewaysSection: some View {
@@ -2254,6 +2342,7 @@ private struct EndpointHeader: View {
     let group: MenuBarContent.EndpointGroup
     let gatewayNames: [String]
     let onSelectGateway: (String?) -> Void
+    var onAddTunnel: () -> Void = {}
 
     var body: some View {
         HStack(spacing: 8) {
@@ -2276,6 +2365,18 @@ private struct EndpointHeader: View {
             }
             Spacer(minLength: 4)
             EndpointHealthDots(tunnels: group.tunnels)
+            Button(action: onAddTunnel) {
+                Image(systemName: "plus")
+                    .font(.system(size: 9, weight: .bold))
+                    .foregroundStyle(.secondary.opacity(0.7))
+                    .frame(width: 17, height: 17)
+                    .background(
+                        RoundedRectangle(cornerRadius: 6, style: .continuous)
+                            .fill(Color.secondary.opacity(0.055))
+                    )
+            }
+            .buttonStyle(.plain)
+            .help("New tunnel to \(group.endpoint) — prefilled from this host")
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 1)
@@ -2476,6 +2577,64 @@ private struct CompactPressButtonStyle: ButtonStyle {
         configuration.label
             .scaleEffect(configuration.isPressed ? 0.965 : 1.0)
             .animation(.easeOut(duration: 0.08), value: configuration.isPressed)
+    }
+}
+
+private struct ProfileChip: View {
+    let name: String
+    let state: MenuBarViewModel.ProfileRunState
+    let onToggle: () -> Void
+    let onEdit: () -> Void
+    @State private var isHovered = false
+
+    var body: some View {
+        Button(action: onToggle) {
+            HStack(spacing: 5) {
+                Circle()
+                    .fill(dotColor)
+                    .frame(width: 5.5, height: 5.5)
+                Text(name)
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(.primary.opacity(0.82))
+                    .lineLimit(1)
+            }
+            .padding(.horizontal, 10)
+            .frame(height: 24)
+            .background(
+                Capsule(style: .continuous)
+                    .fill(state == .up ? Color.green.opacity(isHovered ? 0.16 : 0.10) : Color.secondary.opacity(isHovered ? 0.12 : 0.07))
+            )
+            .overlay(
+                Capsule(style: .continuous)
+                    .stroke(state == .up ? Color.green.opacity(0.25) : Color.primary.opacity(0.08), lineWidth: 1)
+            )
+        }
+        .buttonStyle(CompactPressButtonStyle())
+        .onHover { hovering in
+            withAnimation(.easeOut(duration: 0.1)) {
+                isHovered = hovering
+            }
+        }
+        .help(helpText)
+        .contextMenu {
+            Button("Edit…", action: onEdit)
+        }
+    }
+
+    private var dotColor: Color {
+        switch state {
+        case .up: return .green
+        case .partial: return .orange
+        case .down: return Color(nsColor: .tertiaryLabelColor)
+        }
+    }
+
+    private var helpText: String {
+        switch state {
+        case .up: return "Profile \(name): all up — click to stop"
+        case .partial: return "Profile \(name): partially up — click to stop"
+        case .down: return "Profile \(name): click to start"
+        }
     }
 }
 
