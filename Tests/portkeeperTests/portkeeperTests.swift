@@ -673,3 +673,42 @@ final class TCPTestServer {
     }
     func stop() { close(fd) }
 }
+
+@Test func gatewayRenameCascadesToTunnelsAndProfiles() async throws {
+    let tempDirectory = FileManager.default.temporaryDirectory
+        .appendingPathComponent(UUID().uuidString, isDirectory: true)
+    let store = ConfigStore(configURL: tempDirectory.appendingPathComponent("config.json"))
+
+    try store.save(AppConfig(
+        tunnels: [TunnelConfig(name: "db", host: "h", forwards: [], gateway: "old-vpn")],
+        gateways: [GatewayConfig(name: "old-vpn", vpnProtocol: "gp", server: "vpn.x", socksPort: 11080)],
+        profiles: [Profile(name: "work", tunnels: ["db"], gateways: ["old-vpn"])]
+    ))
+
+    var renamed = try store.load().gateways[0]
+    renamed.name = "New VPN"
+    try store.upsertGateway(renamed, replacing: "old-vpn")
+
+    let config = try store.load()
+    #expect(config.tunnels[0].gateway == "New VPN")
+    #expect(config.profiles[0].gateways == ["New VPN"])
+    #expect(config.gateways.map(\.name) == ["New VPN"])
+}
+
+@Test func tunnelRenameCascadesToProfiles() async throws {
+    let tempDirectory = FileManager.default.temporaryDirectory
+        .appendingPathComponent(UUID().uuidString, isDirectory: true)
+    let store = ConfigStore(configURL: tempDirectory.appendingPathComponent("config.json"))
+
+    try store.save(AppConfig(
+        tunnels: [TunnelConfig(name: "old-name", host: "h", forwards: [])],
+        profiles: [Profile(name: "work", tunnels: ["old-name"])]
+    ))
+
+    var renamed = try store.load().tunnels[0]
+    renamed.name = "new-name"
+    try store.upsert(renamed, replacing: "old-name")
+
+    let config = try store.load()
+    #expect(config.profiles[0].tunnels == ["new-name"])
+}

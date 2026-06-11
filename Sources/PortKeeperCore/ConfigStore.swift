@@ -61,6 +61,15 @@ public struct ConfigStore: Sendable {
         } else {
             config.tunnels.append(tunnel)
         }
+
+        // Profiles reference tunnels by name; a rename must follow.
+        if let originalName, originalName != tunnel.name {
+            for index in config.profiles.indices {
+                config.profiles[index].tunnels = config.profiles[index].tunnels.map {
+                    $0 == originalName ? tunnel.name : $0
+                }
+            }
+        }
         try save(config)
     }
 
@@ -76,6 +85,19 @@ public struct ConfigStore: Sendable {
             config.gateways[index] = gateway
         } else {
             config.gateways.append(gateway)
+        }
+
+        // Tunnels and profiles reference gateways by name; a rename must
+        // follow or they're left pointing at a gateway that no longer exists.
+        if let originalName, originalName != gateway.name {
+            for index in config.tunnels.indices where config.tunnels[index].gateway == originalName {
+                config.tunnels[index].gateway = gateway.name
+            }
+            for index in config.profiles.indices {
+                config.profiles[index].gateways = config.profiles[index].gateways.map {
+                    $0 == originalName ? gateway.name : $0
+                }
+            }
         }
         try save(config)
     }
