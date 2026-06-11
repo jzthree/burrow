@@ -99,6 +99,14 @@ final class MenuBarViewModel: ObservableObject {
             }
         }
     }
+    @Published var profileDraft: ProfileDraft? {
+        didSet {
+            let draftChanged = oldValue?.id != profileDraft?.id
+            if draftChanged || (oldValue != nil) != (profileDraft != nil) {
+                syncEditorWindow()
+            }
+        }
+    }
     @Published var importCandidates: [SSHConfigImportCandidate]?
     @Published private(set) var launchAtLoginEnabled = false
     /// When true, an intentional Quit leaves the VPN and tunnels running and
@@ -635,6 +643,56 @@ final class MenuBarViewModel: ObservableObject {
         globalMessage = "Stopped profile \(name)."
     }
 
+    func createProfile() {
+        editorDraft = nil
+        gatewayDraft = nil
+        profileDraft = ProfileDraft.newProfile(existing: profiles)
+    }
+
+    func openProfileEditor(for name: String) {
+        guard let profile = profiles.first(where: { $0.name == name }) else {
+            globalMessage = "Profile '\(name)' not found."
+            return
+        }
+        editorDraft = nil
+        gatewayDraft = nil
+        profileDraft = ProfileDraft(profile: profile, originalName: profile.name)
+    }
+
+    func closeProfileEditor() {
+        profileDraft = nil
+    }
+
+    func saveProfileEditor() {
+        guard let draft = profileDraft else {
+            return
+        }
+        do {
+            let profile = try draft.toProfile()
+            try store.upsertProfile(profile, replacing: draft.originalName)
+            loadConfig()
+            globalMessage = "Saved profile \(profile.name)."
+            profileDraft = nil
+        } catch {
+            globalMessage = "Save failed: \(error.localizedDescription)"
+        }
+    }
+
+    func deleteProfileEditorTarget() {
+        guard let draft = profileDraft, let originalName = draft.originalName else {
+            profileDraft = nil
+            return
+        }
+        do {
+            try store.removeProfile(name: originalName)
+            loadConfig()
+            globalMessage = "Deleted profile \(originalName)."
+        } catch {
+            globalMessage = "Delete failed: \(error.localizedDescription)"
+        }
+        profileDraft = nil
+    }
+
     func openConfig() {
         do {
             let url = try store.ensureExists()
@@ -659,6 +717,7 @@ final class MenuBarViewModel: ObservableObject {
             return
         }
         gatewayDraft = nil
+        profileDraft = nil
         editorDraft = TunnelDraft(tunnel: tunnel, originalName: tunnel.name)
     }
 
@@ -671,6 +730,7 @@ final class MenuBarViewModel: ObservableObject {
         var draft = TunnelDraft(tunnel: tunnel, originalName: nil)
         draft.name = uniqueDuplicateName(for: tunnel.name)
         gatewayDraft = nil
+        profileDraft = nil
         editorDraft = draft
         globalMessage = "Duplicating \(name)."
     }
@@ -709,6 +769,7 @@ final class MenuBarViewModel: ObservableObject {
 
     func createTunnel() {
         gatewayDraft = nil
+        profileDraft = nil
         editorDraft = TunnelDraft.newTunnel(from: tunnels.map(\.tunnel), sshHosts: sshConfigHosts)
     }
 
@@ -783,7 +844,9 @@ final class MenuBarViewModel: ObservableObject {
 
     private func syncEditorWindow() {
         let title: String?
-        if let draft = gatewayDraft {
+        if let draft = profileDraft {
+            title = draft.originalName.map { "Edit Profile \($0)" } ?? "New Profile"
+        } else if let draft = gatewayDraft {
             title = draft.originalName.map { "Edit Gateway \($0)" } ?? "New VPN Gateway"
         } else if let draft = editorDraft {
             title = draft.originalName.map { "Edit \($0)" } ?? "New Tunnel"
@@ -803,6 +866,7 @@ final class MenuBarViewModel: ObservableObject {
 
     func createGateway() {
         editorDraft = nil
+        profileDraft = nil
         gatewayDraft = GatewayDraft.newGateway(from: gateways.map(\.config))
     }
 
@@ -812,6 +876,7 @@ final class MenuBarViewModel: ObservableObject {
             return
         }
         editorDraft = nil
+        profileDraft = nil
         gatewayDraft = GatewayDraft(gateway: gateway, originalName: gateway.name)
     }
 
@@ -2035,13 +2100,18 @@ struct MenuBarContent: View {
                 Menu {
                     Button("New VPN Gateway…", action: viewModel.createGateway)
                     Button("Import from SSH Config…", action: viewModel.beginSSHConfigImport)
-                    let profiles = viewModel.profiles
-                    if !profiles.isEmpty {
-                        Menu("Profiles") {
+                    Menu("Profiles") {
+                        Button("New Profile…", action: viewModel.createProfile)
+                        let profiles = viewModel.profiles
+                        if !profiles.isEmpty {
+                            Divider()
                             ForEach(profiles) { profile in
-                                Button("Start \(profile.name)") { viewModel.startProfile(named: profile.name) }
-                                Button("Stop \(profile.name)") { viewModel.stopProfile(named: profile.name) }
-                                Divider()
+                                Menu(profile.name) {
+                                    Button("Start", action: { viewModel.startProfile(named: profile.name) })
+                                    Button("Stop", action: { viewModel.stopProfile(named: profile.name) })
+                                    Divider()
+                                    Button("Edit…", action: { viewModel.openProfileEditor(for: profile.name) })
+                                }
                             }
                         }
                     }
@@ -3650,6 +3720,8 @@ struct TunnelDraft: Identifiable {
     var extraSSHOptionsText: String
     var forwards: [ForwardDraft]
     var gateway: String
+    var onConnect: String
+    var onDisconnect: String
 
     init(tunnel: TunnelConfig, originalName: String?) {
         self.id = UUID()
@@ -3667,6 +3739,8 @@ struct TunnelDraft: Identifiable {
         self.extraSSHOptionsText = tunnel.extraSSHOptions.joined(separator: "\n")
         self.forwards = tunnel.forwards.map(ForwardDraft.init)
         self.gateway = tunnel.gateway ?? ""
+        self.onConnect = tunnel.onConnect ?? ""
+        self.onDisconnect = tunnel.onDisconnect ?? ""
     }
 
     static func newTunnel(from existingTunnels: [TunnelConfig] = [], sshHosts: [SSHConfigHost] = []) -> TunnelDraft {
@@ -3758,7 +3832,9 @@ struct TunnelDraft: Identifiable {
             reconnectDelaySeconds: reconnectDelayValue,
             enabled: enabled,
             extraSSHOptions: sshOptions,
-            gateway: gateway.nonEmptyValue
+            gateway: gateway.nonEmptyValue,
+            onConnect: onConnect.nonEmptyValue,
+            onDisconnect: onDisconnect.nonEmptyValue
         )
     }
 }
@@ -3984,6 +4060,30 @@ struct TunnelEditorSheet: View {
                             RoundedRectangle(cornerRadius: 8)
                                 .stroke(Color.secondary.opacity(0.16))
                         )
+                }
+
+                VStack(alignment: .leading, spacing: 5) {
+                    Text("Hooks")
+                        .font(.system(size: 10.5, weight: .semibold))
+                        .foregroundStyle(.secondary)
+                    Text("Shell commands run on connect / disconnect. Env: $BURROW_TUNNEL, $BURROW_LOCAL_PORT, $BURROW_HOST.")
+                        .font(.system(size: 10))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(2)
+                    Grid(alignment: .leading, horizontalSpacing: 10, verticalSpacing: 6) {
+                        GridRow {
+                            editorLabel("On Connect")
+                            TextField("e.g. open http://localhost:$BURROW_LOCAL_PORT", text: $draft.onConnect)
+                                .textFieldStyle(.roundedBorder)
+                                .font(.system(size: 11, design: .monospaced))
+                        }
+                        GridRow {
+                            editorLabel("On Disconnect")
+                            TextField("e.g. umount ~/mnt/$BURROW_TUNNEL", text: $draft.onDisconnect)
+                                .textFieldStyle(.roundedBorder)
+                                .font(.system(size: 11, design: .monospaced))
+                        }
+                    }
                 }
             }
             .padding(.top, 8)

@@ -41,6 +41,7 @@ final class EditorWindowController: NSObject, NSWindowDelegate {
         isSyncing = true
         viewModel?.editorDraft = nil
         viewModel?.gatewayDraft = nil
+        viewModel?.profileDraft = nil
         isSyncing = false
     }
 
@@ -65,7 +66,17 @@ private struct EditorWindowContent: View {
 
     var body: some View {
         Group {
-            if let gatewayDraft = viewModel.gatewayDraft {
+            if let profileDraft = viewModel.profileDraft {
+                ProfileEditorSheet(
+                    draft: profileBinding(for: profileDraft),
+                    tunnelNames: viewModel.tunnels.map(\.id),
+                    gatewayNames: viewModel.gateways.map(\.id),
+                    onCancel: { viewModel.closeProfileEditor() },
+                    onSave: { viewModel.saveProfileEditor() },
+                    onDelete: { viewModel.deleteProfileEditorTarget() }
+                )
+                .padding(14)
+            } else if let gatewayDraft = viewModel.gatewayDraft {
                 GatewayEditorSheet(
                     draft: gatewayBinding(for: gatewayDraft),
                     onCancel: { viewModel.closeGatewayEditor() },
@@ -109,6 +120,13 @@ private struct EditorWindowContent: View {
         Binding(
             get: { viewModel.gatewayDraft ?? draft },
             set: { viewModel.gatewayDraft = $0 }
+        )
+    }
+
+    private func profileBinding(for draft: ProfileDraft) -> Binding<ProfileDraft> {
+        Binding(
+            get: { viewModel.profileDraft ?? draft },
+            set: { viewModel.profileDraft = $0 }
         )
     }
 }

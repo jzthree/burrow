@@ -92,6 +92,34 @@ public struct ConfigStore: Sendable {
         return false
     }
 
+    public func upsertProfile(_ profile: Profile, replacing originalName: String? = nil) throws {
+        var config = try load()
+        let replacementName = originalName ?? profile.name
+        if let index = config.profiles.firstIndex(where: { $0.name == replacementName }) {
+            config.profiles[index] = profile
+            for duplicateIndex in config.profiles.indices.reversed() where duplicateIndex != index && config.profiles[duplicateIndex].name == profile.name {
+                config.profiles.remove(at: duplicateIndex)
+            }
+        } else if let index = config.profiles.firstIndex(where: { $0.name == profile.name }) {
+            config.profiles[index] = profile
+        } else {
+            config.profiles.append(profile)
+        }
+        try save(config)
+    }
+
+    @discardableResult
+    public func removeProfile(name: String) throws -> Bool {
+        var config = try load()
+        let originalCount = config.profiles.count
+        config.profiles.removeAll { $0.name == name }
+        if config.profiles.count != originalCount {
+            try save(config)
+            return true
+        }
+        return false
+    }
+
     public func remove(name: String) throws -> Bool {
         var config = try load()
         let originalCount = config.tunnels.count
