@@ -57,6 +57,10 @@ public struct GatewayConfig: Codable, Sendable, Identifiable, Equatable {
     public var socksPort: Int
     /// "password" (fed on stdin) or "saml" (browser-based single sign-on).
     public var authMode: String
+    /// AnyConnect-only: the tunnel-group whose SAML sign-in to open
+    /// (e.g. "cvpn-conn-profile"). Empty means the server's logon page is
+    /// shown and the user picks the group there.
+    public var samlGroup: String?
     /// ssh host patterns routed through this gateway in the generated
     /// ssh include file (e.g. "*.university.edu", "172.18.*").
     public var sshHostPatterns: [String]
@@ -74,6 +78,7 @@ public struct GatewayConfig: Codable, Sendable, Identifiable, Equatable {
         case user
         case socksPort
         case authMode
+        case samlGroup
         case sshHostPatterns
         case extraArgs
         case reconnectDelaySeconds
@@ -86,6 +91,7 @@ public struct GatewayConfig: Codable, Sendable, Identifiable, Equatable {
         user: String? = nil,
         socksPort: Int,
         authMode: String = "password",
+        samlGroup: String? = nil,
         sshHostPatterns: [String] = [],
         extraArgs: [String] = [],
         reconnectDelaySeconds: Int = 5
@@ -96,6 +102,7 @@ public struct GatewayConfig: Codable, Sendable, Identifiable, Equatable {
         self.user = user
         self.socksPort = socksPort
         self.authMode = authMode
+        self.samlGroup = samlGroup
         self.sshHostPatterns = sshHostPatterns
         self.extraArgs = extraArgs
         self.reconnectDelaySeconds = reconnectDelaySeconds
@@ -109,6 +116,7 @@ public struct GatewayConfig: Codable, Sendable, Identifiable, Equatable {
         self.user = try container.decodeIfPresent(String.self, forKey: .user)
         self.socksPort = try container.decode(Int.self, forKey: .socksPort)
         self.authMode = try container.decodeIfPresent(String.self, forKey: .authMode) ?? "password"
+        self.samlGroup = try container.decodeIfPresent(String.self, forKey: .samlGroup)
         self.sshHostPatterns = try container.decodeIfPresent([String].self, forKey: .sshHostPatterns) ?? []
         self.extraArgs = try container.decodeIfPresent([String].self, forKey: .extraArgs) ?? []
         self.reconnectDelaySeconds = try container.decodeIfPresent(Int.self, forKey: .reconnectDelaySeconds) ?? 5

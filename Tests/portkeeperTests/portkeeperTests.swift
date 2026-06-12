@@ -482,6 +482,40 @@ private func waitUntil(timeout: TimeInterval, condition: @escaping @Sendable () 
     #expect(gateway.reconnectDelaySeconds == 5)
 }
 
+@Test func gatewayConfigDecodesSAMLGroup() async throws {
+    let json = """
+    {"name": "campus", "protocol": "anyconnect", "server": "vpn.example.edu", "socksPort": 11080, "authMode": "saml", "samlGroup": "cvpn-conn-profile"}
+    """
+    let gateway = try JSONDecoder().decode(GatewayConfig.self, from: Data(json.utf8))
+    #expect(gateway.samlGroup == "cvpn-conn-profile")
+    #expect(gateway.usesSAML)
+
+    let withoutGroup = """
+    {"name": "campus", "protocol": "anyconnect", "server": "vpn.example.edu", "socksPort": 11080}
+    """
+    let plain = try JSONDecoder().decode(GatewayConfig.self, from: Data(withoutGroup.utf8))
+    #expect(plain.samlGroup == nil)
+}
+
+@Test func gatewayCommandBuilderBuildsSessionCookieArguments() async throws {
+    let gateway = GatewayConfig(
+        name: "campus",
+        vpnProtocol: "anyconnect",
+        server: "vpn.example.edu",
+        user: "alice",
+        socksPort: 11082,
+        authMode: "saml"
+    )
+
+    let args = GatewayCommandBuilder.buildArguments(for: gateway, ocproxyPath: "/opt/homebrew/bin/ocproxy", credential: .sessionCookie("ABC@123@DEF"))
+    #expect(args.contains("--cookie-on-stdin"))
+    #expect(!args.contains("--passwd-on-stdin"))
+    #expect(!args.contains(where: { $0.hasPrefix("--user=") }))
+    #expect(GatewayCredential.sessionCookie("ABC@123@DEF").stdinSecret == "ABC@123@DEF")
+    #expect(GatewayCredential.sessionCookie("x").isBrowserSession)
+    #expect(!GatewayCredential.password("x").isBrowserSession)
+}
+
 @Test func gatewayLinkerInjectsProxyCommand() async throws {
     let gateway = GatewayConfig(name: "campus", vpnProtocol: "gp", server: "vpn.example.edu", socksPort: 11080)
     let tunnel = TunnelConfig(
@@ -551,7 +585,7 @@ private func waitUntil(timeout: TimeInterval, condition: @escaping @Sendable () 
     ]
 
     let text = try #require(GatewayLinker.sshIncludeText(for: gateways))
-    #expect(text.contains("Match host *.example.edu,172.18.*"))
+    #expect(text.contains("Match final host *.example.edu,172.18.* exec \"/usr/bin/nc -z 127.0.0.1 11080 2>/dev/null\""))
     #expect(text.contains("ProxyCommand /usr/bin/nc -X 5 -x 127.0.0.1:11080 %h %p"))
     #expect(!text.contains("11081"))
 

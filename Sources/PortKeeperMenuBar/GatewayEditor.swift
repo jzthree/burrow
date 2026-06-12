@@ -9,6 +9,7 @@ struct GatewayDraft: Identifiable {
     var server: String
     var user: String
     var authMode: String
+    var samlGroup: String
     var socksPort: String
     var sshHostPatternsText: String
     var extraArgsText: String
@@ -27,6 +28,7 @@ struct GatewayDraft: Identifiable {
         self.server = gateway.server
         self.user = gateway.user ?? ""
         self.authMode = gateway.authMode
+        self.samlGroup = gateway.samlGroup ?? ""
         self.socksPort = String(gateway.socksPort)
         self.sshHostPatternsText = gateway.sshHostPatterns.joined(separator: ", ")
         self.extraArgsText = gateway.extraArgs.joined(separator: "\n")
@@ -79,6 +81,7 @@ struct GatewayDraft: Identifiable {
             .filter { !$0.isEmpty }
 
         let trimmedUser = user.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmedGroup = samlGroup.trimmingCharacters(in: .whitespacesAndNewlines)
         return GatewayConfig(
             name: trimmedName,
             vpnProtocol: vpnProtocol,
@@ -86,6 +89,7 @@ struct GatewayDraft: Identifiable {
             user: trimmedUser.isEmpty ? nil : trimmedUser,
             socksPort: portValue,
             authMode: authMode,
+            samlGroup: trimmedGroup.isEmpty ? nil : trimmedGroup,
             sshHostPatterns: patterns,
             extraArgs: args
         )
@@ -190,6 +194,20 @@ struct GatewayEditorSheet: View {
                     .labelsHidden()
                     .pickerStyle(.segmented)
                     .frame(maxWidth: 240)
+                }
+                if draft.authMode == "saml" && draft.vpnProtocol == "anyconnect" {
+                    GridRow {
+                        label("SAML Group")
+                        HStack(spacing: 8) {
+                            TextField("optional — e.g. cvpn-conn-profile", text: $draft.samlGroup)
+                                .textFieldStyle(.roundedBorder)
+                                .frame(width: 180)
+                            Text("tunnel group; empty shows the logon page's group picker")
+                                .font(.system(size: 10))
+                                .foregroundStyle(.secondary)
+                            Spacer()
+                        }
+                    }
                 }
                 GridRow {
                     label("User")

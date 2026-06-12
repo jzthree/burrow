@@ -96,11 +96,21 @@ enum VPNClientConfigScanner {
             }
         }
 
-        // The client's "recent server" preference.
-        let preferences = "\(NSHomeDirectory())/.anyconnect"
-        if let contents = try? String(contentsOfFile: preferences, encoding: .utf8),
-           let recent = firstMatch(of: "<DefaultHostName>(.*?)</DefaultHostName>", in: contents),
-           let server = normalizedServer(recent) {
+        // The client's "recent server" preference. Secure Client 5.x keeps it
+        // in .anyconnect_global / preferences.xml; ~/.anyconnect is the legacy
+        // 4.x per-user file.
+        let preferencePaths = [
+            "\(NSHomeDirectory())/.cisco/vpn/preferences.xml",
+            "\(NSHomeDirectory())/.anyconnect",
+            "/opt/cisco/secureclient/vpn/.anyconnect_global",
+            "/opt/cisco/anyconnect/.anyconnect_global",
+        ]
+        for path in preferencePaths {
+            guard let contents = try? String(contentsOfFile: path, encoding: .utf8),
+                  let recent = firstMatch(of: "<DefaultHostName>(.*?)</DefaultHostName>", in: contents),
+                  let server = normalizedServer(recent) else {
+                continue
+            }
             results.append(DetectedVPN(label: "AnyConnect: recent server", server: server, vpnProtocol: "anyconnect"))
         }
 

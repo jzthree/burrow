@@ -128,7 +128,13 @@ final class MenuBarViewModel: ObservableObject {
     private var gatewayTasks: [String: Task<Void, Never>] = [:]
     private var pendingGatewayCredentialSaves: [String: PendingCredentialSave] = [:]
     private var invalidGatewayCredentialKeys: Set<TunnelCredentialKey> = []
-    private var activeSAMLAuthenticators: [String: GPSAMLAuthenticator] = [:]
+    /// In-flight browser sign-ins by gateway name; presence blocks duplicate
+    /// sign-in windows.
+    private var activeSAMLAuthenticators: [String: any SAMLAuthenticating] = [:]
+    /// Gateways whose VPN session survived an app restart and was adopted:
+    /// the processes are alive but no supervisor task owns them, so stop and
+    /// health checks go through process/port matching instead.
+    private var adoptedGateways: Set<String> = []
     private var toolInstallWatchTask: Task<Void, Never>?
     private var samlSessionConnectedAt: [String: Date] = [:]
     private var samlReauthAttempts: [String: Int] = [:]
@@ -146,6 +152,7 @@ final class MenuBarViewModel: ObservableObject {
     init() {
         keepRunningAfterQuit = UserDefaults.standard.bool(forKey: Self.keepRunningKey)
         loadConfig()
+        adoptSurvivingGatewaySessions()
         sshConfigHosts = SSHConfigParser.parse()
         refreshLaunchAtLoginState()
         startConfigWatcher()
@@ -217,7 +224,34 @@ final class MenuBarViewModel: ObservableObject {
         }
     }
 
+    /// A previous run's openconnect + ocproxy can outlive the app (quit with
+    /// "keep running", or an update relaunch). Adopt such sessions at startup
+    /// so a working VPN shows as connected instead of orphaned.
+    private func adoptSurvivingGatewaySessions() {
+        for state in gateways where gatewayTasks[state.id] == nil && !state.isRunning {
+            guard GatewayPortReclaimer.hasLiveSession(socksPort: state.config.socksPort, server: state.config.server) else {
+                continue
+            }
+            adoptedGateways.insert(state.id)
+            updateGatewayState(for: state.id, isRunning: true, state: .connected, message: "Adopted running VPN session")
+            markGatewayConnected(named: state.id)
+        }
+    }
+
     private func probeConnectedServices() async {
+        // Adopted gateways have no supervisor watching them; notice here when
+        // their session ends so the menu doesn't show a dead VPN as connected.
+        for name in Array(adoptedGateways) {
+            guard let state = gateways.first(where: { $0.id == name }) else {
+                adoptedGateways.remove(name)
+                continue
+            }
+            if !PortProbe.canConnect(host: "127.0.0.1", port: state.config.socksPort) {
+                adoptedGateways.remove(name)
+                updateGatewayState(for: name, isRunning: false, state: .disconnected, message: "VPN session ended")
+            }
+        }
+
         let targets: [(name: String, host: String, port: Int)] = tunnels.compactMap { state in
             guard state.connectionState == .connected,
                   let forward = state.tunnel.forwards.first(where: { $0.kind != .remote }) else {
@@ -317,7 +351,7 @@ final class MenuBarViewModel: ObservableObject {
                 )
             }
 
-            let runningGateways = Set(gatewayTasks.keys)
+            let runningGateways = Set(gatewayTasks.keys).union(adoptedGateways)
             let existingGatewaysByName = Dictionary(uniqueKeysWithValues: gateways.map { ($0.id, $0) })
             gateways = config.gateways.map { gateway in
                 let existing = existingGatewaysByName[gateway.name]
@@ -1125,7 +1159,7 @@ final class MenuBarViewModel: ObservableObject {
 
     @discardableResult
     func startGateway(named name: String, allowPasswordPrompt: Bool = true) -> Bool {
-        guard gatewayTasks[name] == nil else {
+        guard gatewayTasks[name] == nil, !adoptedGateways.contains(name) else {
             return true
         }
         guard let gateway = gateways.first(where: { $0.id == name })?.config else {
@@ -1177,7 +1211,32 @@ final class MenuBarViewModel: ObservableObject {
                 return true
             }
 
-            // AnyConnect-style SAML opens the system browser, which can't be
+            if gateway.vpnProtocol.lowercased() == "anyconnect" {
+                guard activeSAMLAuthenticators[name] == nil else {
+                    return true
+                }
+                // Modern ASAs won't start SAML inside openconnect's handshake,
+                // so sign in via the clientless web logon in an embedded window
+                // and hand openconnect the captured webvpn session cookie.
+                updateGatewayState(for: name, isRunning: false, state: .connecting, message: "Signing in (SAML)")
+                let authenticator = AnyConnectSAMLAuthenticator(gateway: gateway)
+                activeSAMLAuthenticators[name] = authenticator
+                authenticator.begin(interactive: allowPasswordPrompt) { [weak self] result in
+                    guard let self else {
+                        return
+                    }
+                    self.activeSAMLAuthenticators[name] = nil
+                    switch result {
+                    case .success(let cookie):
+                        self.spawnGatewaySupervisor(gateway, credential: .sessionCookie(cookie))
+                    case .failure(let error):
+                        self.updateGatewayState(for: name, isRunning: false, state: .failed, message: error.localizedDescription)
+                    }
+                }
+                return true
+            }
+
+            // Other protocols' SAML opens the system browser, which can't be
             // done silently — only on an explicit Connect.
             guard allowPasswordPrompt else {
                 updateGatewayState(for: name, isRunning: false, state: .failed, message: "SAML sign-in needed — click Connect")
@@ -1276,7 +1335,16 @@ final class MenuBarViewModel: ObservableObject {
         samlReauthAttempts[name] = 0
 
         guard let task = gatewayTasks[name] else {
-            updateGatewayState(for: name, isRunning: false, state: .disconnected, message: "Not running")
+            if adoptedGateways.remove(name) != nil,
+               let config = gateways.first(where: { $0.id == name })?.config {
+                // Adopted sessions have no supervisor task; tear down their
+                // processes directly.
+                GatewayPortReclaimer.killGatewayProcesses(socksPort: config.socksPort, server: config.server)
+                updateGatewayState(for: name, isRunning: false, state: .disconnected, message: "Stopped")
+                globalMessage = "Stopped gateway \(name)."
+            } else {
+                updateGatewayState(for: name, isRunning: false, state: .disconnected, message: "Not running")
+            }
             return
         }
         task.cancel()
@@ -1299,6 +1367,9 @@ final class MenuBarViewModel: ObservableObject {
     private func stopMissingGateways() {
         let configuredNames = Set((try? store.load().gateways.map(\.name)) ?? [])
         for name in gatewayTasks.keys where !configuredNames.contains(name) {
+            stopGateway(named: name)
+        }
+        for name in adoptedGateways where !configuredNames.contains(name) {
             stopGateway(named: name)
         }
     }
@@ -1438,7 +1509,7 @@ final class MenuBarViewModel: ObservableObject {
         // genuinely connected and lived a while, with few recent attempts.
         guard let gateway = gateways.first(where: { $0.id == name })?.config,
               gateway.usesSAML,
-              gateway.vpnProtocol.lowercased() == "gp",
+              ["gp", "anyconnect"].contains(gateway.vpnProtocol.lowercased()),
               let connectedAt,
               Date().timeIntervalSince(connectedAt) > 30,
               samlReauthAttempts[name, default: 0] < 3 else {
