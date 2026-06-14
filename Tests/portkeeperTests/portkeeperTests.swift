@@ -746,3 +746,50 @@ final class TCPTestServer {
     let config = try store.load()
     #expect(config.profiles[0].tunnels == ["new-name"])
 }
+
+// MARK: - TOTP (RFC 6238 official test vectors)
+
+@Test func totpRFC6238SHA1Vectors() async throws {
+    // Seed "12345678901234567890" -> base32, 8 digits, SHA1.
+    let secret = try #require(TOTPSecret.parse(base32: "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ", digits: 8, period: 30, algorithm: .sha1))
+    let cases: [(time: TimeInterval, code: String)] = [
+        (59, "94287082"),
+        (1111111109, "07081804"),
+        (1111111111, "14050471"),
+        (1234567890, "89005924"),
+        (2000000000, "69279037"),
+        (20000000000, "65353130"),
+    ]
+    for testCase in cases {
+        let code = TOTPGenerator.code(for: secret, at: Date(timeIntervalSince1970: testCase.time))
+        #expect(code == testCase.code, "t=\(testCase.time)")
+    }
+}
+
+@Test func totpRFC6238SHA256AndSHA512() async throws {
+    // RFC 6238 uses longer seeds for SHA256 (32 bytes) and SHA512 (64 bytes).
+    let secret256 = try #require(TOTPSecret.parse(base32: "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQGEZA", digits: 8, period: 30, algorithm: .sha256))
+    #expect(TOTPGenerator.code(for: secret256, at: Date(timeIntervalSince1970: 59)) == "46119246")
+
+    let secret512 = try #require(TOTPSecret.parse(base32: "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQGEZDGNA=", digits: 8, period: 30, algorithm: .sha512))
+    #expect(TOTPGenerator.code(for: secret512, at: Date(timeIntervalSince1970: 59)) == "90693936")
+}
+
+@Test func totpParsesOtpauthURI() async throws {
+    let uri = "otpauth://totp/TACC:jzthree?secret=GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ&issuer=TACC&digits=6&period=30&algorithm=SHA1"
+    let secret = try #require(TOTPSecret.parse(uri))
+    #expect(secret.digits == 6)
+    #expect(secret.period == 30)
+    #expect(secret.algorithm == .sha1)
+    #expect(secret.issuer == "TACC")
+    #expect(secret.label == "TACC:jzthree")
+    // Same seed as the 6-digit RFC slice.
+    #expect(TOTPGenerator.code(for: secret, at: Date(timeIntervalSince1970: 59)) == "287082")
+}
+
+@Test func totpRejectsGarbageAndDefaultsParams() async throws {
+    #expect(TOTPSecret.parse("not a secret !!!") == nil)
+    #expect(TOTPSecret.parse(otpauthURI: "otpauth://hotp/x?secret=GEZDGNBVGY3TQOJQ") == nil)
+    let bare = try #require(TOTPSecret.parse("gezdgnbvgy3tqojq")) // lowercase tolerated
+    #expect(bare.digits == 6 && bare.period == 30 && bare.algorithm == .sha1)
+}
