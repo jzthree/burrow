@@ -5,12 +5,20 @@ public struct AppConfig: Codable, Sendable {
     public var tunnels: [TunnelConfig]
     public var gateways: [GatewayConfig]
     public var profiles: [Profile]
+    public var twoFactorAccounts: [TwoFactorAccount]
 
-    public init(version: Int = 1, tunnels: [TunnelConfig] = [], gateways: [GatewayConfig] = [], profiles: [Profile] = []) {
+    public init(
+        version: Int = 1,
+        tunnels: [TunnelConfig] = [],
+        gateways: [GatewayConfig] = [],
+        profiles: [Profile] = [],
+        twoFactorAccounts: [TwoFactorAccount] = []
+    ) {
         self.version = version
         self.tunnels = tunnels
         self.gateways = gateways
         self.profiles = profiles
+        self.twoFactorAccounts = twoFactorAccounts
     }
 
     public init(from decoder: Decoder) throws {
@@ -19,6 +27,55 @@ public struct AppConfig: Codable, Sendable {
         self.tunnels = try container.decodeIfPresent([TunnelConfig].self, forKey: .tunnels) ?? []
         self.gateways = try container.decodeIfPresent([GatewayConfig].self, forKey: .gateways) ?? []
         self.profiles = try container.decodeIfPresent([Profile].self, forKey: .profiles) ?? []
+        self.twoFactorAccounts = try container.decodeIfPresent([TwoFactorAccount].self, forKey: .twoFactorAccounts) ?? []
+    }
+}
+
+/// A TOTP enrollment for an SSH (or any) 2FA login. The shared secret lives in
+/// the Keychain behind biometric access control; only these non-secret
+/// generation params and routing hints are stored in the config file.
+public struct TwoFactorAccount: Codable, Sendable, Identifiable, Equatable {
+    public var id: String { name }
+    /// Display name and Keychain key (e.g. "vista").
+    public var name: String
+    public var digits: Int
+    public var period: Int
+    /// "sha1" | "sha256" | "sha512".
+    public var algorithm: String
+    /// ssh host/alias to open a master connection to (Point 2). nil = code only.
+    public var sshHost: String?
+    /// How the askpass answers prompts: "codeOnly" (the keyboard-interactive
+    /// prompt is just the OTP) or "passwordThenCode" (password, then OTP).
+    public var strategy: String
+
+    public var totpAlgorithm: TOTPSecret.Algorithm {
+        TOTPSecret.Algorithm(rawValue: algorithm.lowercased()) ?? .sha1
+    }
+
+    public init(
+        name: String,
+        digits: Int = 6,
+        period: Int = 30,
+        algorithm: String = "sha1",
+        sshHost: String? = nil,
+        strategy: String = "codeOnly"
+    ) {
+        self.name = name
+        self.digits = digits
+        self.period = period
+        self.algorithm = algorithm
+        self.sshHost = sshHost
+        self.strategy = strategy
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.name = try container.decode(String.self, forKey: .name)
+        self.digits = try container.decodeIfPresent(Int.self, forKey: .digits) ?? 6
+        self.period = try container.decodeIfPresent(Int.self, forKey: .period) ?? 30
+        self.algorithm = try container.decodeIfPresent(String.self, forKey: .algorithm) ?? "sha1"
+        self.sshHost = try container.decodeIfPresent(String.self, forKey: .sshHost)
+        self.strategy = try container.decodeIfPresent(String.self, forKey: .strategy) ?? "codeOnly"
     }
 }
 

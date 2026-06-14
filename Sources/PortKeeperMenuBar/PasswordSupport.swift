@@ -324,6 +324,61 @@ enum PasswordPrompt {
     }
 }
 
+enum TwoFactorEnrollPrompt {
+    struct Entry {
+        let name: String
+        let secret: String
+        let sshHost: String?
+        let strategy: String
+    }
+
+    @MainActor
+    static func request(existingNames: [String]) -> Entry? {
+        let alert = NSAlert()
+        alert.messageText = "Add a 2FA code"
+        alert.informativeText = "Paste the authenticator secret — either an otpauth://totp/… URI or the base32 “manual entry” key the site shows next to its QR code. The secret is stored in your Keychain behind Touch ID and never leaves this Mac."
+
+        let width: CGFloat = 360
+        let container = NSStackView(frame: NSRect(x: 0, y: 0, width: width, height: 112))
+        container.orientation = .vertical
+        container.alignment = .leading
+        container.spacing = 6
+
+        let nameField = NSTextField(frame: NSRect(x: 0, y: 0, width: width, height: 24))
+        nameField.placeholderString = "Name (e.g. vista)"
+
+        let secretField = NSTextField(frame: NSRect(x: 0, y: 0, width: width, height: 24))
+        secretField.placeholderString = "otpauth://… or base32 secret"
+
+        let sshField = NSTextField(frame: NSRect(x: 0, y: 0, width: width, height: 24))
+        sshField.placeholderString = "ssh host for one-tap login (optional, e.g. vista)"
+
+        for field in [nameField, secretField, sshField] {
+            field.translatesAutoresizingMaskIntoConstraints = false
+            field.widthAnchor.constraint(equalToConstant: width).isActive = true
+            container.addArrangedSubview(field)
+        }
+        alert.accessoryView = container
+        alert.window.initialFirstResponder = nameField
+
+        alert.addButton(withTitle: "Add")
+        alert.addButton(withTitle: "Cancel")
+
+        guard alert.runModal() == .alertFirstButtonReturn else {
+            return nil
+        }
+        let name = nameField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        let secret = secretField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        let sshHost = sshField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !name.isEmpty, !secret.isEmpty else {
+            return nil
+        }
+        // Default strategy: code-only is the common HPC case (key handles
+        // factor 1, the keyboard-interactive prompt is just the OTP).
+        return Entry(name: name, secret: secret, sshHost: sshHost.isEmpty ? nil : sshHost, strategy: "codeOnly")
+    }
+}
+
 enum AskPassSupport {
     static func environment(password: String) throws -> [String: String] {
         let scriptURL = try askPassScriptURL()

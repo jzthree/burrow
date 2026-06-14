@@ -152,4 +152,33 @@ public struct ConfigStore: Sendable {
         }
         return false
     }
+
+    public func upsertTwoFactorAccount(_ account: TwoFactorAccount, replacing originalName: String? = nil) throws {
+        var config = try load()
+        let replacementName = originalName ?? account.name
+        if let index = config.twoFactorAccounts.firstIndex(where: { $0.name == replacementName }) {
+            config.twoFactorAccounts[index] = account
+            for duplicate in config.twoFactorAccounts.indices.reversed()
+            where duplicate != index && config.twoFactorAccounts[duplicate].name == account.name {
+                config.twoFactorAccounts.remove(at: duplicate)
+            }
+        } else if let index = config.twoFactorAccounts.firstIndex(where: { $0.name == account.name }) {
+            config.twoFactorAccounts[index] = account
+        } else {
+            config.twoFactorAccounts.append(account)
+        }
+        try save(config)
+    }
+
+    @discardableResult
+    public func removeTwoFactorAccount(name: String) throws -> Bool {
+        var config = try load()
+        let originalCount = config.twoFactorAccounts.count
+        config.twoFactorAccounts.removeAll { $0.name == name }
+        if config.twoFactorAccounts.count != originalCount {
+            try save(config)
+            return true
+        }
+        return false
+    }
 }
