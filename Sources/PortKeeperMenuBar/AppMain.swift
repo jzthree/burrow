@@ -665,11 +665,44 @@ final class MenuBarViewModel: ObservableObject {
     /// only until its TOTP period boundary, after which the row re-locks.
     @Published var revealedCodes: [String: RevealedCode] = [:]
 
+    /// Drives the dedicated Authenticator window (kept out of the main menu
+    /// while the feature is being refined).
+    @Published var showingAuthenticator = false {
+        didSet {
+            guard oldValue != showingAuthenticator else { return }
+            syncAuthenticatorWindow()
+        }
+    }
+    private var authenticatorWindowController: AuthenticatorWindowController?
+
     let twoFactorStore = TwoFactorStore()
 
     struct RevealedCode: Equatable {
         let code: String
         let periodEnd: Date
+    }
+
+    func openAuthenticator() {
+        guard TwoFactorStore.biometricsAvailable() else {
+            globalMessage = "Touch ID isn't available on this Mac, so verification codes can't be stored securely."
+            return
+        }
+        showingAuthenticator = true
+    }
+
+    func closeAuthenticator() {
+        showingAuthenticator = false
+    }
+
+    private func syncAuthenticatorWindow() {
+        if showingAuthenticator {
+            if authenticatorWindowController == nil {
+                authenticatorWindowController = AuthenticatorWindowController(viewModel: self)
+            }
+            authenticatorWindowController?.present()
+        } else {
+            authenticatorWindowController?.dismiss()
+        }
     }
 
     /// Generates and reveals the current code for an account. Presents the
@@ -714,11 +747,13 @@ final class MenuBarViewModel: ObservableObject {
 
     /// Enrolls (or re-enrolls) an account from a pasted otpauth URI / base32
     /// secret, storing the seed behind Touch ID and the params in the config.
-    func enrollTwoFactor(name: String, secret: String, sshHost: String?, strategy: String) {
+    /// Returns true on success so the caller can dismiss its add form.
+    @discardableResult
+    func enrollTwoFactor(name: String, secret: String) -> Bool {
         let trimmedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmedName.isEmpty else {
             globalMessage = "A name is required for the 2FA account."
-            return
+            return false
         }
         do {
             let parsed = try twoFactorStore.enroll(secretInput: secret, account: trimmedName)
@@ -726,29 +761,19 @@ final class MenuBarViewModel: ObservableObject {
                 name: trimmedName,
                 digits: parsed.digits,
                 period: parsed.period,
-                algorithm: parsed.algorithm.rawValue,
-                sshHost: (sshHost?.isEmpty ?? true) ? nil : sshHost,
-                strategy: strategy
+                algorithm: parsed.algorithm.rawValue
             )
             try store.upsertTwoFactorAccount(account)
             loadConfig()
-            globalMessage = "Enrolled 2FA for \(trimmedName)."
+            globalMessage = "Saved code for \(trimmedName)."
+            return true
         } catch let error as TwoFactorStoreError {
             globalMessage = error.localizedDescription
+            return false
         } catch {
-            globalMessage = "Couldn't enroll 2FA: \(error.localizedDescription)"
+            globalMessage = "Couldn't save code: \(error.localizedDescription)"
+            return false
         }
-    }
-
-    func addTwoFactorAccount() {
-        guard TwoFactorStore.biometricsAvailable() else {
-            globalMessage = "Touch ID isn't available on this Mac, so biometric 2FA codes can't be stored."
-            return
-        }
-        guard let entry = TwoFactorEnrollPrompt.request(existingNames: twoFactorAccounts.map(\.name)) else {
-            return
-        }
-        enrollTwoFactor(name: entry.name, secret: entry.secret, sshHost: entry.sshHost, strategy: entry.strategy)
     }
 
     func deleteTwoFactorAccount(named name: String) {
@@ -2198,9 +2223,6 @@ struct MenuBarContent: View {
                             if !viewModel.gateways.isEmpty {
                                 gatewaysSection
                             }
-                            if !viewModel.twoFactorAccounts.isEmpty {
-                                twoFactorSection
-                            }
                             ForEach(endpointGroups) { group in
                                 VStack(alignment: .leading, spacing: 5) {
                                     EndpointHeader(
@@ -2299,15 +2321,11 @@ struct MenuBarContent: View {
             ? 0
             : 32 + CGFloat(viewModel.gateways.count) * 56 + CGFloat(max(viewModel.gateways.count - 1, 0)) + 10
 
-        let twoFactorHeight: CGFloat = viewModel.twoFactorAccounts.isEmpty
-            ? 0
-            : 32 + CGFloat(viewModel.twoFactorAccounts.count) * 50 + CGFloat(max(viewModel.twoFactorAccounts.count - 1, 0)) + 10
-
         let profileChipsHeight: CGFloat = viewModel.profiles.isEmpty ? 0 : 40
 
         // Footer is a single row now.
         let headerAndFooterChrome: CGFloat = 134
-        return headerAndFooterChrome + profileChipsHeight + gatewaysHeight + twoFactorHeight + listHeight
+        return headerAndFooterChrome + profileChipsHeight + gatewaysHeight + listHeight
     }
 
     private var header: some View {
@@ -2364,7 +2382,7 @@ struct MenuBarContent: View {
                     }
                 }
                 Button("Import Tunnels from SSH Config…", action: viewModel.beginSSHConfigImport)
-                Button("Add 2FA Code…", action: viewModel.addTwoFactorAccount)
+                Button("Authenticator (2FA Codes)…", action: viewModel.openAuthenticator)
 
                 Divider()
 
@@ -2527,68 +2545,6 @@ struct MenuBarContent: View {
         }
     }
 
-    private var twoFactorSection: some View {
-        VStack(alignment: .leading, spacing: 5) {
-            HStack(spacing: 8) {
-                Image(systemName: "touchid")
-                    .font(.system(size: 8, weight: .semibold))
-                    .foregroundStyle(.secondary.opacity(0.64))
-                    .frame(width: 17, height: 17)
-                    .background(
-                        RoundedRectangle(cornerRadius: 6, style: .continuous)
-                            .fill(Color.secondary.opacity(0.055))
-                    )
-                Text(verbatim: "2FA Codes")
-                    .font(.system(size: 10, weight: .bold))
-                    .tracking(0.15)
-                    .foregroundStyle(Color.secondary.opacity(0.62))
-                Spacer(minLength: 4)
-                Button {
-                    viewModel.addTwoFactorAccount()
-                } label: {
-                    Image(systemName: "plus")
-                        .font(.system(size: 9, weight: .bold))
-                        .foregroundStyle(.secondary.opacity(0.7))
-                        .frame(width: 17, height: 17)
-                        .background(
-                            RoundedRectangle(cornerRadius: 6, style: .continuous)
-                                .fill(Color.secondary.opacity(0.055))
-                        )
-                }
-                .buttonStyle(.plain)
-                .help("Add a 2FA code")
-            }
-            .padding(.horizontal, 12)
-            .padding(.vertical, 1)
-
-            VStack(alignment: .leading, spacing: 0) {
-                ForEach(Array(viewModel.twoFactorAccounts.enumerated()), id: \.element.id) { index, account in
-                    if index > 0 {
-                        Divider()
-                            .opacity(0.34)
-                            .padding(.leading, 42)
-                    }
-                    TwoFactorRow(
-                        account: account,
-                        revealed: viewModel.revealedCodes[account.id],
-                        onReveal: { viewModel.revealTwoFactorCode(named: account.id) },
-                        onHide: { viewModel.hideTwoFactorCode(named: account.id) },
-                        onDelete: { viewModel.deleteTwoFactorAccount(named: account.id) }
-                    )
-                }
-            }
-            .background(
-                RoundedRectangle(cornerRadius: 16, style: .continuous)
-                    .fill(Color(nsColor: .controlBackgroundColor).opacity(0.54))
-            )
-            .overlay(
-                RoundedRectangle(cornerRadius: 16, style: .continuous)
-                    .stroke(Color.primary.opacity(0.06), lineWidth: 1)
-            )
-            .shadow(color: Color.black.opacity(0.045), radius: 6, x: 0, y: 3)
-        }
-    }
-
     private var importCandidatesBinding: Binding<[SSHConfigImportCandidate]> {
         Binding(
             get: { viewModel.importCandidates ?? [] },
@@ -2611,98 +2567,6 @@ struct MenuBarContent: View {
         }
 
         return groups
-    }
-}
-
-private struct TwoFactorRow: View {
-    let account: TwoFactorAccount
-    let revealed: MenuBarViewModel.RevealedCode?
-    let onReveal: () -> Void
-    let onHide: () -> Void
-    let onDelete: () -> Void
-
-    var body: some View {
-        HStack(spacing: 10) {
-            Image(systemName: "key.horizontal.fill")
-                .font(.system(size: 12))
-                .foregroundStyle(.secondary.opacity(0.6))
-                .frame(width: 22)
-
-            VStack(alignment: .leading, spacing: 1) {
-                Text(account.name)
-                    .font(.system(size: 12.5, weight: .semibold))
-                    .lineLimit(1)
-                if let host = account.sshHost, !host.isEmpty {
-                    Text("ssh \(host)")
-                        .font(.system(size: 10, design: .monospaced))
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                }
-            }
-
-            Spacer(minLength: 6)
-
-            if let revealed, revealed.periodEnd > Date() {
-                revealedView(revealed)
-            } else {
-                Button(action: onReveal) {
-                    HStack(spacing: 5) {
-                        Image(systemName: "touchid")
-                            .font(.system(size: 12, weight: .semibold))
-                        Text("Reveal")
-                            .font(.system(size: 11.5, weight: .semibold))
-                    }
-                    .foregroundStyle(Color.burrowAccent)
-                    .padding(.horizontal, 10)
-                    .frame(height: 26)
-                    .background(
-                        RoundedRectangle(cornerRadius: 7, style: .continuous)
-                            .fill(Color.burrowAccent.opacity(0.12))
-                    )
-                }
-                .buttonStyle(.plain)
-                .help("Reveal the current code with Touch ID")
-            }
-        }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 9)
-        .contextMenu {
-            Button("Reveal Code", action: onReveal)
-            Button("Remove \(account.name)…", role: .destructive, action: onDelete)
-        }
-    }
-
-    private func revealedView(_ revealed: MenuBarViewModel.RevealedCode) -> some View {
-        // Live countdown until the code's period boundary.
-        TimelineView(.periodic(from: Date(), by: 1)) { context in
-            let remaining = max(0, Int(revealed.periodEnd.timeIntervalSince(context.date).rounded(.up)))
-            HStack(spacing: 8) {
-                Text(spacedCode(revealed.code))
-                    .font(.system(size: 16, weight: .semibold, design: .monospaced))
-                    .foregroundStyle(.primary)
-                    .textSelection(.enabled)
-                Text("\(remaining)s")
-                    .font(.system(size: 10, weight: .semibold, design: .monospaced))
-                    .foregroundStyle(remaining <= 5 ? Color.orange : .secondary)
-                    .frame(width: 26, alignment: .trailing)
-                Button(action: onHide) {
-                    Image(systemName: "eye.slash")
-                        .font(.system(size: 11))
-                        .foregroundStyle(.secondary)
-                }
-                .buttonStyle(.plain)
-                .help("Hide")
-            }
-        }
-    }
-
-    /// "123456" -> "123 456" for readability.
-    private func spacedCode(_ code: String) -> String {
-        guard code.count == 6 || code.count == 8 else {
-            return code
-        }
-        let mid = code.index(code.startIndex, offsetBy: code.count / 2)
-        return "\(code[code.startIndex..<mid]) \(code[mid...])"
     }
 }
 
