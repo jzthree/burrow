@@ -118,6 +118,24 @@ public struct GatewayConfig: Codable, Sendable, Identifiable, Equatable {
     /// (e.g. "cvpn-conn-profile"). Empty means the server's logon page is
     /// shown and the user picks the group there.
     public var samlGroup: String?
+    /// Optional "host" or "host:port" reachable only when the VPN is truly up
+    /// (e.g. "randi.cri.uchicago.edu:22"). Burrow probes it through the SOCKS
+    /// proxy to tell a live tunnel from a stale ocproxy holding the port after
+    /// the session died (sleep, network change). Empty disables the check.
+    public var healthCheckHost: String?
+
+    /// Parsed (host, port) of healthCheckHost; defaults the port to 443.
+    public var healthCheckTarget: (host: String, port: Int)? {
+        guard let raw = healthCheckHost?.trimmingCharacters(in: .whitespaces), !raw.isEmpty else {
+            return nil
+        }
+        if let colon = raw.lastIndex(of: ":"),
+           let port = Int(raw[raw.index(after: colon)...]) {
+            let host = String(raw[..<colon])
+            return host.isEmpty ? nil : (host, port)
+        }
+        return (raw, 443)
+    }
     /// ssh host patterns routed through this gateway in the generated
     /// ssh include file (e.g. "*.university.edu", "172.18.*").
     public var sshHostPatterns: [String]
@@ -136,6 +154,7 @@ public struct GatewayConfig: Codable, Sendable, Identifiable, Equatable {
         case socksPort
         case authMode
         case samlGroup
+        case healthCheckHost
         case sshHostPatterns
         case extraArgs
         case reconnectDelaySeconds
@@ -149,6 +168,7 @@ public struct GatewayConfig: Codable, Sendable, Identifiable, Equatable {
         socksPort: Int,
         authMode: String = "password",
         samlGroup: String? = nil,
+        healthCheckHost: String? = nil,
         sshHostPatterns: [String] = [],
         extraArgs: [String] = [],
         reconnectDelaySeconds: Int = 5
@@ -160,6 +180,7 @@ public struct GatewayConfig: Codable, Sendable, Identifiable, Equatable {
         self.socksPort = socksPort
         self.authMode = authMode
         self.samlGroup = samlGroup
+        self.healthCheckHost = healthCheckHost
         self.sshHostPatterns = sshHostPatterns
         self.extraArgs = extraArgs
         self.reconnectDelaySeconds = reconnectDelaySeconds
@@ -174,6 +195,7 @@ public struct GatewayConfig: Codable, Sendable, Identifiable, Equatable {
         self.socksPort = try container.decode(Int.self, forKey: .socksPort)
         self.authMode = try container.decodeIfPresent(String.self, forKey: .authMode) ?? "password"
         self.samlGroup = try container.decodeIfPresent(String.self, forKey: .samlGroup)
+        self.healthCheckHost = try container.decodeIfPresent(String.self, forKey: .healthCheckHost)
         self.sshHostPatterns = try container.decodeIfPresent([String].self, forKey: .sshHostPatterns) ?? []
         self.extraArgs = try container.decodeIfPresent([String].self, forKey: .extraArgs) ?? []
         self.reconnectDelaySeconds = try container.decodeIfPresent(Int.self, forKey: .reconnectDelaySeconds) ?? 5

@@ -497,6 +497,24 @@ private func waitUntil(timeout: TimeInterval, condition: @escaping @Sendable () 
     #expect(plain.samlGroup == nil)
 }
 
+@Test func gatewayHealthCheckTargetParsing() async throws {
+    let withPort = GatewayConfig(name: "g", vpnProtocol: "anyconnect", server: "v", socksPort: 11082, healthCheckHost: "randi.cri.uchicago.edu:22")
+    #expect(withPort.healthCheckTarget?.host == "randi.cri.uchicago.edu")
+    #expect(withPort.healthCheckTarget?.port == 22)
+
+    let bareHost = GatewayConfig(name: "g", vpnProtocol: "anyconnect", server: "v", socksPort: 11082, healthCheckHost: "internal.example.edu")
+    #expect(bareHost.healthCheckTarget?.host == "internal.example.edu")
+    #expect(bareHost.healthCheckTarget?.port == 443)
+
+    let none = GatewayConfig(name: "g", vpnProtocol: "anyconnect", server: "v", socksPort: 11082)
+    #expect(none.healthCheckTarget == nil)
+
+    // Survives a JSON round-trip.
+    let data = try JSONEncoder().encode(withPort)
+    let decoded = try JSONDecoder().decode(GatewayConfig.self, from: data)
+    #expect(decoded.healthCheckHost == "randi.cri.uchicago.edu:22")
+}
+
 @Test func gatewayCommandBuilderBuildsSessionCookieArguments() async throws {
     let gateway = GatewayConfig(
         name: "campus",

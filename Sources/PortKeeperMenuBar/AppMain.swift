@@ -135,6 +135,11 @@ final class MenuBarViewModel: ObservableObject {
     /// the processes are alive but no supervisor task owns them, so stop and
     /// health checks go through process/port matching instead.
     private var adoptedGateways: Set<String> = []
+    /// Consecutive through-tunnel health-probe failures per gateway; a session
+    /// is only declared dead after a couple in a row so a transient blip
+    /// doesn't tear down a working VPN.
+    private var gatewayHealthFailures: [String: Int] = [:]
+    private var gatewayHealthTick = 0
     private var toolInstallWatchTask: Task<Void, Never>?
     private var samlSessionConnectedAt: [String: Date] = [:]
     private var samlReauthAttempts: [String: Int] = [:]
@@ -201,8 +206,22 @@ final class MenuBarViewModel: ObservableObject {
             try? await Task.sleep(for: .seconds(3))
             guard let self else { return }
             for state in self.gateways where state.isRunning || state.connectionState == .connected {
-                if !PortProbe.canConnect(host: "127.0.0.1", port: state.config.socksPort) {
+                // Sleep commonly kills the VPN session while ocproxy keeps
+                // holding the port, so prefer a real through-tunnel probe; fall
+                // back to the port check when no healthCheckHost is set.
+                let dead: Bool
+                if let target = state.config.healthCheckTarget {
+                    let port = state.config.socksPort
+                    dead = !(await Task.detached {
+                        SOCKSProbe.canReach(proxyPort: port, targetHost: target.host, targetPort: target.port, timeout: 6)
+                    }.value)
+                } else {
+                    dead = !PortProbe.canConnect(host: "127.0.0.1", port: state.config.socksPort)
+                }
+                if dead {
+                    self.gatewayHealthFailures[state.id] = 0
                     self.stopGateway(named: state.id)
+                    self.updateGatewayState(for: state.id, isRunning: false, state: .disconnected, message: "VPN dropped on sleep — reconnect")
                 }
             }
             for state in self.tunnels where self.tasks[state.id] != nil {
@@ -263,6 +282,8 @@ final class MenuBarViewModel: ObservableObject {
             }
         }
 
+        await probeGatewayHealth()
+
         let targets: [(name: String, host: String, port: Int)] = tunnels.compactMap { state in
             guard state.connectionState == .connected,
                   let forward = state.tunnel.forwards.first(where: { $0.kind != .remote }) else {
@@ -284,6 +305,58 @@ final class MenuBarViewModel: ObservableObject {
         for (name, result) in results {
             if let index = tunnels.firstIndex(where: { $0.id == name }), tunnels[index].connectionState == .connected {
                 tunnels[index].serviceReachable = result
+            }
+        }
+    }
+
+    /// For gateways that declare a healthCheckHost, probe THROUGH the SOCKS
+    /// proxy to a host only reachable when the VPN is genuinely up. A stale
+    /// ocproxy (session died on sleep/network change but the process lingers)
+    /// keeps the port open and passes every process/port check, yet routes
+    /// nowhere — this is the only thing that catches it. Runs ~every 30s.
+    private func probeGatewayHealth() async {
+        gatewayHealthTick += 1
+        guard gatewayHealthTick % 3 == 0 else { return }
+
+        let checks: [(name: String, port: Int, host: String, target: Int)] = gateways.compactMap { state in
+            guard state.connectionState == .connected,
+                  let target = state.config.healthCheckTarget else {
+                return nil
+            }
+            return (state.id, state.config.socksPort, target.host, target.port)
+        }
+        guard !checks.isEmpty else { return }
+
+        let reachability = await Task.detached { () -> [String: Bool] in
+            var out: [String: Bool] = [:]
+            for check in checks {
+                out[check.name] = SOCKSProbe.canReach(
+                    proxyPort: check.port,
+                    targetHost: check.host,
+                    targetPort: check.target,
+                    timeout: 6
+                )
+            }
+            return out
+        }.value
+
+        for (name, reachable) in reachability {
+            guard gateways.contains(where: { $0.id == name && $0.connectionState == .connected }) else {
+                gatewayHealthFailures[name] = 0
+                continue
+            }
+            if reachable {
+                gatewayHealthFailures[name] = 0
+                continue
+            }
+            let failures = gatewayHealthFailures[name, default: 0] + 1
+            gatewayHealthFailures[name] = failures
+            // Two strikes (~1 min) before declaring the tunnel dead.
+            if failures >= 2 {
+                gatewayHealthFailures[name] = 0
+                stopGateway(named: name)
+                updateGatewayState(for: name, isRunning: false, state: .disconnected, message: "VPN unreachable — reconnect")
+                globalMessage = "Gateway \(name) stopped passing traffic; marked disconnected."
             }
         }
     }
