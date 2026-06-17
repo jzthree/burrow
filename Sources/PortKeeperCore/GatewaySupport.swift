@@ -86,12 +86,44 @@ public enum GatewayCommandBuilder {
         return nil
     }
 
+    /// A helper shipped inside the app bundle by the DMG release build, letting
+    /// a self-contained Burrow run without a Homebrew install. Mach-O binaries
+    /// (openconnect, ocproxy) live in Contents/Helpers; non-code scripts
+    /// (hipreport.sh) live in Contents/Resources so codesign seals them as data
+    /// rather than rejecting them as unsigned nested code. Returns nil when not
+    /// bundled (the CLI, or a dev build), so callers fall back to PATH.
+    public static func bundledHelperPath(_ name: String) -> String? {
+        guard let executableURL = Bundle.main.executableURL else {
+            return nil
+        }
+        let contents = executableURL
+            .deletingLastPathComponent()   // Contents/MacOS
+            .deletingLastPathComponent()   // Contents
+        for subdirectory in ["Helpers", "Resources"] {
+            let candidate = contents
+                .appendingPathComponent(subdirectory, isDirectory: true)
+                .appendingPathComponent(name, isDirectory: false)
+            if FileManager.default.isExecutableFile(atPath: candidate.path) {
+                return candidate.path
+            }
+        }
+        return nil
+    }
+
     public static func openconnectPath() -> String? {
-        locateExecutable(named: "openconnect", environmentOverride: ProcessInfo.processInfo.environment["BURROW_OPENCONNECT"])
+        if let override = ProcessInfo.processInfo.environment["BURROW_OPENCONNECT"],
+           FileManager.default.isExecutableFile(atPath: override) {
+            return override
+        }
+        return bundledHelperPath("openconnect") ?? locateExecutable(named: "openconnect")
     }
 
     public static func ocproxyPath() -> String? {
-        locateExecutable(named: "ocproxy", environmentOverride: ProcessInfo.processInfo.environment["BURROW_OCPROXY"])
+        if let override = ProcessInfo.processInfo.environment["BURROW_OCPROXY"],
+           FileManager.default.isExecutableFile(atPath: override) {
+            return override
+        }
+        return bundledHelperPath("ocproxy") ?? locateExecutable(named: "ocproxy")
     }
 
     /// openconnect's bundled HIP-report helper. GlobalProtect gateways that
@@ -103,6 +135,9 @@ public enum GatewayCommandBuilder {
         if let override = ProcessInfo.processInfo.environment["BURROW_HIPREPORT"],
            FileManager.default.isExecutableFile(atPath: override) {
             return override
+        }
+        if let bundled = bundledHelperPath("hipreport.sh") {
+            return bundled
         }
         guard let openconnect = openconnectPath() else {
             return nil
