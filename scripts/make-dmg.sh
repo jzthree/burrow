@@ -18,6 +18,8 @@
 #   DEVELOPER_ID="Developer ID Application: Name (TEAMID)"  (else auto-detected)
 #   NOTARY_PROFILE=burrow-notary
 #   ALLOW_DEV_SIGN=1   # sign with Apple Development + skip notarize (local test)
+#   PUBLISH=1          # after a notarized build, create/upload a GitHub
+#                      # release for tag v<version> with the DMG (needs gh)
 
 set -euo pipefail
 
@@ -170,6 +172,7 @@ create-dmg \
   }
 
 # --- notarize + staple ------------------------------------------------------
+NOTARIZED=0
 if [ "$SKIP_NOTARIZE" = "1" ]; then
   note "Skipped notarization (dev-signed). The DMG runs on this Mac; other Macs will block it."
 else
@@ -179,10 +182,27 @@ else
     note "Stapling"
     xcrun stapler staple "$DMG_OUT"
     spctl -a -t open --context context:primary-signature -vv "$DMG_OUT" || true
+    NOTARIZED=1
   else
     note "No notarytool profile '$NOTARY_PROFILE' found — DMG is signed but NOT notarized."
     note "Set it up once (see header), then re-run, or: xcrun notarytool submit \"$DMG_OUT\" --keychain-profile $NOTARY_PROFILE --wait && xcrun stapler staple \"$DMG_OUT\""
   fi
+fi
+
+# --- publish to GitHub releases (opt-in) ------------------------------------
+if [ "${PUBLISH:-0}" = "1" ]; then
+  if [ "$NOTARIZED" != "1" ]; then
+    fail "PUBLISH=1 but the DMG isn't notarized — refusing to publish a build other Macs would reject."
+  fi
+  command -v gh >/dev/null 2>&1 || fail "PUBLISH=1 but the GitHub CLI (gh) isn't installed."
+  TAG="v${VERSION}"
+  note "Publishing GitHub release $TAG"
+  if gh release view "$TAG" >/dev/null 2>&1; then
+    gh release upload "$TAG" "$DMG_OUT" --clobber
+  else
+    gh release create "$TAG" "$DMG_OUT" --title "${APP_NAME} ${VERSION}" --generate-notes
+  fi
+  note "Released: $(gh release view "$TAG" --json url --jq .url 2>/dev/null || echo "$TAG")"
 fi
 
 note "Done: $DMG_OUT"
