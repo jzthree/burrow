@@ -685,6 +685,17 @@ private func waitUntil(timeout: TimeInterval, condition: @escaping @Sendable () 
     #expect(result == .unknown)
 }
 
+@Test func boundedCanConnectDetectsOpenAndClosedPorts() async throws {
+    let listener = try TCPTestServer()
+    defer { listener.stop() }
+    #expect(PortProbe.canConnect(host: "127.0.0.1", port: listener.port, timeout: 2))
+
+    // A closed local port must fail fast (well under the timeout), not hang.
+    let start = Date()
+    #expect(!PortProbe.canConnect(host: "127.0.0.1", port: 59997, timeout: 3))
+    #expect(Date().timeIntervalSince(start) < 3)
+}
+
 @Test func configDecodesProfilesAndHooks() async throws {
     let json = """
     {"version":1,

@@ -74,6 +74,10 @@ final class MenuBarViewModel: ObservableObject {
     private struct PreparedTunnelLaunch {
         let name: String
         let tunnel: TunnelConfig
+        /// Same tunnel without the gateway's SOCKS ProxyCommand, used when the
+        /// target is reachable over a system VPN and Burrow shouldn't start its
+        /// own (conflicting) openconnect.
+        let directTunnel: TunnelConfig
         let preparation: ConnectionPreparation
     }
 
@@ -618,9 +622,11 @@ final class MenuBarViewModel: ObservableObject {
         preloadedPasswords: PreloadedPasswords?
     ) -> PreparedTunnelLaunch? {
         let launchTunnel: TunnelConfig
+        let directTunnel: TunnelConfig
         do {
+            directTunnel = try preparedTunnelForLaunch(tunnel)
             launchTunnel = GatewayLinker.applyingGatewayProxy(
-                to: try preparedTunnelForLaunch(tunnel),
+                to: directTunnel,
                 gateways: gateways.map(\.config)
             )
         } catch {
@@ -642,7 +648,7 @@ final class MenuBarViewModel: ObservableObject {
             return nil
         }
 
-        return PreparedTunnelLaunch(name: name, tunnel: launchTunnel, preparation: preparation)
+        return PreparedTunnelLaunch(name: name, tunnel: launchTunnel, directTunnel: directTunnel, preparation: preparation)
     }
 
     private func launchPreparedTunnel(_ preparedLaunch: PreparedTunnelLaunch) {
@@ -1618,6 +1624,29 @@ final class MenuBarViewModel: ObservableObject {
                 self.adoptExternalGatewayIfNeeded(gatewayName)
                 self.launchPreparedTunnel(prepared)
                 return
+            }
+
+            // Burrow's own proxy isn't serving this. Before starting one, check
+            // whether the system already routes the target directly — i.e. the
+            // user's official VPN client (GlobalProtect/AnyConnect) is connected
+            // to the same network. If so, ride it and DON'T start a competing
+            // openconnect: logging into the same SSO VPN a second time makes the
+            // portal drop one session, interrupting the official connection.
+            let burrowGatewayRunning = self.gatewayTasks[gatewayName] != nil || self.adoptedGateways.contains(gatewayName)
+            if !burrowGatewayRunning {
+                let systemRoutesTarget = await Task.detached {
+                    PortProbe.canConnect(host: targetHost, port: targetPort, timeout: 3)
+                }.value
+                if systemRoutesTarget {
+                    self.updateGatewayState(for: gatewayName, isRunning: false, state: .disconnected, message: "Reachable via your system VPN — Burrow gateway left off to avoid a conflict")
+                    self.launchPreparedTunnel(PreparedTunnelLaunch(
+                        name: prepared.name,
+                        tunnel: prepared.directTunnel,
+                        directTunnel: prepared.directTunnel,
+                        preparation: prepared.preparation
+                    ))
+                    return
+                }
             }
 
             // Otherwise bring the gateway up (no-op if already starting/running).

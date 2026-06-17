@@ -124,4 +124,59 @@ public enum PortProbe {
 
         return false
     }
+
+    /// Timeout-bounded TCP connect via a non-blocking socket. Unlike the
+    /// unbounded variant, this returns quickly for unroutable hosts — essential
+    /// when probing an internal host (e.g. a cluster login node) that is only
+    /// reachable when some VPN is up, where a blocking connect would stall for
+    /// the OS default (~75s).
+    public static func canConnect(host: String, port: Int, timeout: TimeInterval) -> Bool {
+        var hints = addrinfo(
+            ai_flags: AI_ADDRCONFIG,
+            ai_family: AF_UNSPEC,
+            ai_socktype: SOCK_STREAM,
+            ai_protocol: IPPROTO_TCP,
+            ai_addrlen: 0,
+            ai_canonname: nil,
+            ai_addr: nil,
+            ai_next: nil
+        )
+        var result: UnsafeMutablePointer<addrinfo>?
+        guard getaddrinfo(host, String(port), &hints, &result) == 0, let first = result else {
+            return false
+        }
+        defer { freeaddrinfo(first) }
+
+        var pointer: UnsafeMutablePointer<addrinfo>? = first
+        while let current = pointer {
+            defer { pointer = current.pointee.ai_next }
+            let fd = socket(current.pointee.ai_family, current.pointee.ai_socktype, current.pointee.ai_protocol)
+            guard fd >= 0 else { continue }
+            _ = fcntl(fd, F_SETFL, fcntl(fd, F_GETFL, 0) | O_NONBLOCK)
+
+            let rc = connect(fd, current.pointee.ai_addr, current.pointee.ai_addrlen)
+            if rc == 0 {
+                close(fd)
+                return true
+            }
+            if errno != EINPROGRESS {
+                close(fd)
+                continue
+            }
+            var pfd = pollfd(fd: fd, events: Int16(POLLOUT), revents: 0)
+            let polled = poll(&pfd, 1, Int32(max(0, timeout) * 1000))
+            if polled > 0 {
+                var soError: Int32 = 0
+                var length = socklen_t(MemoryLayout<Int32>.size)
+                getsockopt(fd, SOL_SOCKET, SO_ERROR, &soError, &length)
+                close(fd)
+                if soError == 0 {
+                    return true
+                }
+            } else {
+                close(fd)
+            }
+        }
+        return false
+    }
 }
