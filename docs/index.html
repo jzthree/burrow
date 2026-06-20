@@ -1,0 +1,258 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Burrow — calm SSH tunnels & VPNs for macOS</title>
+  <meta name="description" content="Burrow is a native macOS menu-bar app that manages SSH tunnels and runs VPN gateways (GlobalProtect, AnyConnect…) as local SOCKS proxies — no root, no routing changes. Free." />
+
+  <!-- Open Graph / social -->
+  <meta property="og:type" content="website" />
+  <meta property="og:title" content="Burrow — calm SSH tunnels & VPNs for macOS" />
+  <meta property="og:description" content="Native menu-bar SSH tunnel manager that also runs VPNs as local SOCKS proxies — no root, no routing changes. Free." />
+  <meta property="og:image" content="assets/burrow-menu.svg" />
+  <meta name="twitter:card" content="summary_large_image" />
+
+  <link rel="icon" type="image/svg+xml" href="assets/favicon.svg" />
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <!-- ============================= NAV ============================= -->
+  <header class="nav" id="nav">
+    <a class="brand" href="#top" aria-label="Burrow home">
+      <img src="assets/favicon.svg" width="28" height="28" alt="" />
+      <span>Burrow</span>
+    </a>
+    <nav class="nav-links">
+      <a href="#features">Features</a>
+      <a href="#how">How it works</a>
+      <a href="#faq">FAQ</a>
+      <a href="https://github.com/jzthree/Burrow" target="_blank" rel="noopener">GitHub</a>
+    </nav>
+    <a class="btn btn-dark btn-sm" href="https://github.com/jzthree/Burrow/releases/latest" target="_blank" rel="noopener">Download</a>
+  </header>
+
+  <main id="top">
+    <!-- ============================= HERO ============================= -->
+    <section class="hero">
+      <div class="hero-copy">
+        <span class="pill">Free · macOS 13+ · Notarized</span>
+        <h1>Tunnels and VPNs,<br /><span class="accent">finally calm.</span></h1>
+        <p class="lede">
+          A native menu-bar app that keeps your SSH port-forwards and corporate VPNs
+          in one quiet place — reconnecting when they drop, never fighting your
+          routing table, and never asking for root.
+        </p>
+        <div class="cta-row">
+          <a class="btn btn-dark btn-lg" href="https://github.com/jzthree/Burrow/releases/latest" target="_blank" rel="noopener">
+            <svg width="17" height="17" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 3v10.6l3.3-3.3 1.4 1.4L12 17.4l-4.7-4.7 1.4-1.4L12 13.6V3h0zM5 19h14v2H5z"/></svg>
+            Download for macOS
+          </a>
+          <a class="btn btn-ghost btn-lg" href="https://github.com/jzthree/Burrow" target="_blank" rel="noopener">View on GitHub</a>
+        </div>
+        <p class="cta-note">
+          Free forever. If it saves you a few headaches,
+          <a href="https://www.buymeacoffee.com/REPLACE_HANDLE" target="_blank" rel="noopener">buy me a coffee ☕</a>.
+        </p>
+      </div>
+
+      <div class="hero-art">
+        <div class="window">
+          <div class="window-bar">
+            <span class="dot red"></span><span class="dot amber"></span><span class="dot green"></span>
+          </div>
+          <img src="assets/burrow-menu.svg" alt="Burrow's menu-bar window: VPN gateways, SSH tunnels grouped by host with status dots, retry countdowns, and quick actions" loading="eager" />
+        </div>
+      </div>
+    </section>
+
+    <!-- ============================= TRUST STRIP ============================= -->
+    <section class="trust">
+      <span>No root required</span><i>·</i>
+      <span>No telemetry</span><i>·</i>
+      <span>Secrets stay in your Keychain</span><i>·</i>
+      <span>Never touches your routing table</span><i>·</i>
+      <span>Notarized DMG</span>
+    </section>
+
+    <!-- ============================= FEATURES ============================= -->
+    <section class="section" id="features">
+      <div class="section-head">
+        <h2>Everything in one menu</h2>
+        <p>The day-to-day work — see what's up, fix what failed, get back to it — without a wall of terminal tabs.</p>
+      </div>
+
+      <div class="grid">
+        <article class="card">
+          <div class="ico">🧵</div>
+          <h3>SSH tunnels, grouped</h3>
+          <p>All your local/remote/dynamic forwards in one list, grouped by host with live status dots. Reconnect, edit, duplicate, or delete in a click. Burrow just supervises the system <code>ssh</code> — no custom stack.</p>
+        </article>
+
+        <article class="card">
+          <div class="ico">🛡️</div>
+          <h3>VPNs as local SOCKS</h3>
+          <p>GlobalProtect, AnyConnect, Pulse, and Fortinet run entirely in userspace as local SOCKS5 ports — <strong>no root, no tun device, no routing changes</strong>. Run several at once; stay friendly with Tailscale.</p>
+        </article>
+
+        <article class="card">
+          <div class="ico">🔐</div>
+          <h3>SAML sign-in built in</h3>
+          <p>Browser-based SSO that actually works — an embedded window for GlobalProtect, and Okta/Duo capture for AnyConnect when the official client's handshake won't cooperate. One-click certificate pinning.</p>
+        </article>
+
+        <article class="card">
+          <div class="ico">🧭</div>
+          <h3>Per-host routing & profiles</h3>
+          <p>Pick which VPN (or direct) each host rides from a dropdown; running tunnels restart onto the new route. Save profiles to bring a whole working set up or down at once.</p>
+        </article>
+
+        <article class="card">
+          <div class="ico">👆</div>
+          <h3>Touch ID authenticator</h3>
+          <p>A built-in 2FA code vault: enroll any <code>otpauth://</code> secret, reveal the current code with a fingerprint, auto-copied with a live countdown. Seeds never leave your Keychain.</p>
+        </article>
+
+        <article class="card">
+          <div class="ico">♻️</div>
+          <h3>Self-healing connections</h3>
+          <p>Auto-reconnect on drops, probes <em>through</em> the tunnel to catch dead-but-listening sessions, recovers cleanly from sleep, and only shows green once the forward truly owns its port.</p>
+        </article>
+
+        <article class="card">
+          <div class="ico">🤝</div>
+          <h3>Plays nice with your client</h3>
+          <p>Already connected with the official VPN client? Burrow notices the route exists and rides it directly instead of starting a second session that would kick you off.</p>
+        </article>
+
+        <article class="card">
+          <div class="ico">📦</div>
+          <h3>Self-contained &amp; signed</h3>
+          <p>The notarized DMG bundles everything it needs — double-click to install, no Homebrew, no terminal. Or build from source; it's all there.</p>
+        </article>
+
+        <article class="card">
+          <div class="ico">⚙️</div>
+          <h3>One honest config file</h3>
+          <p>Everything lives in a single watched JSON file. Import straight from <code>~/.ssh/config</code>, autodetect VPN servers from installed clients, and hand-edit any time — changes appear live.</p>
+        </article>
+      </div>
+    </section>
+
+    <!-- ============================= HOW IT WORKS ============================= -->
+    <section class="section alt" id="how">
+      <div class="section-head">
+        <h2>How it stays out of your way</h2>
+        <p>Burrow never installs a kernel extension or rewrites your routes. It builds commands and supervises tools you already trust.</p>
+      </div>
+
+      <div class="steps">
+        <div class="step">
+          <span class="step-n">1</span>
+          <h3>Userspace VPN</h3>
+          <p><code>openconnect</code> + <code>ocproxy</code> turn a VPN session into a plain local SOCKS5 port. No <code>tun</code> device, no root, no system-wide routing — so it can't break your other connections.</p>
+        </div>
+        <div class="step">
+          <span class="step-n">2</span>
+          <h3>Per-tunnel proxy</h3>
+          <p>Each SSH forward that needs the VPN gets a <code>ProxyCommand</code> through that SOCKS port. The rest of your traffic stays exactly where it was.</p>
+        </div>
+        <div class="step">
+          <span class="step-n">3</span>
+          <h3>Supervised &amp; watched</h3>
+          <p>Burrow runs <code>/usr/bin/ssh</code> and <code>openconnect</code> as child processes, watches their health, reconnects on failure, and reaps anything stale it left behind.</p>
+        </div>
+      </div>
+
+      <div class="how-note">
+        <strong>Translation:</strong> connect a corporate VPN and reach internal hosts in seconds, run several VPNs side by side, and quit any time without leaving your Mac's networking in a weird state.
+      </div>
+    </section>
+
+    <!-- ============================= SHOWCASE ============================= -->
+    <section class="showcase">
+      <img src="assets/burrow-menu.svg" alt="Burrow menu showing gateways and grouped tunnels" loading="lazy" />
+    </section>
+
+    <!-- ============================= COFFEE ============================= -->
+    <section class="coffee" id="coffee">
+      <div class="coffee-inner">
+        <div class="coffee-emoji">☕</div>
+        <h2>Free, and staying free.</h2>
+        <p>
+          Burrow is freeware — no accounts, no upsell, no nag screens. It exists because
+          babysitting tunnels and VPN clients is miserable and it didn't have to be.
+          If it earns a spot in your menu bar, a coffee keeps the updates coming.
+        </p>
+        <a class="btn btn-coffee btn-lg" href="https://www.buymeacoffee.com/REPLACE_HANDLE" target="_blank" rel="noopener">☕ Buy me a coffee</a>
+        <p class="coffee-sub">Totally optional. The app is exactly the same either way.</p>
+      </div>
+    </section>
+
+    <!-- ============================= FAQ ============================= -->
+    <section class="section" id="faq">
+      <div class="section-head">
+        <h2>Questions</h2>
+      </div>
+      <div class="faq">
+        <details>
+          <summary>Is it really free?</summary>
+          <p>Yes — freeware, with an optional “buy me a coffee” if you'd like to support it. No license keys, no trial timer, no feature gates.</p>
+        </details>
+        <details>
+          <summary>Does it need root or a kernel extension?</summary>
+          <p>No. SSH tunnels use the system <code>ssh</code>. VPN gateways run in userspace via <code>openconnect</code> + <code>ocproxy</code> as local SOCKS ports — no <code>tun</code> device, no admin privileges, no changes to your routing table.</p>
+        </details>
+        <details>
+          <summary>Is the download safe?</summary>
+          <p>The DMG is signed with an Apple Developer ID and notarized by Apple, so it opens without Gatekeeper warnings. Your SSH and VPN passwords are stored only in the macOS Keychain, and only after a successful connection. There's no telemetry.</p>
+        </details>
+        <details>
+          <summary>Will it conflict with my company's VPN client?</summary>
+          <p>No. If your official client (GlobalProtect, AnyConnect…) is already connected, Burrow detects that the route exists and uses it directly instead of opening a competing session. When the client is off, Burrow can bring the VPN up itself.</p>
+        </details>
+        <details>
+          <summary>How do I install it?</summary>
+          <p>Download the DMG from <a href="https://github.com/jzthree/Burrow/releases/latest" target="_blank" rel="noopener">Releases</a>, drag Burrow to Applications, and launch it — it lives in your menu bar. Prefer the source? <code>git clone</code> and run <code>./scripts/install-app.sh</code>.</p>
+        </details>
+        <details>
+          <summary>What do I need to run it?</summary>
+          <p>macOS 13 or later. Tunnels need nothing else. VPN gateways are optional and bundled in the DMG; from source, Burrow offers to <code>brew install openconnect ocproxy</code> on first use.</p>
+        </details>
+        <details>
+          <summary>Where's the source?</summary>
+          <p>On <a href="https://github.com/jzthree/Burrow" target="_blank" rel="noopener">GitHub</a> — Burrow is a native Swift app and builds with one command.</p>
+        </details>
+      </div>
+    </section>
+
+    <!-- ============================= FINAL CTA ============================= -->
+    <section class="final">
+      <h2>Reclaim your menu bar.</h2>
+      <div class="cta-row center">
+        <a class="btn btn-dark btn-lg" href="https://github.com/jzthree/Burrow/releases/latest" target="_blank" rel="noopener">Download for macOS</a>
+        <a class="btn btn-ghost btn-lg" href="https://github.com/jzthree/Burrow" target="_blank" rel="noopener">View on GitHub</a>
+      </div>
+    </section>
+  </main>
+
+  <!-- ============================= FOOTER ============================= -->
+  <footer class="footer">
+    <div class="footer-brand">
+      <img src="assets/favicon.svg" width="22" height="22" alt="" />
+      <span>Burrow</span>
+    </div>
+    <nav class="footer-links">
+      <a href="#features">Features</a>
+      <a href="#how">How it works</a>
+      <a href="#faq">FAQ</a>
+      <a href="https://github.com/jzthree/Burrow" target="_blank" rel="noopener">GitHub</a>
+      <a href="https://github.com/jzthree/Burrow/releases/latest" target="_blank" rel="noopener">Download</a>
+      <a href="https://www.buymeacoffee.com/REPLACE_HANDLE" target="_blank" rel="noopener">Buy me a coffee</a>
+    </nav>
+    <p class="footer-fine">Free macOS software · Built with care for people with too many terminal tabs.</p>
+  </footer>
+
+  <script src="site.js" defer></script>
+</body>
+</html>
