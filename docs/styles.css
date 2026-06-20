@@ -12,7 +12,7 @@
   --line: #e6e6ea;
   --shadow: 0 10px 40px rgba(20, 20, 40, 0.08);
   --radius: 18px;
-  --maxw: 1120px;
+  --maxw: 1200px;
   --font: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
 }
 
@@ -106,8 +106,8 @@ section { padding: 0 24px; }
   margin: 0 auto;
   padding: 72px 24px 56px;
   display: grid;
-  grid-template-columns: 1fr 1.05fr;
-  gap: 56px;
+  grid-template-columns: 0.95fr 1.5fr;
+  gap: 40px;
   align-items: center;
   background:
     radial-gradient(900px 360px at 18% -10%, var(--accent-soft), transparent 70%);
@@ -144,7 +144,6 @@ section { padding: 0 24px; }
   border-radius: 16px;
   box-shadow: var(--shadow);
   overflow: hidden;
-  transform: rotate(.4deg);
 }
 .window-bar {
   display: flex; gap: 7px; align-items: center;
@@ -230,7 +229,7 @@ section { padding: 0 24px; }
 
 /* ===================== Showcase ===================== */
 .showcase {
-  max-width: 980px; margin: 0 auto; padding: 0 24px 88px;
+  max-width: 1080px; margin: 0 auto; padding: 0 24px 88px;
 }
 .showcase img {
   width: 100%; height: auto; display: block;

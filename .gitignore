@@ -9,3 +9,6 @@ DerivedData/
 
 # Release artifacts (make-dmg.sh staging + DMGs)
 /build/
+
+# DMG staged for Cloudflare Pages deploy (uploaded, not committed)
+/docs/downloads/

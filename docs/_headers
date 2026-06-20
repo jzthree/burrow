@@ -1,0 +1,11 @@
+# Cloudflare Pages headers (ignored by other static hosts)
+/*
+  X-Content-Type-Options: nosniff
+  Referrer-Policy: strict-origin-when-cross-origin
+
+/assets/*
+  Cache-Control: public, max-age=31536000, immutable
+
+/downloads/*
+  Cache-Control: public, max-age=3600
+  Content-Disposition: attachment
