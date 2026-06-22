@@ -113,6 +113,7 @@ final class MenuBarViewModel: ObservableObject {
     }
     @Published var importCandidates: [SSHConfigImportCandidate]?
     @Published private(set) var launchAtLoginEnabled = false
+    @Published private(set) var terminalApp = "auto"
     /// When true, an intentional Quit leaves the VPN and tunnels running and
     /// the app re-adopts them on next launch. When false (default), Quit tears
     /// everything down. A crash/kill always leaves them running regardless.
@@ -458,6 +459,7 @@ final class MenuBarViewModel: ObservableObject {
             writeSSHInclude(for: config.gateways)
             profilesCache = config.profiles
             twoFactorAccounts = config.twoFactorAccounts
+            terminalApp = normalizedTerminalApp(config.terminalApp)
 
             if tunnels.isEmpty {
                 globalMessage = "No tunnels configured yet."
@@ -715,10 +717,41 @@ final class MenuBarViewModel: ObservableObject {
             return
         }
         do {
-            try SSHTerminalLauncher.open(tunnel: tunnel, gateways: gateways.map(\.config))
-            globalMessage = "Opening ssh to \(tunnel.host) in Terminal."
+            try SSHTerminalLauncher.open(tunnel: tunnel, gateways: gateways.map(\.config), terminalApp: terminalApp)
+            globalMessage = "Opening ssh to \(tunnel.host) in \(terminalAppDisplayName)."
         } catch {
-            globalMessage = "Couldn't open Terminal: \(error.localizedDescription)"
+            globalMessage = "Couldn't open ssh terminal: \(error.localizedDescription)"
+        }
+    }
+
+    var terminalAppDisplayName: String {
+        switch normalizedTerminalApp(terminalApp) {
+        case "iterm": return "iTerm2"
+        case "terminal": return "Terminal"
+        case "default": return "Default App"
+        default: return "Auto"
+        }
+    }
+
+    func setTerminalApp(_ value: String) {
+        let selected = normalizedTerminalApp(value)
+        do {
+            var config = try store.load()
+            config.terminalApp = selected
+            try store.save(config)
+            terminalApp = selected
+            globalMessage = "SSH sessions will open in \(terminalAppDisplayName)."
+        } catch {
+            globalMessage = "Failed to save terminal app: \(error.localizedDescription)"
+        }
+    }
+
+    private func normalizedTerminalApp(_ value: String) -> String {
+        switch value.lowercased() {
+        case "iterm", "terminal", "default":
+            return value.lowercased()
+        default:
+            return "auto"
         }
     }
 
@@ -2312,8 +2345,22 @@ struct MenuBarContent: View {
                 .padding(12)
             } else {
                 if viewModel.tunnels.isEmpty {
-                    emptyState
-                        .padding(16)
+                    if viewModel.gateways.isEmpty {
+                        emptyState
+                            .padding(16)
+                    } else {
+                        ScrollView {
+                            VStack(alignment: .leading, spacing: 10) {
+                                gatewaysSection
+                                emptyState
+                                    .padding(.horizontal, 4)
+                                    .padding(.vertical, 6)
+                            }
+                            .padding(.horizontal, 12)
+                            .padding(.vertical, 10)
+                        }
+                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+                    }
                 } else {
                     if !viewModel.profiles.isEmpty {
                         profileChipsRow
@@ -2406,10 +2453,6 @@ struct MenuBarContent: View {
             return 620
         }
 
-        guard !viewModel.tunnels.isEmpty else {
-            return minimumMenuHeight
-        }
-
         let listHeight = endpointGroups.reduce(CGFloat(0)) { total, group in
             let tunnelCount = CGFloat(group.tunnels.count)
             let dividerHeight = CGFloat(max(group.tunnels.count - 1, 0))
@@ -2427,7 +2470,8 @@ struct MenuBarContent: View {
 
         // Footer is a single row now.
         let headerAndFooterChrome: CGFloat = 134
-        return headerAndFooterChrome + profileChipsHeight + gatewaysHeight + listHeight
+        let emptyStateHeight: CGFloat = viewModel.tunnels.isEmpty ? 70 : 0
+        return headerAndFooterChrome + profileChipsHeight + gatewaysHeight + listHeight + emptyStateHeight
     }
 
     private var header: some View {
@@ -2497,6 +2541,12 @@ struct MenuBarContent: View {
                     get: { viewModel.keepRunningAfterQuit },
                     set: { viewModel.keepRunningAfterQuit = $0 }
                 ))
+                Menu("Open SSH In: \(viewModel.terminalAppDisplayName)") {
+                    Button("Auto") { viewModel.setTerminalApp("auto") }
+                    Button("iTerm2") { viewModel.setTerminalApp("iterm") }
+                    Button("Terminal") { viewModel.setTerminalApp("terminal") }
+                    Button("Default App") { viewModel.setTerminalApp("default") }
+                }
 
                 Divider()
 

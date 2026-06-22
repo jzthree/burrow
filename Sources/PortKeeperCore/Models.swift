@@ -6,19 +6,24 @@ public struct AppConfig: Codable, Sendable {
     public var gateways: [GatewayConfig]
     public var profiles: [Profile]
     public var twoFactorAccounts: [TwoFactorAccount]
+    /// Which app to use for interactive SSH sessions: "auto", "iterm",
+    /// "terminal", or "default".
+    public var terminalApp: String
 
     public init(
         version: Int = 1,
         tunnels: [TunnelConfig] = [],
         gateways: [GatewayConfig] = [],
         profiles: [Profile] = [],
-        twoFactorAccounts: [TwoFactorAccount] = []
+        twoFactorAccounts: [TwoFactorAccount] = [],
+        terminalApp: String = "auto"
     ) {
         self.version = version
         self.tunnels = tunnels
         self.gateways = gateways
         self.profiles = profiles
         self.twoFactorAccounts = twoFactorAccounts
+        self.terminalApp = terminalApp
     }
 
     public init(from decoder: Decoder) throws {
@@ -28,6 +33,7 @@ public struct AppConfig: Codable, Sendable {
         self.gateways = try container.decodeIfPresent([GatewayConfig].self, forKey: .gateways) ?? []
         self.profiles = try container.decodeIfPresent([Profile].self, forKey: .profiles) ?? []
         self.twoFactorAccounts = try container.decodeIfPresent([TwoFactorAccount].self, forKey: .twoFactorAccounts) ?? []
+        self.terminalApp = try container.decodeIfPresent(String.self, forKey: .terminalApp) ?? "auto"
     }
 }
 

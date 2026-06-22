@@ -5,7 +5,7 @@ import PortKeeperCore
 /// the tunnel's identity, port, jump host, and — when set — its VPN gateway's
 /// ProxyCommand, so reaching internal hosts works the same way the tunnel does.
 enum SSHTerminalLauncher {
-    static func open(tunnel: TunnelConfig, gateways: [GatewayConfig]) throws {
+    static func open(tunnel: TunnelConfig, gateways: [GatewayConfig], terminalApp: String = "auto") throws {
         let routed = GatewayLinker.applyingGatewayProxy(to: tunnel, gateways: gateways)
         let command = interactiveCommand(for: routed)
 
@@ -18,7 +18,48 @@ enum SSHTerminalLauncher {
         """
         try script.write(to: scriptURL, atomically: true, encoding: .utf8)
         try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: scriptURL.path)
+        if openScript(scriptURL, terminalApp: terminalApp) {
+            return
+        }
         NSWorkspace.shared.open(scriptURL)
+    }
+
+    private static func openScript(_ scriptURL: URL, terminalApp: String) -> Bool {
+        switch terminalApp.lowercased() {
+        case "iterm":
+            return openScriptInApp(scriptURL, candidates: iTermCandidates)
+        case "terminal":
+            return openScriptInApp(scriptURL, candidates: terminalCandidates)
+        case "default":
+            return false
+        default:
+            return openScriptInApp(scriptURL, candidates: iTermCandidates)
+                || openScriptInApp(scriptURL, candidates: terminalCandidates)
+        }
+    }
+
+    private static let iTermCandidates = [
+        FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Applications/iTerm.app").path,
+        "/Applications/iTerm.app",
+        "/Applications/iTerm2.app",
+    ]
+
+    private static let terminalCandidates = [
+        "/System/Applications/Utilities/Terminal.app",
+        "/Applications/Utilities/Terminal.app",
+    ]
+
+    private static func openScriptInApp(_ scriptURL: URL, candidates: [String]) -> Bool {
+        guard let appURL = candidates
+            .map(URL.init(fileURLWithPath:))
+            .first(where: { FileManager.default.fileExists(atPath: $0.path) }) else {
+            return false
+        }
+
+        let configuration = NSWorkspace.OpenConfiguration()
+        configuration.activates = true
+        NSWorkspace.shared.open([scriptURL], withApplicationAt: appURL, configuration: configuration)
+        return true
     }
 
     /// An interactive ssh command line (no -N, no forwards) for the host.
@@ -54,4 +95,5 @@ enum SSHTerminalLauncher {
         }
         return "'\(s.replacingOccurrences(of: "'", with: "'\\''"))'"
     }
+
 }
