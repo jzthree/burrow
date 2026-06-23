@@ -3,7 +3,7 @@ import PortKeeperCore
 import SwiftUI
 
 /// Hosts the Authenticator in its own window so revealing a code (which needs a
-/// Touch ID sheet) isn't interrupted by the menu-bar popover dismissing.
+/// authentication sheet) isn't interrupted by the menu-bar popover dismissing.
 @MainActor
 final class AuthenticatorWindowController: NSObject, NSWindowDelegate {
     private weak var viewModel: MenuBarViewModel?
@@ -111,7 +111,7 @@ struct AuthenticatorSheet: View {
             VStack(alignment: .leading, spacing: 1) {
                 Text("Authenticator")
                     .font(.system(size: 16, weight: .bold))
-                Text("Verification codes, unlocked with Touch ID.")
+                Text("Verification codes, unlocked with Mac authentication.")
                     .font(.system(size: 10.5))
                     .foregroundStyle(.secondary)
             }
@@ -222,7 +222,7 @@ private struct AuthenticatorRow: View {
                     )
                 }
                 .buttonStyle(.plain)
-                .help("Reveal the current code with Touch ID")
+                .help("Reveal the current code with Mac authentication")
             }
 
             Button(action: onDelete) {

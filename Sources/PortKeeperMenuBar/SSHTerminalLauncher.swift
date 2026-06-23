@@ -5,23 +5,108 @@ import PortKeeperCore
 /// the tunnel's identity, port, jump host, and — when set — its VPN gateway's
 /// ProxyCommand, so reaching internal hosts works the same way the tunnel does.
 enum SSHTerminalLauncher {
-    static func open(tunnel: TunnelConfig, gateways: [GatewayConfig], terminalApp: String = "auto") throws {
+    struct OneTimeCode {
+        let accountName: String
+        let currentCode: String
+        let nextCode: String
+        let periodEnd: Date
+    }
+
+    static func open(
+        tunnel: TunnelConfig,
+        gateways: [GatewayConfig],
+        terminalApp: String = "auto",
+        oneTimeCode: OneTimeCode? = nil
+    ) throws {
         let routed = GatewayLinker.applyingGatewayProxy(to: tunnel, gateways: gateways)
         let command = interactiveCommand(for: routed)
 
         let scriptURL = FileManager.default.temporaryDirectory
             .appendingPathComponent("burrow-ssh-\(tunnel.name.replacingOccurrences(of: "/", with: "-")).command")
-        let script = """
-        #!/bin/zsh
-        echo "Burrow: ssh \(tunnel.host)"
-        \(command)
-        """
+        let script = scriptText(tunnel: tunnel, command: command, oneTimeCode: oneTimeCode)
         try script.write(to: scriptURL, atomically: true, encoding: .utf8)
         try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: scriptURL.path)
         if openScript(scriptURL, terminalApp: terminalApp) {
             return
         }
         NSWorkspace.shared.open(scriptURL)
+    }
+
+    private static func scriptText(
+        tunnel: TunnelConfig,
+        command: String,
+        oneTimeCode: OneTimeCode?
+    ) -> String {
+        guard let oneTimeCode else {
+            return """
+            #!/bin/zsh
+            script_path="$0"
+            trap 'rm -f "$script_path"' EXIT
+            echo "Burrow: ssh \(tunnel.host)"
+            \(command)
+            """
+        }
+
+        return """
+        #!/bin/zsh
+        script_path="$0"
+        trap 'rm -f "$script_path"' EXIT
+        export BURROW_SSH_COMMAND=\(shellQuote(command))
+        export BURROW_OTP_CURRENT=\(shellQuote(oneTimeCode.currentCode))
+        export BURROW_OTP_NEXT=\(shellQuote(oneTimeCode.nextCode))
+        export BURROW_OTP_PERIOD_END=\(Int(oneTimeCode.periodEnd.timeIntervalSince1970))
+
+        echo "Burrow: ssh \(tunnel.host)"
+        echo "Burrow: will answer token prompts with \(oneTimeCode.accountName) 2FA."
+
+        if [[ ! -x /usr/bin/expect ]]; then
+          printf "%s" "$BURROW_OTP_CURRENT" | /usr/bin/pbcopy
+          echo "Burrow: /usr/bin/expect is missing; copied the current 2FA code to the clipboard."
+          exec /bin/zsh -lc "$BURROW_SSH_COMMAND"
+        fi
+
+        /usr/bin/expect <<'BURROW_EXPECT'
+        set timeout 45
+        set currentCode $env(BURROW_OTP_CURRENT)
+        set nextCode $env(BURROW_OTP_NEXT)
+        set periodEnd $env(BURROW_OTP_PERIOD_END)
+        set sentCodes {}
+
+        proc burrow_code {} {
+            global currentCode nextCode periodEnd
+            if {[clock seconds] + 5 >= $periodEnd} {
+                return $nextCode
+            }
+            return $currentCode
+        }
+
+        spawn /bin/zsh -lc $env(BURROW_SSH_COMMAND)
+        expect {
+            -nocase -re {(tacc token code|verification code|one[- ]?time[^:\\r\\n]*code|otp|token[^:\\r\\n]*code|passcode)[^:\\r\\n]*:\\s*$} {
+                set code [burrow_code]
+                if {[lsearch -exact $sentCodes $code] >= 0} {
+                    send_user "\\nBurrow: the generated 2FA code was not accepted; please type the code manually.\\n"
+                    interact
+                } else {
+                    lappend sentCodes $code
+                    send -- "$code\\r"
+                    exp_continue
+                }
+            }
+            -nocase -re {password:\\s*$} {
+                send_user "\\nBurrow: password prompt detected; handing this SSH session to you.\\n"
+                interact
+            }
+            timeout {
+                interact
+            }
+            eof {
+                catch wait result
+                exit [lindex $result 3]
+            }
+        }
+        BURROW_EXPECT
+        """
     }
 
     private static func openScript(_ scriptURL: URL, terminalApp: String) -> Bool {

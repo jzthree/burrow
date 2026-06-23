@@ -114,6 +114,7 @@ final class MenuBarViewModel: ObservableObject {
     @Published var importCandidates: [SSHConfigImportCandidate]?
     @Published private(set) var launchAtLoginEnabled = false
     @Published private(set) var terminalApp = "auto"
+    @Published private(set) var twoFactorUnlockCacheSeconds = 0
     /// When true, an intentional Quit leaves the VPN and tunnels running and
     /// the app re-adopts them on next launch. When false (default), Quit tears
     /// everything down. A crash/kill always leaves them running regardless.
@@ -460,6 +461,7 @@ final class MenuBarViewModel: ObservableObject {
             profilesCache = config.profiles
             twoFactorAccounts = config.twoFactorAccounts
             terminalApp = normalizedTerminalApp(config.terminalApp)
+            twoFactorUnlockCacheSeconds = normalizedTwoFactorUnlockCacheSeconds(config.twoFactorUnlockCacheSeconds)
 
             if tunnels.isEmpty {
                 globalMessage = "No tunnels configured yet."
@@ -716,12 +718,72 @@ final class MenuBarViewModel: ObservableObject {
             globalMessage = "Tunnel '\(name)' not found."
             return
         }
+        if let account = linkedTwoFactorAccount(for: tunnel) {
+            globalMessage = "Preparing \(account.name) 2FA for \(tunnel.host)."
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                do {
+                    NSApp.activate(ignoringOtherApps: true)
+                    let codes = try await self.twoFactorStore.currentAndNextCodes(
+                        for: account,
+                        reason: "Use the \(account.name) verification code for SSH",
+                        at: Date(),
+                        unlockCacheSeconds: self.twoFactorUnlockCacheSeconds
+                    )
+                    try SSHTerminalLauncher.open(
+                        tunnel: tunnel,
+                        gateways: self.gateways.map(\.config),
+                        terminalApp: self.terminalApp,
+                        oneTimeCode: SSHTerminalLauncher.OneTimeCode(
+                            accountName: account.name,
+                            currentCode: codes.current,
+                            nextCode: codes.next,
+                            periodEnd: codes.periodEnd
+                        )
+                    )
+                    self.globalMessage = "Opening ssh to \(tunnel.host); \(account.name) 2FA will be sent at the token prompt."
+                } catch let error as TwoFactorStoreError {
+                    do {
+                        try self.openPlainSSHTerminal(for: tunnel)
+                        self.globalMessage = "Opening normal ssh; \(account.name) 2FA was not prepared (\(error.localizedDescription))."
+                    } catch {
+                        self.globalMessage = "Couldn't open ssh terminal: \(error.localizedDescription)"
+                    }
+                } catch {
+                    do {
+                        try self.openPlainSSHTerminal(for: tunnel)
+                        self.globalMessage = "Opening normal ssh; \(account.name) 2FA was not prepared."
+                    } catch {
+                        self.globalMessage = "Couldn't open ssh terminal: \(error.localizedDescription)"
+                    }
+                }
+            }
+            return
+        }
         do {
-            try SSHTerminalLauncher.open(tunnel: tunnel, gateways: gateways.map(\.config), terminalApp: terminalApp)
+            try openPlainSSHTerminal(for: tunnel)
             globalMessage = "Opening ssh to \(tunnel.host) in \(terminalAppDisplayName)."
         } catch {
             globalMessage = "Couldn't open ssh terminal: \(error.localizedDescription)"
         }
+    }
+
+    private func openPlainSSHTerminal(for tunnel: TunnelConfig) throws {
+        try SSHTerminalLauncher.open(tunnel: tunnel, gateways: gateways.map(\.config), terminalApp: terminalApp)
+    }
+
+    private func linkedTwoFactorAccount(for tunnel: TunnelConfig) -> TwoFactorAccount? {
+        func matches(_ value: String?) -> Bool {
+            guard let raw = value?.trimmingCharacters(in: .whitespacesAndNewlines), !raw.isEmpty else {
+                return false
+            }
+            return raw == tunnel.name
+                || raw == tunnel.host
+                || raw == "\(tunnel.user.map { "\($0)@" } ?? "")\(tunnel.host)"
+        }
+
+        return twoFactorAccounts.first { matches($0.sshHost) }
+            ?? twoFactorAccounts.first { $0.name == tunnel.name }
     }
 
     var terminalAppDisplayName: String {
@@ -746,6 +808,40 @@ final class MenuBarViewModel: ObservableObject {
         }
     }
 
+    var twoFactorUnlockCacheDisplayName: String {
+        Self.twoFactorUnlockCacheOptions.first(where: { $0.seconds == twoFactorUnlockCacheSeconds })?.label ?? "Every Time"
+    }
+
+    struct TwoFactorUnlockCacheOption: Identifiable, Equatable {
+        let label: String
+        let seconds: Int
+        var id: Int { seconds }
+    }
+
+    static let twoFactorUnlockCacheOptions: [TwoFactorUnlockCacheOption] = [
+        TwoFactorUnlockCacheOption(label: "Every Time", seconds: 0),
+        TwoFactorUnlockCacheOption(label: "5 Minutes", seconds: 5 * 60),
+        TwoFactorUnlockCacheOption(label: "1 Hour", seconds: 60 * 60),
+        TwoFactorUnlockCacheOption(label: "1 Day", seconds: 24 * 60 * 60),
+        TwoFactorUnlockCacheOption(label: "1 Week", seconds: 7 * 24 * 60 * 60),
+    ]
+
+    func setTwoFactorUnlockCacheSeconds(_ value: Int) {
+        let selected = normalizedTwoFactorUnlockCacheSeconds(value)
+        do {
+            var config = try store.load()
+            config.twoFactorUnlockCacheSeconds = selected
+            try store.save(config)
+            twoFactorUnlockCacheSeconds = selected
+            twoFactorStore.clearCache()
+            globalMessage = selected == 0
+                ? "2FA unlock will ask every time."
+                : "2FA unlock will ask every \(twoFactorUnlockCacheDisplayName.lowercased()) while Burrow stays open."
+        } catch {
+            globalMessage = "Failed to save 2FA unlock setting: \(error.localizedDescription)"
+        }
+    }
+
     private func normalizedTerminalApp(_ value: String) -> String {
         switch value.lowercased() {
         case "iterm", "terminal", "default":
@@ -753,6 +849,10 @@ final class MenuBarViewModel: ObservableObject {
         default:
             return "auto"
         }
+    }
+
+    private func normalizedTwoFactorUnlockCacheSeconds(_ value: Int) -> Int {
+        Self.twoFactorUnlockCacheOptions.map(\.seconds).contains(value) ? value : 0
     }
 
     /// Copies an interactive ssh command for the host, routed through the
@@ -795,8 +895,8 @@ final class MenuBarViewModel: ObservableObject {
     }
 
     func openAuthenticator() {
-        guard TwoFactorStore.biometricsAvailable() else {
-            globalMessage = "Touch ID isn't available on this Mac, so verification codes can't be stored securely."
+        guard TwoFactorStore.authenticationAvailable() else {
+            globalMessage = "Mac authentication isn't available, so verification codes can't be stored securely."
             return
         }
         showingAuthenticator = true
@@ -818,7 +918,7 @@ final class MenuBarViewModel: ObservableObject {
     }
 
     /// Generates and reveals the current code for an account. Presents the
-    /// system Touch ID sheet (off the main thread), copies the code to the
+    /// system authentication sheet (off the main thread), copies the code to the
     /// clipboard, and schedules the row to re-lock at the period boundary.
     func revealTwoFactorCode(named name: String) {
         guard let account = twoFactorAccounts.first(where: { $0.id == name }) else {
@@ -831,7 +931,8 @@ final class MenuBarViewModel: ObservableObject {
                 let code = try await self.twoFactorStore.currentCode(
                     for: account,
                     reason: "Reveal the \(account.name) verification code",
-                    at: now
+                    at: now,
+                    unlockCacheSeconds: self.twoFactorUnlockCacheSeconds
                 )
                 let periodEnd = now.addingTimeInterval(Double(account.period) - now.timeIntervalSince1970.truncatingRemainder(dividingBy: Double(account.period)))
                 self.revealedCodes[name] = RevealedCode(code: code, periodEnd: periodEnd)
@@ -858,7 +959,7 @@ final class MenuBarViewModel: ObservableObject {
     }
 
     /// Enrolls (or re-enrolls) an account from a pasted otpauth URI / base32
-    /// secret, storing the seed behind Touch ID and the params in the config.
+    /// secret, storing the seed behind Mac authentication and the params in the config.
     /// Returns true on success so the caller can dismiss its add form.
     @discardableResult
     func enrollTwoFactor(name: String, secret: String) -> Bool {
@@ -2324,6 +2425,7 @@ struct MenuBarContent: View {
 
     struct EndpointGroup: Identifiable {
         let endpoint: String
+        let hostForNewTunnel: String
         let tunnels: [MenuBarViewModel.TunnelState]
 
         var id: String { endpoint }
@@ -2380,7 +2482,7 @@ struct MenuBarContent: View {
                                         onSelectGateway: { gatewayName in
                                             viewModel.setGateway(gatewayName, forTunnels: group.tunnels.map(\.id))
                                         },
-                                        onAddTunnel: { viewModel.createTunnel(forHost: group.endpoint) }
+                                        onAddTunnel: { viewModel.createTunnel(forHost: group.hostForNewTunnel) }
                                     )
 
                                     VStack(alignment: .leading, spacing: 0) {
@@ -2547,6 +2649,13 @@ struct MenuBarContent: View {
                     Button("Terminal") { viewModel.setTerminalApp("terminal") }
                     Button("Default App") { viewModel.setTerminalApp("default") }
                 }
+                Menu("2FA Unlock: \(viewModel.twoFactorUnlockCacheDisplayName)") {
+                    ForEach(MenuBarViewModel.twoFactorUnlockCacheOptions, id: \.seconds) { option in
+                        Button(option.label) {
+                            viewModel.setTwoFactorUnlockCacheSeconds(option.seconds)
+                        }
+                    }
+                }
 
                 Divider()
 
@@ -2708,13 +2817,22 @@ struct MenuBarContent: View {
         var groups: [EndpointGroup] = []
 
         for tunnel in viewModel.tunnels {
-            let endpoint = tunnel.tunnel.host
+            let displayGroup = tunnel.tunnel.displayGroup?.trimmingCharacters(in: .whitespacesAndNewlines)
+            let endpoint = displayGroup?.isEmpty == false ? displayGroup! : tunnel.tunnel.host
             if let index = groups.firstIndex(where: { $0.endpoint == endpoint }) {
                 var tunnels = groups[index].tunnels
                 tunnels.append(tunnel)
-                groups[index] = EndpointGroup(endpoint: endpoint, tunnels: tunnels)
+                groups[index] = EndpointGroup(
+                    endpoint: endpoint,
+                    hostForNewTunnel: groups[index].hostForNewTunnel,
+                    tunnels: tunnels
+                )
             } else {
-                groups.append(EndpointGroup(endpoint: endpoint, tunnels: [tunnel]))
+                groups.append(EndpointGroup(
+                    endpoint: endpoint,
+                    hostForNewTunnel: tunnel.tunnel.host,
+                    tunnels: [tunnel]
+                ))
             }
         }
 
