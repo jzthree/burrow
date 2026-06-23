@@ -1,4 +1,5 @@
 import AppKit
+import Darwin
 import PortKeeperCore
 
 /// Opens an interactive `ssh` session to a tunnel's host in Terminal, reusing
@@ -18,12 +19,12 @@ enum SSHTerminalLauncher {
         terminalApp: String = "auto",
         oneTimeCode: OneTimeCode? = nil
     ) throws {
-        let routed = GatewayLinker.applyingGatewayProxy(to: tunnel, gateways: gateways)
-        let command = interactiveCommand(for: routed)
+        let route = interactiveRoute(for: tunnel, gateways: gateways)
+        let command = interactiveCommand(for: route.tunnel)
 
         let scriptURL = FileManager.default.temporaryDirectory
             .appendingPathComponent("burrow-ssh-\(tunnel.name.replacingOccurrences(of: "/", with: "-")).command")
-        let script = scriptText(tunnel: tunnel, command: command, oneTimeCode: oneTimeCode)
+        let script = scriptText(tunnel: tunnel, command: command, oneTimeCode: oneTimeCode, routeMessage: route.message)
         try script.write(to: scriptURL, atomically: true, encoding: .utf8)
         try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: scriptURL.path)
         if openScript(scriptURL, terminalApp: terminalApp) {
@@ -35,14 +36,16 @@ enum SSHTerminalLauncher {
     private static func scriptText(
         tunnel: TunnelConfig,
         command: String,
-        oneTimeCode: OneTimeCode?
+        oneTimeCode: OneTimeCode?,
+        routeMessage: String?
     ) -> String {
+        let routeEcho = routeMessage.map { "\necho \(shellQuote("Burrow: \($0)"))" } ?? ""
         guard let oneTimeCode else {
             return """
             #!/bin/zsh
             script_path="$0"
             trap 'rm -f "$script_path"' EXIT
-            echo "Burrow: ssh \(tunnel.host)"
+            echo "Burrow: ssh \(tunnel.host)"\(routeEcho)
             \(command)
             """
         }
@@ -58,6 +61,7 @@ enum SSHTerminalLauncher {
         export BURROW_OTP_PERIOD_END=\(Int(oneTimeCode.periodEnd.timeIntervalSince1970))
 
         echo "Burrow: ssh \(tunnel.host)"
+        \(routeMessage.map { "echo \(shellQuote("Burrow: \($0)"))" } ?? "")
         echo "Burrow: will answer token prompts with \(oneTimeCode.accountName) 2FA."
 
         if [[ ! -x /usr/bin/expect ]]; then
@@ -111,6 +115,57 @@ enum SSHTerminalLauncher {
 
         exec /usr/bin/expect -f "$expect_script"
         """
+    }
+
+    private struct InteractiveRoute {
+        let tunnel: TunnelConfig
+        let message: String?
+    }
+
+    private static func interactiveRoute(for tunnel: TunnelConfig, gateways: [GatewayConfig]) -> InteractiveRoute {
+        guard !tunnel.extraSSHOptions.contains(where: { $0.lowercased().hasPrefix("proxycommand") }) else {
+            return InteractiveRoute(tunnel: tunnel, message: nil)
+        }
+        guard let gatewayName = tunnel.gateway else {
+            return InteractiveRoute(tunnel: tunnel, message: nil)
+        }
+        guard let gateway = gateways.first(where: { $0.name == gatewayName }) else {
+            return InteractiveRoute(
+                tunnel: tunnel,
+                message: "gateway \(gatewayName) is not configured; opening direct SSH."
+            )
+        }
+        guard isLocalPortListening(gateway.socksPort) else {
+            return InteractiveRoute(
+                tunnel: tunnel,
+                message: "gateway \(gateway.name) is not running on SOCKS :\(gateway.socksPort); opening direct SSH."
+            )
+        }
+        return InteractiveRoute(
+            tunnel: GatewayLinker.applyingGatewayProxy(to: tunnel, gateways: gateways),
+            message: "routing through \(gateway.name) gateway (SOCKS :\(gateway.socksPort))."
+        )
+    }
+
+    private static func isLocalPortListening(_ port: Int) -> Bool {
+        guard port > 0 && port <= 65_535 else { return false }
+        let descriptor = socket(AF_INET, SOCK_STREAM, 0)
+        guard descriptor >= 0 else { return false }
+        defer { close(descriptor) }
+
+        var address = sockaddr_in()
+        address.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
+        address.sin_family = sa_family_t(AF_INET)
+        address.sin_port = in_port_t(port).bigEndian
+        guard inet_pton(AF_INET, "127.0.0.1", &address.sin_addr) == 1 else {
+            return false
+        }
+
+        return withUnsafePointer(to: &address) { pointer in
+            pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) { socketAddress in
+                connect(descriptor, socketAddress, socklen_t(MemoryLayout<sockaddr_in>.size)) == 0
+            }
+        }
     }
 
     private static func openScript(_ scriptURL: URL, terminalApp: String) -> Bool {
