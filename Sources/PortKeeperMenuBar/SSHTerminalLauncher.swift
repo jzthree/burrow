@@ -50,7 +50,8 @@ enum SSHTerminalLauncher {
         return """
         #!/bin/zsh
         script_path="$0"
-        trap 'rm -f "$script_path"' EXIT
+        expect_script="$(mktemp -t burrow-ssh-expect.XXXXXX)"
+        trap 'rm -f "$script_path" "$expect_script"' EXIT
         export BURROW_SSH_COMMAND=\(shellQuote(command))
         export BURROW_OTP_CURRENT=\(shellQuote(oneTimeCode.currentCode))
         export BURROW_OTP_NEXT=\(shellQuote(oneTimeCode.nextCode))
@@ -65,7 +66,7 @@ enum SSHTerminalLauncher {
           exec /bin/zsh -lc "$BURROW_SSH_COMMAND"
         fi
 
-        /usr/bin/expect <<'BURROW_EXPECT'
+        cat > "$expect_script" <<'BURROW_EXPECT'
         set timeout 45
         set currentCode $env(BURROW_OTP_CURRENT)
         set nextCode $env(BURROW_OTP_NEXT)
@@ -90,6 +91,7 @@ enum SSHTerminalLauncher {
                 } else {
                     lappend sentCodes $code
                     send -- "$code\\r"
+                    set timeout 8
                     exp_continue
                 }
             }
@@ -106,6 +108,8 @@ enum SSHTerminalLauncher {
             }
         }
         BURROW_EXPECT
+
+        exec /usr/bin/expect -f "$expect_script"
         """
     }
 
