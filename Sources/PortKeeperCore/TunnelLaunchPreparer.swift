@@ -55,6 +55,7 @@ public enum TunnelLaunchPreparer {
             sshPort: tunnel.sshPort,
             identityFile: tunnel.identityFile,
             jumpHost: tunnel.jumpHost,
+            displayGroup: tunnel.displayGroup,
             forwards: tunnel.forwards,
             serverAliveInterval: tunnel.serverAliveInterval,
             serverAliveCountMax: tunnel.serverAliveCountMax,

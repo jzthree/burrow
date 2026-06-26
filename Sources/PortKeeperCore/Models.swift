@@ -6,19 +6,29 @@ public struct AppConfig: Codable, Sendable {
     public var gateways: [GatewayConfig]
     public var profiles: [Profile]
     public var twoFactorAccounts: [TwoFactorAccount]
+    /// Which app to use for interactive SSH sessions: "auto", "iterm",
+    /// "terminal", or "default".
+    public var terminalApp: String
+    /// Seconds to keep an unlocked 2FA seed in memory before asking macOS
+    /// authentication again. 0 means every use.
+    public var twoFactorUnlockCacheSeconds: Int
 
     public init(
         version: Int = 1,
         tunnels: [TunnelConfig] = [],
         gateways: [GatewayConfig] = [],
         profiles: [Profile] = [],
-        twoFactorAccounts: [TwoFactorAccount] = []
+        twoFactorAccounts: [TwoFactorAccount] = [],
+        terminalApp: String = "auto",
+        twoFactorUnlockCacheSeconds: Int = 0
     ) {
         self.version = version
         self.tunnels = tunnels
         self.gateways = gateways
         self.profiles = profiles
         self.twoFactorAccounts = twoFactorAccounts
+        self.terminalApp = terminalApp
+        self.twoFactorUnlockCacheSeconds = twoFactorUnlockCacheSeconds
     }
 
     public init(from decoder: Decoder) throws {
@@ -28,6 +38,8 @@ public struct AppConfig: Codable, Sendable {
         self.gateways = try container.decodeIfPresent([GatewayConfig].self, forKey: .gateways) ?? []
         self.profiles = try container.decodeIfPresent([Profile].self, forKey: .profiles) ?? []
         self.twoFactorAccounts = try container.decodeIfPresent([TwoFactorAccount].self, forKey: .twoFactorAccounts) ?? []
+        self.terminalApp = try container.decodeIfPresent(String.self, forKey: .terminalApp) ?? "auto"
+        self.twoFactorUnlockCacheSeconds = try container.decodeIfPresent(Int.self, forKey: .twoFactorUnlockCacheSeconds) ?? 0
     }
 }
 
@@ -210,6 +222,8 @@ public struct TunnelConfig: Codable, Sendable, Identifiable {
     public var sshPort: Int
     public var identityFile: String?
     public var jumpHost: String?
+    /// Optional UI grouping label. When empty, the menu groups by host.
+    public var displayGroup: String?
     public var forwards: [ForwardSpec]
     public var serverAliveInterval: Int
     public var serverAliveCountMax: Int
@@ -231,6 +245,7 @@ public struct TunnelConfig: Codable, Sendable, Identifiable {
         sshPort: Int = 22,
         identityFile: String? = nil,
         jumpHost: String? = nil,
+        displayGroup: String? = nil,
         forwards: [ForwardSpec],
         serverAliveInterval: Int = 30,
         serverAliveCountMax: Int = 3,
@@ -247,6 +262,7 @@ public struct TunnelConfig: Codable, Sendable, Identifiable {
         self.sshPort = sshPort
         self.identityFile = identityFile
         self.jumpHost = jumpHost
+        self.displayGroup = displayGroup
         self.forwards = forwards
         self.serverAliveInterval = serverAliveInterval
         self.serverAliveCountMax = serverAliveCountMax
