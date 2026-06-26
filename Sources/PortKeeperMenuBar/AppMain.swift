@@ -124,14 +124,28 @@ final class MenuBarViewModel: ObservableObject {
         }
     }
     private static let keepRunningKey = "keepRunningAfterQuit"
-    /// Opt-in: surface plain SSH login hosts from ~/.ssh/config in the menu so
-    /// direct `ssh` is first-class alongside port-forward tunnels.
-    @Published var showSSHHosts: Bool {
+    /// Section IDs the user has flipped from their default open/closed state.
+    /// Stored inverted so each section keeps a sensible default (tunnel groups
+    /// open, the SSH Hosts list closed) without seeding.
+    @Published var toggledSections: Set<String> {
         didSet {
-            UserDefaults.standard.set(showSSHHosts, forKey: Self.showSSHHostsKey)
+            UserDefaults.standard.set(Array(toggledSections), forKey: Self.toggledSectionsKey)
         }
     }
-    private static let showSSHHostsKey = "showSSHHosts"
+    private static let toggledSectionsKey = "toggledSections"
+
+    func isSectionExpanded(_ id: String, defaultExpanded: Bool) -> Bool {
+        toggledSections.contains(id) ? !defaultExpanded : defaultExpanded
+    }
+
+    func toggleSection(_ id: String) {
+        if toggledSections.contains(id) {
+            toggledSections.remove(id)
+        } else {
+            toggledSections.insert(id)
+        }
+    }
+
     private(set) var sshConfigHosts: [SSHConfigHost] = []
 
     private let notifier = BurrowNotifier()
@@ -170,7 +184,7 @@ final class MenuBarViewModel: ObservableObject {
 
     init() {
         keepRunningAfterQuit = UserDefaults.standard.bool(forKey: Self.keepRunningKey)
-        showSSHHosts = UserDefaults.standard.bool(forKey: Self.showSSHHostsKey)
+        toggledSections = Set(UserDefaults.standard.stringArray(forKey: Self.toggledSectionsKey) ?? [])
         loadConfig()
         adoptSurvivingGatewaySessions()
         sshConfigHosts = SSHConfigParser.parse()
@@ -2532,16 +2546,20 @@ struct MenuBarContent: View {
                                 gatewaysSection
                             }
                             ForEach(endpointGroups) { group in
+                                let groupExpanded = viewModel.isSectionExpanded("group:\(group.id)", defaultExpanded: true)
                                 VStack(alignment: .leading, spacing: 5) {
                                     EndpointHeader(
                                         group: group,
                                         gatewayNames: viewModel.gateways.map(\.id),
+                                        isExpanded: groupExpanded,
+                                        onToggleCollapse: { viewModel.toggleSection("group:\(group.id)") },
                                         onSelectGateway: { gatewayName in
                                             viewModel.setGateway(gatewayName, forTunnels: group.tunnels.map(\.id))
                                         },
                                         onAddTunnel: { viewModel.createTunnel(forHost: group.hostForNewTunnel) }
                                     )
 
+                                    if groupExpanded {
                                     VStack(alignment: .leading, spacing: 0) {
                                         ForEach(Array(group.tunnels.enumerated()), id: \.element.id) { index, tunnel in
                                             if index > 0 {
@@ -2574,9 +2592,10 @@ struct MenuBarContent: View {
                                             .stroke(Color.primary.opacity(0.06), lineWidth: 1)
                                     )
                                     .shadow(color: Color.black.opacity(0.045), radius: 6, x: 0, y: 3)
+                                    }
                                 }
                             }
-                            if viewModel.showSSHHosts && !viewModel.sshHostEntries.isEmpty {
+                            if !viewModel.sshHostEntries.isEmpty {
                                 hostsSection
                             }
                         }
@@ -2616,11 +2635,14 @@ struct MenuBarContent: View {
         }
 
         let listHeight = endpointGroups.reduce(CGFloat(0)) { total, group in
+            let groupHeaderAndSpacing: CGFloat = 32
+            let interGroupSpacing: CGFloat = 10
+            guard viewModel.isSectionExpanded("group:\(group.id)", defaultExpanded: true) else {
+                return total + groupHeaderAndSpacing + interGroupSpacing
+            }
             let tunnelCount = CGFloat(group.tunnels.count)
             let dividerHeight = CGFloat(max(group.tunnels.count - 1, 0))
-            let groupHeaderAndSpacing: CGFloat = 32
             let rowHeight: CGFloat = 56
-            let interGroupSpacing: CGFloat = 10
             return total + groupHeaderAndSpacing + (tunnelCount * rowHeight) + dividerHeight + interGroupSpacing
         }
 
@@ -2630,9 +2652,14 @@ struct MenuBarContent: View {
 
         let profileChipsHeight: CGFloat = viewModel.profiles.isEmpty ? 0 : 40
 
-        let hostsHeight: CGFloat = (viewModel.showSSHHosts && !viewModel.sshHostEntries.isEmpty)
-            ? 32 + CGFloat(viewModel.sshHostEntries.count) * 48 + CGFloat(max(viewModel.sshHostEntries.count - 1, 0)) + 10
-            : 0
+        let hostsHeight: CGFloat
+        if viewModel.sshHostEntries.isEmpty {
+            hostsHeight = 0
+        } else if viewModel.isSectionExpanded("hosts", defaultExpanded: false) {
+            hostsHeight = 32 + CGFloat(viewModel.sshHostEntries.count) * 48 + CGFloat(max(viewModel.sshHostEntries.count - 1, 0)) + 10
+        } else {
+            hostsHeight = 32 // collapsed: header only
+        }
 
         // Footer is a single row now.
         let headerAndFooterChrome: CGFloat = 134
@@ -2706,10 +2733,6 @@ struct MenuBarContent: View {
                 Toggle("Keep Running After Quit", isOn: Binding(
                     get: { viewModel.keepRunningAfterQuit },
                     set: { viewModel.keepRunningAfterQuit = $0 }
-                ))
-                Toggle("Show SSH Hosts (~/.ssh/config)", isOn: Binding(
-                    get: { viewModel.showSSHHosts },
-                    set: { viewModel.showSSHHosts = $0 }
                 ))
                 Menu("Open SSH In: \(viewModel.terminalAppDisplayName)") {
                     Button("System Default") { viewModel.setTerminalApp("auto") }
@@ -2874,51 +2897,58 @@ struct MenuBarContent: View {
     }
 
     private var hostsSection: some View {
-        VStack(alignment: .leading, spacing: 5) {
-            HStack(spacing: 8) {
-                Image(systemName: "terminal")
-                    .font(.system(size: 8, weight: .semibold))
-                    .foregroundStyle(.secondary.opacity(0.64))
-                    .frame(width: 17, height: 17)
-                    .background(
-                        RoundedRectangle(cornerRadius: 6, style: .continuous)
-                            .fill(Color.secondary.opacity(0.055))
-                    )
-                Text(verbatim: "SSH Hosts")
-                    .font(.system(size: 10, weight: .bold))
-                    .tracking(0.15)
-                    .foregroundStyle(Color.secondary.opacity(0.62))
-                Text(verbatim: "from ~/.ssh/config")
-                    .font(.system(size: 9))
-                    .foregroundStyle(Color.secondary.opacity(0.45))
-                Spacer(minLength: 4)
-            }
-            .padding(.horizontal, 12)
-            .padding(.vertical, 1)
-
-            VStack(alignment: .leading, spacing: 0) {
-                ForEach(Array(viewModel.sshHostEntries.enumerated()), id: \.element.alias) { index, host in
-                    if index > 0 {
-                        Divider()
-                            .opacity(0.34)
-                            .padding(.leading, 42)
-                    }
-                    SSHHostRow(
-                        host: host,
-                        onOpen: { viewModel.openSSHHost(alias: host.alias) },
-                        onCopy: { viewModel.copySSHHostCommand(alias: host.alias) }
-                    )
+        // Collapsed by default — a quiet drawer of ssh-config login targets.
+        let expanded = viewModel.isSectionExpanded("hosts", defaultExpanded: false)
+        return VStack(alignment: .leading, spacing: 5) {
+            Button {
+                viewModel.toggleSection("hosts")
+            } label: {
+                HStack(spacing: 8) {
+                    Image(systemName: "chevron.right")
+                        .font(.system(size: 9, weight: .bold))
+                        .foregroundStyle(.secondary.opacity(0.6))
+                        .rotationEffect(.degrees(expanded ? 90 : 0))
+                        .frame(width: 14, height: 17)
+                    Text(verbatim: "SSH Hosts")
+                        .font(.system(size: 10, weight: .bold))
+                        .tracking(0.15)
+                        .foregroundStyle(Color.secondary.opacity(0.62))
+                    Text(verbatim: "\(viewModel.sshHostEntries.count) · ~/.ssh/config")
+                        .font(.system(size: 9))
+                        .foregroundStyle(Color.secondary.opacity(0.45))
+                    Spacer(minLength: 4)
                 }
+                .padding(.horizontal, 12)
+                .padding(.vertical, 1)
+                .contentShape(Rectangle())
             }
-            .background(
-                RoundedRectangle(cornerRadius: 16, style: .continuous)
-                    .fill(Color(nsColor: .controlBackgroundColor).opacity(0.54))
-            )
-            .overlay(
-                RoundedRectangle(cornerRadius: 16, style: .continuous)
-                    .stroke(Color.primary.opacity(0.06), lineWidth: 1)
-            )
-            .shadow(color: Color.black.opacity(0.045), radius: 6, x: 0, y: 3)
+            .buttonStyle(.plain)
+
+            if expanded {
+                VStack(alignment: .leading, spacing: 0) {
+                    ForEach(Array(viewModel.sshHostEntries.enumerated()), id: \.element.alias) { index, host in
+                        if index > 0 {
+                            Divider()
+                                .opacity(0.34)
+                                .padding(.leading, 42)
+                        }
+                        SSHHostRow(
+                            host: host,
+                            onOpen: { viewModel.openSSHHost(alias: host.alias) },
+                            onCopy: { viewModel.copySSHHostCommand(alias: host.alias) }
+                        )
+                    }
+                }
+                .background(
+                    RoundedRectangle(cornerRadius: 16, style: .continuous)
+                        .fill(Color(nsColor: .controlBackgroundColor).opacity(0.54))
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: 16, style: .continuous)
+                        .stroke(Color.primary.opacity(0.06), lineWidth: 1)
+                )
+                .shadow(color: Color.black.opacity(0.045), radius: 6, x: 0, y: 3)
+            }
         }
     }
 
@@ -3014,11 +3044,23 @@ private struct SSHHostRow: View {
 private struct EndpointHeader: View {
     let group: MenuBarContent.EndpointGroup
     let gatewayNames: [String]
+    var isExpanded: Bool = true
+    var onToggleCollapse: () -> Void = {}
     let onSelectGateway: (String?) -> Void
     var onAddTunnel: () -> Void = {}
 
     var body: some View {
         HStack(spacing: 8) {
+            Button(action: onToggleCollapse) {
+                Image(systemName: "chevron.right")
+                    .font(.system(size: 9, weight: .bold))
+                    .foregroundStyle(.secondary.opacity(0.6))
+                    .rotationEffect(.degrees(isExpanded ? 90 : 0))
+                    .frame(width: 14, height: 17)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .help(isExpanded ? "Collapse" : "Expand")
             Image(systemName: "terminal")
                 .font(.system(size: 8, weight: .semibold))
                 .foregroundStyle(.secondary.opacity(0.64))
