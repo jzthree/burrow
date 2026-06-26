@@ -124,6 +124,14 @@ final class MenuBarViewModel: ObservableObject {
         }
     }
     private static let keepRunningKey = "keepRunningAfterQuit"
+    /// Opt-in: surface plain SSH login hosts from ~/.ssh/config in the menu so
+    /// direct `ssh` is first-class alongside port-forward tunnels.
+    @Published var showSSHHosts: Bool {
+        didSet {
+            UserDefaults.standard.set(showSSHHosts, forKey: Self.showSSHHostsKey)
+        }
+    }
+    private static let showSSHHostsKey = "showSSHHosts"
     private(set) var sshConfigHosts: [SSHConfigHost] = []
 
     private let notifier = BurrowNotifier()
@@ -162,6 +170,7 @@ final class MenuBarViewModel: ObservableObject {
 
     init() {
         keepRunningAfterQuit = UserDefaults.standard.bool(forKey: Self.keepRunningKey)
+        showSSHHosts = UserDefaults.standard.bool(forKey: Self.showSSHHostsKey)
         loadConfig()
         adoptSurvivingGatewaySessions()
         sshConfigHosts = SSHConfigParser.parse()
@@ -790,8 +799,7 @@ final class MenuBarViewModel: ObservableObject {
         switch normalizedTerminalApp(terminalApp) {
         case "iterm": return "iTerm2"
         case "terminal": return "Terminal"
-        case "default": return "Default App"
-        default: return "Auto"
+        default: return "System Default"
         }
     }
 
@@ -844,9 +852,11 @@ final class MenuBarViewModel: ObservableObject {
 
     private func normalizedTerminalApp(_ value: String) -> String {
         switch value.lowercased() {
-        case "iterm", "terminal", "default":
+        case "iterm", "terminal":
             return value.lowercased()
         default:
+            // "auto" = the OS default .command handler. Legacy "default"
+            // configs collapse into this (same behavior).
             return "auto"
         }
     }
@@ -868,6 +878,53 @@ final class MenuBarViewModel: ObservableObject {
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(command, forType: .string)
         globalMessage = tunnel.gateway.map { "Copied ssh command (via \($0))." } ?? "Copied ssh command."
+    }
+
+    // MARK: - SSH hosts (~/.ssh/config login targets)
+
+    /// Concrete login hosts from ~/.ssh/config (wildcards already excluded by
+    /// the parser), surfaced as quick `ssh` targets when showSSHHosts is on.
+    var sshHostEntries: [SSHConfigHost] {
+        sshConfigHosts
+    }
+
+    /// A minimal tunnel standing in for a config host: name == alias so the
+    /// launcher emits `ssh <alias>` and inherits the user's full ssh config.
+    private func tunnel(forSSHHostAlias alias: String) -> TunnelConfig? {
+        guard let host = sshConfigHosts.first(where: { $0.alias == alias }) else {
+            return nil
+        }
+        return TunnelConfig(
+            name: host.alias,
+            host: host.effectiveHost,
+            user: host.user,
+            sshPort: host.port ?? 22,
+            forwards: []
+        )
+    }
+
+    func openSSHHost(alias: String) {
+        guard let tunnel = tunnel(forSSHHostAlias: alias) else {
+            globalMessage = "SSH host '\(alias)' not found in ~/.ssh/config."
+            return
+        }
+        do {
+            try SSHTerminalLauncher.open(tunnel: tunnel, gateways: [], terminalApp: terminalApp)
+            globalMessage = "Opening ssh \(alias) in \(terminalAppDisplayName)."
+        } catch {
+            globalMessage = "Couldn't open ssh terminal: \(error.localizedDescription)"
+        }
+    }
+
+    func copySSHHostCommand(alias: String) {
+        guard let tunnel = tunnel(forSSHHostAlias: alias) else {
+            globalMessage = "SSH host '\(alias)' not found in ~/.ssh/config."
+            return
+        }
+        let command = SSHTerminalLauncher.interactiveCommand(for: tunnel)
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(command, forType: .string)
+        globalMessage = "Copied ssh \(alias) command."
     }
 
     // MARK: - Two-factor (TOTP) codes
@@ -2519,6 +2576,9 @@ struct MenuBarContent: View {
                                     .shadow(color: Color.black.opacity(0.045), radius: 6, x: 0, y: 3)
                                 }
                             }
+                            if viewModel.showSSHHosts && !viewModel.sshHostEntries.isEmpty {
+                                hostsSection
+                            }
                         }
                         .padding(.horizontal, 12)
                         .padding(.vertical, 10)
@@ -2570,10 +2630,14 @@ struct MenuBarContent: View {
 
         let profileChipsHeight: CGFloat = viewModel.profiles.isEmpty ? 0 : 40
 
+        let hostsHeight: CGFloat = (viewModel.showSSHHosts && !viewModel.sshHostEntries.isEmpty)
+            ? 32 + CGFloat(viewModel.sshHostEntries.count) * 48 + CGFloat(max(viewModel.sshHostEntries.count - 1, 0)) + 10
+            : 0
+
         // Footer is a single row now.
         let headerAndFooterChrome: CGFloat = 134
         let emptyStateHeight: CGFloat = viewModel.tunnels.isEmpty ? 70 : 0
-        return headerAndFooterChrome + profileChipsHeight + gatewaysHeight + listHeight + emptyStateHeight
+        return headerAndFooterChrome + profileChipsHeight + gatewaysHeight + listHeight + hostsHeight + emptyStateHeight
     }
 
     private var header: some View {
@@ -2643,11 +2707,14 @@ struct MenuBarContent: View {
                     get: { viewModel.keepRunningAfterQuit },
                     set: { viewModel.keepRunningAfterQuit = $0 }
                 ))
+                Toggle("Show SSH Hosts (~/.ssh/config)", isOn: Binding(
+                    get: { viewModel.showSSHHosts },
+                    set: { viewModel.showSSHHosts = $0 }
+                ))
                 Menu("Open SSH In: \(viewModel.terminalAppDisplayName)") {
-                    Button("Auto") { viewModel.setTerminalApp("auto") }
+                    Button("System Default") { viewModel.setTerminalApp("auto") }
                     Button("iTerm2") { viewModel.setTerminalApp("iterm") }
                     Button("Terminal") { viewModel.setTerminalApp("terminal") }
-                    Button("Default App") { viewModel.setTerminalApp("default") }
                 }
                 Menu("2FA Unlock: \(viewModel.twoFactorUnlockCacheDisplayName)") {
                     ForEach(MenuBarViewModel.twoFactorUnlockCacheOptions, id: \.seconds) { option in
@@ -2806,6 +2873,55 @@ struct MenuBarContent: View {
         }
     }
 
+    private var hostsSection: some View {
+        VStack(alignment: .leading, spacing: 5) {
+            HStack(spacing: 8) {
+                Image(systemName: "terminal")
+                    .font(.system(size: 8, weight: .semibold))
+                    .foregroundStyle(.secondary.opacity(0.64))
+                    .frame(width: 17, height: 17)
+                    .background(
+                        RoundedRectangle(cornerRadius: 6, style: .continuous)
+                            .fill(Color.secondary.opacity(0.055))
+                    )
+                Text(verbatim: "SSH Hosts")
+                    .font(.system(size: 10, weight: .bold))
+                    .tracking(0.15)
+                    .foregroundStyle(Color.secondary.opacity(0.62))
+                Text(verbatim: "from ~/.ssh/config")
+                    .font(.system(size: 9))
+                    .foregroundStyle(Color.secondary.opacity(0.45))
+                Spacer(minLength: 4)
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 1)
+
+            VStack(alignment: .leading, spacing: 0) {
+                ForEach(Array(viewModel.sshHostEntries.enumerated()), id: \.element.alias) { index, host in
+                    if index > 0 {
+                        Divider()
+                            .opacity(0.34)
+                            .padding(.leading, 42)
+                    }
+                    SSHHostRow(
+                        host: host,
+                        onOpen: { viewModel.openSSHHost(alias: host.alias) },
+                        onCopy: { viewModel.copySSHHostCommand(alias: host.alias) }
+                    )
+                }
+            }
+            .background(
+                RoundedRectangle(cornerRadius: 16, style: .continuous)
+                    .fill(Color(nsColor: .controlBackgroundColor).opacity(0.54))
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 16, style: .continuous)
+                    .stroke(Color.primary.opacity(0.06), lineWidth: 1)
+            )
+            .shadow(color: Color.black.opacity(0.045), radius: 6, x: 0, y: 3)
+        }
+    }
+
     private var importCandidatesBinding: Binding<[SSHConfigImportCandidate]> {
         Binding(
             get: { viewModel.importCandidates ?? [] },
@@ -2837,6 +2953,61 @@ struct MenuBarContent: View {
         }
 
         return groups
+    }
+}
+
+/// A plain ssh login target from ~/.ssh/config — no forwards, no supervision.
+/// Whole-row click opens the session; the menu also offers copy.
+private struct SSHHostRow: View {
+    let host: SSHConfigHost
+    let onOpen: () -> Void
+    let onCopy: () -> Void
+
+    @State private var hovering = false
+
+    private var subtitle: String {
+        var text = host.user.map { "\($0)@\(host.effectiveHost)" } ?? host.effectiveHost
+        if let port = host.port, port != 22 {
+            text += ":\(port)"
+        }
+        return text
+    }
+
+    var body: some View {
+        Button(action: onOpen) {
+            HStack(spacing: 12) {
+                Image(systemName: "terminal")
+                    .font(.system(size: 12))
+                    .foregroundStyle(.secondary.opacity(0.7))
+                    .frame(width: 22)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(host.alias)
+                        .font(.system(size: 13, weight: .semibold))
+                        .lineLimit(1)
+                    Text(subtitle)
+                        .font(.system(size: 10, design: .monospaced))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                }
+                Spacer(minLength: 8)
+                if hovering {
+                    Image(systemName: "arrow.up.forward.app")
+                        .font(.system(size: 11))
+                        .foregroundStyle(Color.burrowAccent)
+                }
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 9)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .help("Open ssh \(host.alias) in a terminal")
+        .onHover { hovering = $0 }
+        .contextMenu {
+            Button("Open SSH in Terminal", action: onOpen)
+            Button("Copy SSH Command", action: onCopy)
+        }
     }
 }
 

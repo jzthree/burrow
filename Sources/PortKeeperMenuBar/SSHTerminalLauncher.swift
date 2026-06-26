@@ -228,11 +228,11 @@ enum SSHTerminalLauncher {
             return openScriptInApp(scriptURL, candidates: iTermCandidates)
         case "terminal":
             return openScriptInApp(scriptURL, candidates: terminalCandidates)
-        case "default":
-            return false
         default:
-            return openScriptInApp(scriptURL, candidates: iTermCandidates)
-                || openScriptInApp(scriptURL, candidates: terminalCandidates)
+            // "auto": defer to whatever app macOS uses to open .command files
+            // (the user's effective default terminal). Returning false lets the
+            // caller's NSWorkspace.open(scriptURL) use that default handler.
+            return false
         }
     }
 
