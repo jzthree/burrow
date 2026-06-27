@@ -685,6 +685,33 @@ private func waitUntil(timeout: TimeInterval, condition: @escaping @Sendable () 
     #expect(result == .unknown)
 }
 
+@Test func sshConfigWriterAppendsHostAndRejectsDuplicates() async throws {
+    let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+    try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+    let configURL = dir.appendingPathComponent("config")
+    try "Host existing\n    HostName old.example.com\n".write(to: configURL, atomically: true, encoding: .utf8)
+
+    let entry = SSHConfigWriter.HostEntry(alias: "lab-gpu", hostName: "gpu.lab.edu", user: "alice", port: 2200)
+    try SSHConfigWriter.appendHost(entry, to: configURL)
+
+    let parsed = SSHConfigParser.parse(fileAt: configURL)
+    let added = try #require(parsed.first { $0.alias == "lab-gpu" })
+    #expect(added.effectiveHost == "gpu.lab.edu")
+    #expect(added.user == "alice")
+    #expect(added.port == 2200)
+    // The pre-existing entry is preserved (append-only).
+    #expect(parsed.contains { $0.alias == "existing" })
+
+    // Duplicate alias is rejected.
+    #expect(throws: SSHConfigWriter.WriteError.self) {
+        try SSHConfigWriter.appendHost(entry, to: configURL)
+    }
+    // Empty/whitespace fields are rejected.
+    #expect(throws: SSHConfigWriter.WriteError.self) {
+        try SSHConfigWriter.appendHost(SSHConfigWriter.HostEntry(alias: "x", hostName: ""), to: configURL)
+    }
+}
+
 @Test func boundedCanConnectDetectsOpenAndClosedPorts() async throws {
     let listener = try TCPTestServer()
     defer { listener.stop() }

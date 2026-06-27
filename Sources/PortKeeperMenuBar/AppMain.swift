@@ -146,7 +146,7 @@ final class MenuBarViewModel: ObservableObject {
         }
     }
 
-    private(set) var sshConfigHosts: [SSHConfigHost] = []
+    @Published private(set) var sshConfigHosts: [SSHConfigHost] = []
 
     private let notifier = BurrowNotifier()
     private var serviceProbeTask: Task<Void, Never>?
@@ -915,6 +915,22 @@ final class MenuBarViewModel: ObservableObject {
             sshPort: host.port ?? 22,
             forwards: []
         )
+    }
+
+    /// Prompts for a new login host and appends it to ~/.ssh/config, then
+    /// refreshes the Hosts list and expands the section so it's visible.
+    func createSSHHost() {
+        guard let entry = SSHHostPrompt.request() else {
+            return
+        }
+        do {
+            try SSHConfigWriter.appendHost(entry)
+            sshConfigHosts = SSHConfigParser.parse()
+            toggledSections.insert("hosts")  // default-collapsed → expand to show it
+            globalMessage = "Added SSH host \(entry.alias) to ~/.ssh/config."
+        } catch {
+            globalMessage = "Couldn't add SSH host: \(error.localizedDescription)"
+        }
     }
 
     func openSSHHost(alias: String) {
@@ -2778,23 +2794,34 @@ struct MenuBarContent: View {
 
             Spacer()
 
-            Button {
-                viewModel.createGateway()
+            Menu {
+                Button {
+                    viewModel.createTunnel()
+                } label: {
+                    Label("New SSH Tunnel", systemImage: "arrow.left.arrow.right")
+                }
+                Button {
+                    viewModel.createGateway()
+                } label: {
+                    Label("New VPN Gateway", systemImage: "lock.shield")
+                }
+                Button {
+                    viewModel.createSSHHost()
+                } label: {
+                    Label("New SSH Host…", systemImage: "terminal")
+                }
+                Button {
+                    viewModel.createProfile()
+                } label: {
+                    Label("New Profile", systemImage: "square.stack")
+                }
             } label: {
-                Label("New VPN", systemImage: "lock.shield")
+                Label("New", systemImage: "plus")
             }
-            Button {
-                viewModel.createProfile()
-            } label: {
-                Label("New Profile", systemImage: "square.stack")
-            }
-            Button {
-                viewModel.createTunnel()
-            } label: {
-                Label("New Tunnel", systemImage: "plus")
-            }
+            .menuStyle(.button)
             .buttonStyle(.borderedProminent)
             .tint(.burrowPrimaryButton)
+            .fixedSize()
         }
         .controlSize(.small)
     }

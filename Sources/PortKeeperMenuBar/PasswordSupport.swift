@@ -324,6 +324,58 @@ enum PasswordPrompt {
     }
 }
 
+enum SSHHostPrompt {
+    @MainActor
+    static func request() -> SSHConfigWriter.HostEntry? {
+        let alert = NSAlert()
+        alert.messageText = "New SSH Host"
+        alert.informativeText = "Adds a Host entry to your ~/.ssh/config so you can open it from Burrow and from any terminal. Burrow only appends; it won't change your existing config."
+
+        let width: CGFloat = 360
+        let container = NSStackView(frame: NSRect(x: 0, y: 0, width: width, height: 116))
+        container.orientation = .vertical
+        container.alignment = .leading
+        container.spacing = 6
+
+        let aliasField = NSTextField(frame: NSRect(x: 0, y: 0, width: width, height: 24))
+        aliasField.placeholderString = "Name / alias (e.g. lab-gpu)"
+        let hostField = NSTextField(frame: NSRect(x: 0, y: 0, width: width, height: 24))
+        hostField.placeholderString = "Host address (e.g. gpu.lab.edu or 10.0.0.5)"
+        let userField = NSTextField(frame: NSRect(x: 0, y: 0, width: width, height: 24))
+        userField.placeholderString = "User (optional)"
+        let portField = NSTextField(frame: NSRect(x: 0, y: 0, width: width, height: 24))
+        portField.placeholderString = "Port (optional, default 22)"
+
+        for field in [aliasField, hostField, userField, portField] {
+            field.translatesAutoresizingMaskIntoConstraints = false
+            field.widthAnchor.constraint(equalToConstant: width).isActive = true
+            container.addArrangedSubview(field)
+        }
+        alert.accessoryView = container
+        alert.window.initialFirstResponder = aliasField
+
+        alert.addButton(withTitle: "Add to ~/.ssh/config")
+        alert.addButton(withTitle: "Cancel")
+
+        guard alert.runModal() == .alertFirstButtonReturn else {
+            return nil
+        }
+        let alias = aliasField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        let host = hostField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        let user = userField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        let port = Int(portField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines))
+        guard !alias.isEmpty, !host.isEmpty else {
+            return nil
+        }
+        return SSHConfigWriter.HostEntry(
+            alias: alias,
+            hostName: host,
+            user: user.isEmpty ? nil : user,
+            port: port
+        )
+    }
+}
+
 enum AskPassSupport {
     static func environment(password: String) throws -> [String: String] {
         let scriptURL = try askPassScriptURL()
