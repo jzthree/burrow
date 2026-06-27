@@ -146,6 +146,14 @@ final class MenuBarViewModel: ObservableObject {
         }
     }
 
+    /// SSH host aliases hidden from the menu without touching ~/.ssh/config.
+    @Published var hiddenSSHHosts: Set<String> {
+        didSet {
+            UserDefaults.standard.set(Array(hiddenSSHHosts), forKey: Self.hiddenSSHHostsKey)
+        }
+    }
+    private static let hiddenSSHHostsKey = "hiddenSSHHosts"
+
     @Published private(set) var sshConfigHosts: [SSHConfigHost] = []
 
     private let notifier = BurrowNotifier()
@@ -185,6 +193,7 @@ final class MenuBarViewModel: ObservableObject {
     init() {
         keepRunningAfterQuit = UserDefaults.standard.bool(forKey: Self.keepRunningKey)
         toggledSections = Set(UserDefaults.standard.stringArray(forKey: Self.toggledSectionsKey) ?? [])
+        hiddenSSHHosts = Set(UserDefaults.standard.stringArray(forKey: Self.hiddenSSHHostsKey) ?? [])
         loadConfig()
         adoptSurvivingGatewaySessions()
         sshConfigHosts = SSHConfigParser.parse()
@@ -897,9 +906,44 @@ final class MenuBarViewModel: ObservableObject {
     // MARK: - SSH hosts (~/.ssh/config login targets)
 
     /// Concrete login hosts from ~/.ssh/config (wildcards already excluded by
-    /// the parser), surfaced as quick `ssh` targets when showSSHHosts is on.
+    /// the parser), minus any the user has hidden.
     var sshHostEntries: [SSHConfigHost] {
-        sshConfigHosts
+        sshConfigHosts.filter { !hiddenSSHHosts.contains($0.alias) }
+    }
+
+    /// Hidden hosts that still exist in the config, for the "unhide" menu.
+    var hiddenSSHHostEntries: [SSHConfigHost] {
+        sshConfigHosts.filter { hiddenSSHHosts.contains($0.alias) }
+    }
+
+    func hideSSHHost(alias: String) {
+        hiddenSSHHosts.insert(alias)
+        globalMessage = "Hid \(alias). Unhide it from the SSH Hosts header."
+    }
+
+    func unhideSSHHost(alias: String) {
+        hiddenSSHHosts.remove(alias)
+    }
+
+    /// Confirms, then removes the host from ~/.ssh/config and refreshes.
+    func removeSSHHost(alias: String) {
+        let alert = NSAlert()
+        alert.messageText = "Remove “\(alias)” from ~/.ssh/config?"
+        alert.informativeText = "This edits your SSH config file and can't be undone from Burrow. To keep the entry but hide it from this menu, choose Hide instead."
+        alert.alertStyle = .warning
+        alert.addButton(withTitle: "Remove")
+        alert.addButton(withTitle: "Cancel")
+        guard alert.runModal() == .alertFirstButtonReturn else {
+            return
+        }
+        do {
+            try SSHConfigWriter.removeHost(alias: alias)
+            hiddenSSHHosts.remove(alias)
+            sshConfigHosts = SSHConfigParser.parse()
+            globalMessage = "Removed \(alias) from ~/.ssh/config."
+        } catch {
+            globalMessage = "Couldn't remove \(alias): \(error.localizedDescription)"
+        }
     }
 
     /// A minimal tunnel standing in for a config host: name == alias so the
@@ -2611,7 +2655,7 @@ struct MenuBarContent: View {
                                     }
                                 }
                             }
-                            if !viewModel.sshHostEntries.isEmpty {
+                            if !viewModel.sshConfigHosts.isEmpty {
                                 hostsSection
                             }
                         }
@@ -2669,12 +2713,13 @@ struct MenuBarContent: View {
         let profileChipsHeight: CGFloat = viewModel.profiles.isEmpty ? 0 : 40
 
         let hostsHeight: CGFloat
-        if viewModel.sshHostEntries.isEmpty {
+        let visibleHosts = viewModel.sshHostEntries.count
+        if viewModel.sshConfigHosts.isEmpty {
             hostsHeight = 0
-        } else if viewModel.isSectionExpanded("hosts", defaultExpanded: false) {
-            hostsHeight = 32 + CGFloat(viewModel.sshHostEntries.count) * 48 + CGFloat(max(viewModel.sshHostEntries.count - 1, 0)) + 10
+        } else if viewModel.isSectionExpanded("hosts", defaultExpanded: false) && visibleHosts > 0 {
+            hostsHeight = 32 + CGFloat(visibleHosts) * 48 + CGFloat(max(visibleHosts - 1, 0)) + 10
         } else {
-            hostsHeight = 32 // collapsed: header only
+            hostsHeight = 32 // collapsed or all-hidden: header only
         }
 
         // Footer is a single row now.
@@ -2926,30 +2971,47 @@ struct MenuBarContent: View {
     private var hostsSection: some View {
         // Collapsed by default — a quiet drawer of ssh-config login targets.
         let expanded = viewModel.isSectionExpanded("hosts", defaultExpanded: false)
+        let hidden = viewModel.hiddenSSHHostEntries
         return VStack(alignment: .leading, spacing: 5) {
-            Button {
-                viewModel.toggleSection("hosts")
-            } label: {
-                HStack(spacing: 8) {
-                    Image(systemName: "chevron.right")
-                        .font(.system(size: 9, weight: .bold))
-                        .foregroundStyle(.secondary.opacity(0.6))
-                        .rotationEffect(.degrees(expanded ? 90 : 0))
-                        .frame(width: 14, height: 17)
-                    Text(verbatim: "SSH Hosts")
-                        .font(.system(size: 10, weight: .bold))
-                        .tracking(0.15)
-                        .foregroundStyle(Color.secondary.opacity(0.62))
-                    Text(verbatim: "\(viewModel.sshHostEntries.count) · ~/.ssh/config")
-                        .font(.system(size: 9))
-                        .foregroundStyle(Color.secondary.opacity(0.45))
-                    Spacer(minLength: 4)
+            HStack(spacing: 8) {
+                Button {
+                    viewModel.toggleSection("hosts")
+                } label: {
+                    HStack(spacing: 8) {
+                        Image(systemName: "chevron.right")
+                            .font(.system(size: 9, weight: .bold))
+                            .foregroundStyle(.secondary.opacity(0.6))
+                            .rotationEffect(.degrees(expanded ? 90 : 0))
+                            .frame(width: 14, height: 17)
+                        Text(verbatim: "SSH Hosts")
+                            .font(.system(size: 10, weight: .bold))
+                            .tracking(0.15)
+                            .foregroundStyle(Color.secondary.opacity(0.62))
+                        Text(verbatim: "\(viewModel.sshHostEntries.count) · ~/.ssh/config")
+                            .font(.system(size: 9))
+                            .foregroundStyle(Color.secondary.opacity(0.45))
+                    }
+                    .contentShape(Rectangle())
                 }
-                .padding(.horizontal, 12)
-                .padding(.vertical, 1)
-                .contentShape(Rectangle())
+                .buttonStyle(.plain)
+                Spacer(minLength: 4)
+                if !hidden.isEmpty {
+                    Menu {
+                        ForEach(hidden, id: \.alias) { host in
+                            Button("Show \(host.alias)") { viewModel.unhideSSHHost(alias: host.alias) }
+                        }
+                    } label: {
+                        Text(verbatim: "\(hidden.count) hidden")
+                            .font(.system(size: 9, weight: .semibold))
+                            .foregroundStyle(Color.secondary.opacity(0.6))
+                    }
+                    .menuStyle(.borderlessButton)
+                    .fixedSize()
+                    .help("Show hidden SSH hosts")
+                }
             }
-            .buttonStyle(.plain)
+            .padding(.horizontal, 12)
+            .padding(.vertical, 1)
 
             if expanded {
                 VStack(alignment: .leading, spacing: 0) {
@@ -2962,7 +3024,9 @@ struct MenuBarContent: View {
                         SSHHostRow(
                             host: host,
                             onOpen: { viewModel.openSSHHost(alias: host.alias) },
-                            onCopy: { viewModel.copySSHHostCommand(alias: host.alias) }
+                            onCopy: { viewModel.copySSHHostCommand(alias: host.alias) },
+                            onHide: { viewModel.hideSSHHost(alias: host.alias) },
+                            onRemove: { viewModel.removeSSHHost(alias: host.alias) }
                         )
                     }
                 }
@@ -3019,6 +3083,8 @@ private struct SSHHostRow: View {
     let host: SSHConfigHost
     let onOpen: () -> Void
     let onCopy: () -> Void
+    let onHide: () -> Void
+    let onRemove: () -> Void
 
     @State private var hovering = false
 
@@ -3064,6 +3130,9 @@ private struct SSHHostRow: View {
         .contextMenu {
             Button("Open SSH in Terminal", action: onOpen)
             Button("Copy SSH Command", action: onCopy)
+            Divider()
+            Button("Hide from Menu", action: onHide)
+            Button("Remove from ~/.ssh/config…", role: .destructive, action: onRemove)
         }
     }
 }

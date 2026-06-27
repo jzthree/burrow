@@ -712,6 +712,48 @@ private func waitUntil(timeout: TimeInterval, condition: @escaping @Sendable () 
     }
 }
 
+@Test func sshConfigWriterRemovesHostSurgically() async throws {
+    let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+    try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+    let configURL = dir.appendingPathComponent("config")
+    let original = """
+    Host keep
+        HostName keep.example.com
+
+    # Added by Burrow
+    Host burrowadded
+        HostName gpu.lab.edu
+        User alice
+
+    Host shared other
+        HostName shared.example.com
+        User bob
+    """
+    try original.write(to: configURL, atomically: true, encoding: .utf8)
+
+    // Whole-stanza removal of a Burrow-added single-alias host (+ its marker).
+    try SSHConfigWriter.removeHost(alias: "burrowadded", from: configURL)
+    var parsed = SSHConfigParser.parse(fileAt: configURL)
+    #expect(!parsed.contains { $0.alias == "burrowadded" })
+    #expect(parsed.contains { $0.alias == "keep" })
+    let text = try String(contentsOf: configURL, encoding: .utf8)
+    #expect(!text.contains("# Added by Burrow"))
+    #expect(!text.contains("gpu.lab.edu"))
+
+    // Multi-alias stanza: removing one token keeps the other with its settings.
+    try SSHConfigWriter.removeHost(alias: "shared", from: configURL)
+    parsed = SSHConfigParser.parse(fileAt: configURL)
+    #expect(!parsed.contains { $0.alias == "shared" })
+    let other = try #require(parsed.first { $0.alias == "other" })
+    #expect(other.effectiveHost == "shared.example.com")
+    #expect(other.user == "bob")
+
+    // Unknown alias throws.
+    #expect(throws: SSHConfigWriter.WriteError.self) {
+        try SSHConfigWriter.removeHost(alias: "nope", from: configURL)
+    }
+}
+
 @Test func boundedCanConnectDetectsOpenAndClosedPorts() async throws {
     let listener = try TCPTestServer()
     defer { listener.stop() }
