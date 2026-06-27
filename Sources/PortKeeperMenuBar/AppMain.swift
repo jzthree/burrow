@@ -154,6 +154,17 @@ final class MenuBarViewModel: ObservableObject {
     }
     private static let hiddenSSHHostsKey = "hiddenSSHHosts"
 
+    /// SSH host aliases the user asked Burrow to keep warm (background master,
+    /// re-warmed at launch). Persisted intent.
+    @Published var keepWarmHosts: Set<String> {
+        didSet {
+            UserDefaults.standard.set(Array(keepWarmHosts), forKey: Self.keepWarmHostsKey)
+        }
+    }
+    private static let keepWarmHostsKey = "keepWarmHosts"
+    /// Aliases whose master connection is currently live (runtime status).
+    @Published private(set) var warmHosts: Set<String> = []
+
     @Published private(set) var sshConfigHosts: [SSHConfigHost] = []
 
     private let notifier = BurrowNotifier()
@@ -194,6 +205,7 @@ final class MenuBarViewModel: ObservableObject {
         keepRunningAfterQuit = UserDefaults.standard.bool(forKey: Self.keepRunningKey)
         toggledSections = Set(UserDefaults.standard.stringArray(forKey: Self.toggledSectionsKey) ?? [])
         hiddenSSHHosts = Set(UserDefaults.standard.stringArray(forKey: Self.hiddenSSHHostsKey) ?? [])
+        keepWarmHosts = Set(UserDefaults.standard.stringArray(forKey: Self.keepWarmHostsKey) ?? [])
         loadConfig()
         adoptSurvivingGatewaySessions()
         sshConfigHosts = SSHConfigParser.parse()
@@ -202,6 +214,12 @@ final class MenuBarViewModel: ObservableObject {
         Task { @MainActor [weak self] in
             try? await Task.sleep(for: .milliseconds(250))
             self?.startEnabledTunnelsIfNeeded()
+        }
+        // Re-warm kept-warm hosts shortly after launch (2FA hosts surface
+        // Touch ID then, per the chosen "prompt at launch" behavior).
+        Task { @MainActor [weak self] in
+            try? await Task.sleep(for: .seconds(2))
+            self?.warmKeptHostsAtLaunch()
         }
         NotificationCenter.default.addObserver(
             forName: .portKeeperDidFinishLaunching,
@@ -321,6 +339,7 @@ final class MenuBarViewModel: ObservableObject {
         }
 
         await probeGatewayHealth()
+        await refreshWarmStatus()
 
         let targets: [(name: String, host: String, port: Int)] = tunnels.compactMap { state in
             guard state.connectionState == .connected,
@@ -939,10 +958,105 @@ final class MenuBarViewModel: ObservableObject {
         do {
             try SSHConfigWriter.removeHost(alias: alias)
             hiddenSSHHosts.remove(alias)
+            keepWarmHosts.remove(alias)
+            warmHosts.remove(alias)
             sshConfigHosts = SSHConfigParser.parse()
             globalMessage = "Removed \(alias) from ~/.ssh/config."
         } catch {
             globalMessage = "Couldn't remove \(alias): \(error.localizedDescription)"
+        }
+    }
+
+    // MARK: - Keep warm (background SSH master sessions)
+
+    func isHostWarm(_ alias: String) -> Bool { warmHosts.contains(alias) }
+    func isHostKeptWarm(_ alias: String) -> Bool { keepWarmHosts.contains(alias) }
+
+    func toggleKeepWarm(alias: String) {
+        if keepWarmHosts.contains(alias) {
+            keepWarmHosts.remove(alias)
+            coolHost(alias: alias)
+            globalMessage = "Stopped keeping \(alias) warm."
+        } else {
+            keepWarmHosts.insert(alias)
+            warmHost(alias: alias)
+        }
+    }
+
+    /// Establishes (or refreshes) the background master for a host, answering a
+    /// saved password and/or generated 2FA code. 2FA generation presents Touch
+    /// ID, so this is the "prompt" path used both on demand and at launch.
+    func warmHost(alias: String) {
+        guard let tunnel = tunnel(forSSHHostAlias: alias) else { return }
+        let account = linkedTwoFactorAccount(for: tunnel)
+        let savedPassword: String? = {
+            guard let key = TunnelCredentialKey(tunnel: tunnel) else { return nil }
+            return (try? passwordStore.password(for: key)) ?? nil
+        }()
+        globalMessage = "Warming \(alias)…"
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            var otp: String?
+            if let account {
+                do {
+                    otp = try await self.twoFactorStore.currentCode(
+                        for: account,
+                        reason: "Keep \(alias) warm with the \(account.name) 2FA code",
+                        at: Date(),
+                        unlockCacheSeconds: self.twoFactorUnlockCacheSeconds
+                    )
+                } catch let error as TwoFactorStoreError {
+                    if case .cancelled = error { return }
+                    self.globalMessage = error.localizedDescription
+                    return
+                } catch {
+                    self.globalMessage = error.localizedDescription
+                    return
+                }
+            }
+            let environment = (savedPassword != nil || otp != nil)
+                ? try? AskPassSupport.warmEnvironment(password: savedPassword, otpCode: otp)
+                : nil
+            let ok = await Task.detached { SSHHostWarmer.warm(alias: alias, environment: environment) }.value
+            if ok {
+                self.warmHosts.insert(alias)
+                self.globalMessage = "\(alias) is warm — terminals open instantly."
+            } else {
+                self.warmHosts.remove(alias)
+                self.globalMessage = "Couldn't warm \(alias) (check credentials / 2FA, or add ControlPersist)."
+            }
+        }
+    }
+
+    func coolHost(alias: String) {
+        warmHosts.remove(alias)
+        Task.detached { SSHHostWarmer.cool(alias: alias) }
+    }
+
+    /// Refreshes which kept-warm hosts still have a live master (ssh -O check).
+    private func refreshWarmStatus() async {
+        let aliases = Array(keepWarmHosts)
+        guard !aliases.isEmpty else {
+            if !warmHosts.isEmpty { warmHosts = [] }
+            return
+        }
+        let live = await Task.detached { () -> Set<String> in
+            var live = Set<String>()
+            for alias in aliases where SSHHostWarmer.isWarm(alias: alias) {
+                live.insert(alias)
+            }
+            return live
+        }.value
+        if live != warmHosts {
+            warmHosts = live
+        }
+    }
+
+    /// Re-warm kept-warm hosts at launch. 2FA hosts surface Touch ID here
+    /// ("prompt at launch", per the chosen behavior).
+    func warmKeptHostsAtLaunch() {
+        for alias in keepWarmHosts {
+            warmHost(alias: alias)
         }
     }
 
@@ -3023,8 +3137,11 @@ struct MenuBarContent: View {
                         }
                         SSHHostRow(
                             host: host,
+                            isWarm: viewModel.isHostWarm(host.alias),
+                            isKeptWarm: viewModel.isHostKeptWarm(host.alias),
                             onOpen: { viewModel.openSSHHost(alias: host.alias) },
                             onCopy: { viewModel.copySSHHostCommand(alias: host.alias) },
+                            onToggleKeepWarm: { viewModel.toggleKeepWarm(alias: host.alias) },
                             onHide: { viewModel.hideSSHHost(alias: host.alias) },
                             onRemove: { viewModel.removeSSHHost(alias: host.alias) }
                         )
@@ -3081,8 +3198,11 @@ struct MenuBarContent: View {
 /// Whole-row click opens the session; the menu also offers copy.
 private struct SSHHostRow: View {
     let host: SSHConfigHost
+    let isWarm: Bool
+    let isKeptWarm: Bool
     let onOpen: () -> Void
     let onCopy: () -> Void
+    let onToggleKeepWarm: () -> Void
     let onHide: () -> Void
     let onRemove: () -> Void
 
@@ -3099,10 +3219,18 @@ private struct SSHHostRow: View {
     var body: some View {
         Button(action: onOpen) {
             HStack(spacing: 12) {
-                Image(systemName: "terminal")
-                    .font(.system(size: 12))
-                    .foregroundStyle(.secondary.opacity(0.7))
-                    .frame(width: 22)
+                ZStack {
+                    Image(systemName: "terminal")
+                        .font(.system(size: 12))
+                        .foregroundStyle(.secondary.opacity(0.7))
+                    if isKeptWarm {
+                        Circle()
+                            .fill(isWarm ? Color.green : Color.secondary.opacity(0.4))
+                            .frame(width: 6, height: 6)
+                            .offset(x: 8, y: -7)
+                    }
+                }
+                .frame(width: 22)
                 VStack(alignment: .leading, spacing: 1) {
                     Text(host.alias)
                         .font(.system(size: 13, weight: .semibold))
@@ -3114,7 +3242,11 @@ private struct SSHHostRow: View {
                         .truncationMode(.middle)
                 }
                 Spacer(minLength: 8)
-                if hovering {
+                if isKeptWarm {
+                    Text(isWarm ? "warm" : "cold")
+                        .font(.system(size: 9, weight: .semibold))
+                        .foregroundStyle(isWarm ? Color.green : Color.secondary.opacity(0.6))
+                } else if hovering {
                     Image(systemName: "arrow.up.forward.app")
                         .font(.system(size: 11))
                         .foregroundStyle(Color.burrowAccent)
@@ -3131,6 +3263,7 @@ private struct SSHHostRow: View {
             Button("Open SSH in Terminal", action: onOpen)
             Button("Copy SSH Command", action: onCopy)
             Divider()
+            Button(isKeptWarm ? "Stop Keeping Warm" : "Keep Warm", action: onToggleKeepWarm)
             Button("Hide from Menu", action: onHide)
             Button("Remove from ~/.ssh/config…", role: .destructive, action: onRemove)
         }

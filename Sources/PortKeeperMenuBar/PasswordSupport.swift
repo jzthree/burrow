@@ -392,13 +392,24 @@ enum AskPassSupport {
         ]
     }
 
-    private static func askPassScriptURL() throws -> URL {
-        let baseURL = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-            .appendingPathComponent("Burrow", isDirectory: true)
-            .appendingPathComponent("bin", isDirectory: true)
-        try FileManager.default.createDirectory(at: baseURL, withIntermediateDirectories: true)
+    /// Askpass env for warming a host: answers password prompts with `password`
+    /// (if any) and 2FA / one-time-code prompts with `otpCode`. Used for the
+    /// no-tty `ssh -fN` warm connection, where SSH_ASKPASS_REQUIRE=force routes
+    /// keyboard-interactive prompts through the helper.
+    static func warmEnvironment(password: String?, otpCode: String?) throws -> [String: String] {
+        let scriptURL = try promptAwareScriptURL()
+        var env: [String: String] = [
+            "SSH_ASKPASS": scriptURL.path,
+            "SSH_ASKPASS_REQUIRE": "force",
+            "DISPLAY": "burrow",
+        ]
+        if let password { env["BURROW_PASSWORD"] = password }
+        if let otpCode { env["BURROW_OTP_CODE"] = otpCode }
+        return env
+    }
 
-        let scriptURL = baseURL.appendingPathComponent("askpass.sh")
+    private static func askPassScriptURL() throws -> URL {
+        let scriptURL = try binDirectory().appendingPathComponent("askpass.sh")
         let contents = """
         #!/bin/sh
         LOG_PATH="${BURROW_ASKPASS_LOG:-$PORTKEEPER_ASKPASS_LOG}"
@@ -408,10 +419,37 @@ enum AskPassSupport {
         fi
         printf '%s\\n' "$PASSWORD"
         """
-
         try contents.write(to: scriptURL, atomically: true, encoding: .utf8)
         try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: scriptURL.path)
-
         return scriptURL
+    }
+
+    private static func promptAwareScriptURL() throws -> URL {
+        let scriptURL = try binDirectory().appendingPathComponent("askpass-warm.sh")
+        // $1 is the prompt text. Code-ish prompts get the OTP; everything else
+        // gets the password. Falls back to the other value if one is empty.
+        let contents = """
+        #!/bin/sh
+        prompt=$(printf '%s' "$1" | tr 'A-Z' 'a-z')
+        case "$prompt" in
+          *verification*code*|*one-time*|*one\\ time*|*token*|*passcode*|*otp*|*duo*|*authenticator*|*2fa*)
+            if [ -n "$BURROW_OTP_CODE" ]; then printf '%s\\n' "$BURROW_OTP_CODE"; else printf '%s\\n' "$BURROW_PASSWORD"; fi
+            ;;
+          *)
+            if [ -n "$BURROW_PASSWORD" ]; then printf '%s\\n' "$BURROW_PASSWORD"; else printf '%s\\n' "$BURROW_OTP_CODE"; fi
+            ;;
+        esac
+        """
+        try contents.write(to: scriptURL, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: scriptURL.path)
+        return scriptURL
+    }
+
+    private static func binDirectory() throws -> URL {
+        let baseURL = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("Burrow", isDirectory: true)
+            .appendingPathComponent("bin", isDirectory: true)
+        try FileManager.default.createDirectory(at: baseURL, withIntermediateDirectories: true)
+        return baseURL
     }
 }
