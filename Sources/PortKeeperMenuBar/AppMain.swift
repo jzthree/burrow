@@ -3123,6 +3123,20 @@ struct MenuBarContent: View {
                     .fixedSize()
                     .help("Show hidden SSH hosts")
                 }
+                Button {
+                    viewModel.createSSHHost()
+                } label: {
+                    Image(systemName: "plus")
+                        .font(.system(size: 9, weight: .bold))
+                        .foregroundStyle(.secondary.opacity(0.7))
+                        .frame(width: 17, height: 17)
+                        .background(
+                            RoundedRectangle(cornerRadius: 6, style: .continuous)
+                                .fill(Color.secondary.opacity(0.055))
+                        )
+                }
+                .buttonStyle(.plain)
+                .help("Add an SSH host to ~/.ssh/config")
             }
             .padding(.horizontal, 12)
             .padding(.vertical, 1)
@@ -3216,57 +3230,91 @@ private struct SSHHostRow: View {
         return text
     }
 
+    private var flameIcon: String { isKeptWarm ? "flame.fill" : "flame" }
+    private var flameColor: Color {
+        guard isKeptWarm else { return .secondary.opacity(0.55) }
+        return isWarm ? .green : .orange
+    }
+    private var flameHelp: String {
+        guard isKeptWarm else { return "Keep \(host.alias) warm — instant terminals, 2FA once" }
+        return isWarm ? "Warm — terminals open instantly. Click to stop." : "Keeping warm (cold now). Click to stop."
+    }
+
     var body: some View {
-        Button(action: onOpen) {
-            HStack(spacing: 12) {
-                ZStack {
+        HStack(spacing: 8) {
+            // Identity + primary action: open an interactive ssh session.
+            Button(action: onOpen) {
+                HStack(spacing: 11) {
                     Image(systemName: "terminal")
-                        .font(.system(size: 12))
-                        .foregroundStyle(.secondary.opacity(0.7))
-                    if isKeptWarm {
-                        Circle()
-                            .fill(isWarm ? Color.green : Color.secondary.opacity(0.4))
-                            .frame(width: 6, height: 6)
-                            .offset(x: 8, y: -7)
+                        .font(.system(size: 12.5))
+                        .foregroundStyle(.secondary.opacity(0.8))
+                        .frame(width: 24, height: 24)
+                        .background(
+                            RoundedRectangle(cornerRadius: 7, style: .continuous)
+                                .fill(Color.secondary.opacity(0.07))
+                        )
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text(host.alias)
+                            .font(.system(size: 13, weight: .semibold))
+                            .lineLimit(1)
+                        Text(subtitle)
+                            .font(.system(size: 10, design: .monospaced))
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
                     }
+                    Spacer(minLength: 6)
                 }
-                .frame(width: 22)
-                VStack(alignment: .leading, spacing: 1) {
-                    Text(host.alias)
-                        .font(.system(size: 13, weight: .semibold))
-                        .lineLimit(1)
-                    Text(subtitle)
-                        .font(.system(size: 10, design: .monospaced))
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                        .truncationMode(.middle)
-                }
-                Spacer(minLength: 8)
-                if isKeptWarm {
-                    Text(isWarm ? "warm" : "cold")
-                        .font(.system(size: 9, weight: .semibold))
-                        .foregroundStyle(isWarm ? Color.green : Color.secondary.opacity(0.6))
-                } else if hovering {
-                    Image(systemName: "arrow.up.forward.app")
-                        .font(.system(size: 11))
-                        .foregroundStyle(Color.burrowAccent)
-                }
+                .contentShape(Rectangle())
             }
-            .padding(.horizontal, 12)
-            .padding(.vertical, 9)
-            .contentShape(Rectangle())
+            .buttonStyle(.plain)
+            .help("Open ssh \(host.alias) in a terminal")
+
+            // Visible inline actions (no right-click required).
+            Button(action: onToggleKeepWarm) {
+                Image(systemName: flameIcon)
+                    .font(.system(size: 12.5))
+                    .foregroundStyle(flameColor)
+                    .frame(width: 26, height: 26)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .help(flameHelp)
+
+            Button(action: onCopy) {
+                Image(systemName: "doc.on.doc")
+                    .font(.system(size: 11.5))
+                    .foregroundStyle(.secondary.opacity(0.7))
+                    .frame(width: 24, height: 26)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .help("Copy the ssh command")
+            .opacity(hovering ? 1 : 0.35)
+
+            Menu {
+                Button("Open SSH in Terminal", action: onOpen)
+                Button("Copy SSH Command", action: onCopy)
+                Divider()
+                Button(isKeptWarm ? "Stop Keeping Warm" : "Keep Warm", action: onToggleKeepWarm)
+                Button("Hide from Menu", action: onHide)
+                Button("Remove from ~/.ssh/config…", role: .destructive, action: onRemove)
+            } label: {
+                Image(systemName: "ellipsis")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(.secondary.opacity(0.7))
+                    .frame(width: 22, height: 26)
+                    .contentShape(Rectangle())
+            }
+            .menuStyle(.borderlessButton)
+            .menuIndicator(.hidden)
+            .fixedSize()
+            .help("More actions")
         }
-        .buttonStyle(.plain)
-        .help("Open ssh \(host.alias) in a terminal")
+        .padding(.horizontal, 12)
+        .padding(.vertical, 7)
+        .background(hovering ? Color.primary.opacity(0.03) : Color.clear)
         .onHover { hovering = $0 }
-        .contextMenu {
-            Button("Open SSH in Terminal", action: onOpen)
-            Button("Copy SSH Command", action: onCopy)
-            Divider()
-            Button(isKeptWarm ? "Stop Keeping Warm" : "Keep Warm", action: onToggleKeepWarm)
-            Button("Hide from Menu", action: onHide)
-            Button("Remove from ~/.ssh/config…", role: .destructive, action: onRemove)
-        }
     }
 }
 
