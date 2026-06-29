@@ -1,8 +1,8 @@
 import AppKit
 
 /// Template menu-bar icons (auto black/white per menu bar appearance):
-/// a burrow mound on a ground line. The tunnel opening fills in while
-/// any tunnel is running.
+/// the website's "burrow / tunnel mouth" mark — two concentric arches over a
+/// base node. The node fills in while any tunnel is running.
 @MainActor
 enum MenuBarIcon {
     static let idle = make(active: false)
@@ -12,47 +12,34 @@ enum MenuBarIcon {
         let image = NSImage(size: NSSize(width: 18, height: 15), flipped: false) { _ in
             NSColor.black.set()
 
-            let ground = NSBezierPath()
-            ground.move(to: NSPoint(x: 1.2, y: 2.4))
-            ground.line(to: NSPoint(x: 16.8, y: 2.4))
-            ground.lineWidth = 1.5
-            ground.lineCapStyle = .round
-            ground.stroke()
+            let centerX: CGFloat = 9
+            let baseY: CGFloat = 2.9
 
-            let mound = NSBezierPath()
-            mound.move(to: NSPoint(x: 3.2, y: 2.4))
-            mound.curve(
-                to: NSPoint(x: 9, y: 12.2),
-                controlPoint1: NSPoint(x: 3.6, y: 10.2),
-                controlPoint2: NSPoint(x: 5.6, y: 12.2)
-            )
-            mound.curve(
-                to: NSPoint(x: 14.8, y: 2.4),
-                controlPoint1: NSPoint(x: 12.4, y: 12.2),
-                controlPoint2: NSPoint(x: 14.4, y: 10.2)
-            )
-            mound.lineWidth = 1.5
-            mound.lineCapStyle = .round
-            mound.stroke()
+            // Outer tunnel arch (upper semicircle).
+            let outer = NSBezierPath()
+            outer.appendArc(withCenter: NSPoint(x: centerX, y: baseY), radius: 6.6, startAngle: 0, endAngle: 180)
+            outer.lineWidth = 1.5
+            outer.lineCapStyle = .round
+            outer.stroke()
 
-            let opening = NSBezierPath()
-            opening.move(to: NSPoint(x: 6.7, y: 2.4))
-            opening.curve(
-                to: NSPoint(x: 9, y: 7.4),
-                controlPoint1: NSPoint(x: 7.0, y: 5.8),
-                controlPoint2: NSPoint(x: 7.9, y: 7.4)
-            )
-            opening.curve(
-                to: NSPoint(x: 11.3, y: 2.4),
-                controlPoint1: NSPoint(x: 10.1, y: 7.4),
-                controlPoint2: NSPoint(x: 11.0, y: 5.8)
-            )
-            opening.close()
+            // Inner concentric arch.
+            let inner = NSBezierPath()
+            inner.appendArc(withCenter: NSPoint(x: centerX, y: baseY), radius: 3.4, startAngle: 0, endAngle: 180)
+            inner.lineWidth = 1.3
+            inner.lineCapStyle = .round
+            inner.stroke()
+
+            // Base node — filled when a tunnel is up, a thin ring when idle.
+            let radius: CGFloat = 1.5
+            let node = NSBezierPath(ovalIn: NSRect(
+                x: centerX - radius, y: baseY - radius,
+                width: radius * 2, height: radius * 2
+            ))
             if active {
-                opening.fill()
+                node.fill()
             } else {
-                opening.lineWidth = 1.2
-                opening.stroke()
+                node.lineWidth = 1.1
+                node.stroke()
             }
             return true
         }
