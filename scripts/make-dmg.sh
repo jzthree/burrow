@@ -156,6 +156,18 @@ codesign --force --options runtime "${TS_FLAG[@]}" --sign "$DEVELOPER_ID" "$APP_
 codesign --verify --deep --strict --verbose=2 "$APP_DIR"
 
 # --- build the DMG ----------------------------------------------------------
+# create-dmg mounts a temp volume and can leave it mounted if it errors. A
+# stray mount registers another copy of the app's bundle id in Launch Services,
+# which then breaks launching the real app (duplicate registrations). Detach
+# any leftover make-dmg mounts before and after building.
+detach_stray_dmgs() {
+  for vol in /Volumes/dmg.*(N) "/Volumes/${APP_NAME} ${VERSION}"(N); do
+    [ -e "$vol/${APP_NAME}.app" ] && hdiutil detach "$vol" -force >/dev/null 2>&1 || true
+  done
+}
+detach_stray_dmgs
+trap detach_stray_dmgs EXIT
+
 note "Building DMG"
 rm -f "$DMG_OUT"
 create-dmg \
@@ -170,6 +182,7 @@ create-dmg \
     note "create-dmg fancy layout failed; building a plain DMG with hdiutil."
     hdiutil create -volname "${APP_NAME} ${VERSION}" -srcfolder "$APP_DIR" -ov -format UDZO "$DMG_OUT"
   }
+detach_stray_dmgs
 
 # --- notarize + staple ------------------------------------------------------
 NOTARIZED=0
