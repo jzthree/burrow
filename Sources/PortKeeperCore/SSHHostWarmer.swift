@@ -10,32 +10,49 @@ import Foundation
 /// `ssh <alias>` in any terminal reuses the same master (and it survives
 /// Burrow quitting when ControlPersist is set). Status and teardown go through
 /// ssh's own control commands (`-O check` / `-O exit`).
-enum SSHHostWarmer {
+public enum SSHHostWarmer {
     /// Whether a live master connection exists for the alias.
-    static func isWarm(alias: String) -> Bool {
-        run(["-O", "check", alias], environment: nil, wait: true) == 0
+    public static func isWarm(alias: String) -> Bool {
+        run(["-O", "check", alias], environment: nil, inheritStdio: false, wait: true) == 0
     }
 
     /// Establishes the master. Returns true once ssh has authenticated and
     /// backgrounded itself (-f). `environment` carries the askpass that answers
     /// a password and/or 2FA prompt. Blocking — call off the main thread.
     @discardableResult
-    static func warm(alias: String, environment: [String: String]?) -> Bool {
-        run(["-f", "-N", "-o", "ConnectTimeout=20", alias], environment: environment, wait: true) == 0
+    public static func warm(alias: String, environment: [String: String]?) -> Bool {
+        run(["-f", "-N", "-o", "ConnectTimeout=20", alias], environment: environment, inheritStdio: false, wait: true) == 0
+    }
+
+    /// Foreground warm: inherits the caller's terminal so the user can complete
+    /// a password / 2FA prompt (or approve a Duo push) directly. `-fN`
+    /// backgrounds the master after authentication. Returns ssh's exit code.
+    @discardableResult
+    public static func warmForeground(alias: String) -> Int32 {
+        run(["-f", "-N", "-o", "ConnectTimeout=45", alias], environment: nil, inheritStdio: true, wait: true)
     }
 
     /// Tears the master down.
-    static func cool(alias: String) {
-        _ = run(["-O", "exit", alias], environment: nil, wait: true)
+    public static func cool(alias: String) {
+        _ = run(["-O", "exit", alias], environment: nil, inheritStdio: false, wait: true)
     }
 
     @discardableResult
-    private static func run(_ arguments: [String], environment: [String: String]?, wait: Bool) -> Int32 {
+    private static func run(
+        _ arguments: [String],
+        environment: [String: String]?,
+        inheritStdio: Bool,
+        wait: Bool
+    ) -> Int32 {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/ssh")
         process.arguments = arguments
-        process.standardOutput = Pipe()
-        process.standardError = Pipe()
+        if !inheritStdio {
+            // Capture (and discard) the small control-command output; the
+            // caller doesn't want it on the terminal.
+            process.standardOutput = Pipe()
+            process.standardError = Pipe()
+        }
         if let environment {
             // Inherit the user's env (PATH etc.) and overlay the askpass keys.
             var merged = ProcessInfo.processInfo.environment

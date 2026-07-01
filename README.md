@@ -138,7 +138,28 @@ burrow enable NAME
 burrow disable NAME
 burrow remove NAME
 burrow run [--all|NAME]
+
+# ~/.ssh/config login hosts (incl. keep-warm)
+burrow hosts list
+burrow hosts status [ALIAS]
+burrow hosts add --alias ALIAS --host HOST [--user USER] [--port 22]
+burrow hosts remove ALIAS
+burrow hosts warm ALIAS      # open a persistent master; sign in in the terminal
+burrow hosts cool ALIAS
+
+# VPN gateways (read-only; connect from the app)
+burrow gateway list
+burrow gateway status [NAME]
+
+# Two-factor accounts (metadata only; codes stay in the app)
+burrow 2fa list
 ```
+
+`hosts warm` establishes a background SSH ControlMaster and leaves it
+authenticated, so a later `ssh <alias>` — from any terminal or from the app — is
+instant. It runs in the foreground, so you complete the password / 2FA / Duo
+prompt right there; the master then persists via the host's `ControlPersist`.
+The CLI shares the same config and the same masters as the menu-bar app.
 
 Useful options for `burrow add`:
 

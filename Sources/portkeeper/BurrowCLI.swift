@@ -19,7 +19,7 @@ struct BurrowCLI {
 
 struct CLI {
     private let environment: [String: String]
-    private let store: ConfigStore
+    let store: ConfigStore
 
     init(environment: [String: String] = ProcessInfo.processInfo.environment) {
         self.environment = environment
@@ -60,6 +60,12 @@ struct CLI {
             try setEnabled(arguments: Array(arguments.dropFirst()), enabled: false)
         case "run":
             try await runTunnels(arguments: Array(arguments.dropFirst()))
+        case "hosts", "host":
+            try hostsCommand(Array(arguments.dropFirst()))
+        case "gateway", "gateways", "vpn":
+            try gatewayCommand(Array(arguments.dropFirst()))
+        case "2fa", "totp":
+            try twoFactorCommand(Array(arguments.dropFirst()))
         default:
             throw CLIError("unknown command '\(command)'")
         }
@@ -339,6 +345,21 @@ struct CLI {
               enable NAME
               disable NAME
               run [--all|NAME]
+
+            SSH hosts (~/.ssh/config):
+              hosts list
+              hosts status [ALIAS]
+              hosts add --alias ALIAS --host HOST [--user USER] [--port 22]
+              hosts remove ALIAS
+              hosts warm ALIAS      (open a persistent master; sign in here)
+              hosts cool ALIAS
+
+            VPN gateways (read-only; connect from the Burrow app):
+              gateway list
+              gateway status [NAME]
+
+            Two-factor accounts (metadata only; codes stay in the app):
+              2fa list
 
             Config path:
               \(store.configURL.path)
