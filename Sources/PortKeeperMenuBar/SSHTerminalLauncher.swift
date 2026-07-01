@@ -58,6 +58,41 @@ enum SSHTerminalLauncher {
         NSWorkspace.shared.open(scriptURL)
     }
 
+    /// Opens a Terminal that establishes a *persistent* background master for
+    /// the host so it stays "warm", letting the user complete whatever the host
+    /// asks for — a password, a 2FA code, or a Duo push. When `oneTimeCode` is
+    /// supplied it auto-answers token prompts and only hands the session to the
+    /// user for a password or a rejected/expired code. Unlike `open`, it never
+    /// tears the socket down: it relies on the host's own ssh-config
+    /// ControlMaster/ControlPath/ControlPersist to keep the master alive after
+    /// the window closes, so a later `ssh <alias>` reuses the same socket.
+    static func openWarm(
+        tunnel: TunnelConfig,
+        gateways: [GatewayConfig],
+        terminalApp: String = "auto",
+        oneTimeCode: OneTimeCode? = nil
+    ) throws {
+        let route = interactiveRoute(for: tunnel, gateways: gateways)
+        let safeName = tunnel.name
+            .replacingOccurrences(of: "/", with: "-")
+            .replacingOccurrences(of: " ", with: "-")
+        let warmCommand = warmMasterCommand(for: route.tunnel)
+        let scriptURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("burrow-warm-\(safeName).command")
+        let script = warmScriptText(
+            tunnel: tunnel,
+            warmCommand: warmCommand,
+            oneTimeCode: oneTimeCode,
+            routeMessage: route.message
+        )
+        try script.write(to: scriptURL, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: scriptURL.path)
+        if openScript(scriptURL, terminalApp: terminalApp) {
+            return
+        }
+        NSWorkspace.shared.open(scriptURL)
+    }
+
     private static func scriptText(
         tunnel: TunnelConfig,
         command: String,
@@ -171,6 +206,107 @@ enum SSHTerminalLauncher {
         """
     }
 
+    private static func warmScriptText(
+        tunnel: TunnelConfig,
+        warmCommand: String,
+        oneTimeCode: OneTimeCode?,
+        routeMessage: String?
+    ) -> String {
+        let name = tunnel.name
+        let routeEcho = routeMessage.map { "\necho \(shellQuote("Burrow: \($0)"))" } ?? ""
+        let warmOK = shellQuote("Burrow: \(name) is warm. You can close this window — the connection stays up.")
+        let warmFail = shellQuote("Burrow: could not keep \(name) warm (sign-in failed or was cancelled).")
+
+        guard let oneTimeCode else {
+            // No 2FA seed on file: hand the TTY straight to the user so they can
+            // type a password, a code, or approve a push, then ssh backgrounds.
+            return """
+            #!/bin/zsh
+            script_path="$0"
+            trap 'rm -f "$script_path"' EXIT
+            echo \(shellQuote("Burrow: keeping \(name) warm — finish signing in below if prompted."))\(routeEcho)
+            if \(warmCommand); then
+              echo ""
+              echo \(warmOK)
+            else
+              echo ""
+              echo \(warmFail)
+            fi
+            """
+        }
+
+        return """
+        #!/bin/zsh
+        script_path="$0"
+        expect_script="$(mktemp -t burrow-warm-expect.XXXXXX)"
+        export BURROW_WARM_COMMAND=\(shellQuote(warmCommand))
+        export BURROW_OTP_CURRENT=\(shellQuote(oneTimeCode.currentCode))
+        export BURROW_OTP_NEXT=\(shellQuote(oneTimeCode.nextCode))
+        export BURROW_OTP_PERIOD_END=\(Int(oneTimeCode.periodEnd.timeIntervalSince1970))
+        trap 'rm -f "$script_path" "$expect_script"' EXIT
+
+        echo \(shellQuote("Burrow: keeping \(name) warm — answering token prompts with \(oneTimeCode.accountName) 2FA; type your password if asked."))\(routeEcho)
+
+        if [[ ! -x /usr/bin/expect ]]; then
+          printf "%s" "$BURROW_OTP_CURRENT" | /usr/bin/pbcopy
+          echo "Burrow: /usr/bin/expect is missing; copied the current 2FA code to the clipboard."
+          if /bin/zsh -lc "$BURROW_WARM_COMMAND"; then echo ""; echo \(warmOK); else echo ""; echo \(warmFail); fi
+          exit 0
+        fi
+
+        cat > "$expect_script" <<'BURROW_EXPECT'
+        set timeout 45
+        set currentCode $env(BURROW_OTP_CURRENT)
+        set nextCode $env(BURROW_OTP_NEXT)
+        set periodEnd $env(BURROW_OTP_PERIOD_END)
+        set sentCodes {}
+
+        proc burrow_code {} {
+            global currentCode nextCode periodEnd
+            if {[clock seconds] + 5 >= $periodEnd} {
+                return $nextCode
+            }
+            return $currentCode
+        }
+
+        spawn /bin/zsh -lc $env(BURROW_WARM_COMMAND)
+        expect {
+            -nocase -re {(tacc token code|verification code|one[- ]?time[^:\\r\\n]*code|otp|token[^:\\r\\n]*code|passcode)[^:\\r\\n]*:\\s*$} {
+                set code [burrow_code]
+                if {[lsearch -exact $sentCodes $code] >= 0} {
+                    send_user "\\nBurrow: the generated 2FA code was not accepted; please type the code manually.\\n"
+                    interact
+                } else {
+                    lappend sentCodes $code
+                    send -- "$code\\r"
+                    set timeout 8
+                    exp_continue
+                }
+            }
+            -nocase -re {password:\\s*$} {
+                send_user "\\nBurrow: password prompt detected; type your password here.\\n"
+                interact
+            }
+            timeout {
+                interact
+            }
+            eof {
+                catch wait result
+                exit [lindex $result 3]
+            }
+        }
+        BURROW_EXPECT
+
+        if /usr/bin/expect -f "$expect_script"; then
+          echo ""
+          echo \(warmOK)
+        else
+          echo ""
+          echo \(warmFail)
+        fi
+        """
+    }
+
     private struct InteractiveRoute {
         let tunnel: TunnelConfig
         let message: String?
@@ -278,6 +414,21 @@ enum SSHTerminalLauncher {
             "-S", shellQuote(controlPath),
             "-fN",
             "-o", "ControlPersist=no",
+        ]
+        appendConnectionOptions(for: tunnel, to: &parts)
+        parts.append(shellQuote(remoteTarget(for: tunnel)))
+        return parts.joined(separator: " ")
+    }
+
+    /// `ssh -fN <target>`: authenticate on the TTY, then background as a master.
+    /// No control path of our own — the host's ssh-config
+    /// ControlMaster/ControlPath/ControlPersist keep it alive and let a later
+    /// `ssh <alias>` reuse the same socket.
+    private static func warmMasterCommand(for tunnel: TunnelConfig) -> String {
+        var parts = [
+            "/usr/bin/ssh",
+            "-f", "-N",
+            "-o", "ConnectTimeout=45",
         ]
         appendConnectionOptions(for: tunnel, to: &parts)
         parts.append(shellQuote(remoteTarget(for: tunnel)))

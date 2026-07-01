@@ -983,10 +983,14 @@ final class MenuBarViewModel: ObservableObject {
         }
     }
 
-    /// Establishes (or refreshes) the background master for a host, answering a
-    /// saved password and/or generated 2FA code. 2FA generation presents Touch
-    /// ID, so this is the "prompt" path used both on demand and at launch.
-    func warmHost(alias: String) {
+    /// Establishes the background master for a host. First tries silently —
+    /// key-only hosts and ones fully answerable from a saved password and/or an
+    /// enrolled 2FA seed warm with no window. When silent auth can't complete
+    /// (a password we don't have, a Duo push, a code Burrow can't generate) and
+    /// `allowInteractive` is set, it opens a Terminal so the user finishes the
+    /// sign-in by hand; the resulting persistent master is then detected warm by
+    /// the periodic refresh. 2FA generation presents Touch ID once.
+    func warmHost(alias: String, allowInteractive: Bool = true) {
         guard let tunnel = tunnel(forSSHHostAlias: alias) else { return }
         let account = linkedTwoFactorAccount(for: tunnel)
         let savedPassword: String? = {
@@ -996,10 +1000,21 @@ final class MenuBarViewModel: ObservableObject {
         globalMessage = "Warming \(alias)…"
         Task { @MainActor [weak self] in
             guard let self else { return }
-            var otp: String?
+
+            // Already warm (a live master exists)? Nothing to do.
+            if await Task.detached(operation: { SSHHostWarmer.isWarm(alias: alias) }).value {
+                self.warmHosts.insert(alias)
+                self.globalMessage = "\(alias) is already warm."
+                return
+            }
+
+            // Generate the current + next 2FA codes once (single Touch ID) when a
+            // seed is linked, so both the silent attempt and the interactive
+            // fallback can reuse them without a second prompt.
+            var codes: (current: String, next: String, periodEnd: Date)?
             if let account {
                 do {
-                    otp = try await self.twoFactorStore.currentCode(
+                    codes = try await self.twoFactorStore.currentAndNextCodes(
                         for: account,
                         reason: "Keep \(alias) warm with the \(account.name) 2FA code",
                         at: Date(),
@@ -1014,16 +1029,44 @@ final class MenuBarViewModel: ObservableObject {
                     return
                 }
             }
-            let environment = (savedPassword != nil || otp != nil)
-                ? try? AskPassSupport.warmEnvironment(password: savedPassword, otpCode: otp)
+
+            // 1. Silent attempt. A nil environment still works for key-only hosts;
+            //    hosts needing interactive input fail fast (no tty, no askpass).
+            let environment = (savedPassword != nil || codes != nil)
+                ? try? AskPassSupport.warmEnvironment(password: savedPassword, otpCode: codes?.current)
                 : nil
-            let ok = await Task.detached { SSHHostWarmer.warm(alias: alias, environment: environment) }.value
+            let ok = await Task.detached(operation: { SSHHostWarmer.warm(alias: alias, environment: environment) }).value
             if ok {
                 self.warmHosts.insert(alias)
                 self.globalMessage = "\(alias) is warm — terminals open instantly."
-            } else {
+                return
+            }
+
+            // 2. Silent auth couldn't complete. Let the user finish it by hand.
+            guard allowInteractive else {
                 self.warmHosts.remove(alias)
-                self.globalMessage = "Couldn't warm \(alias) (check credentials / 2FA, or add ControlPersist)."
+                self.globalMessage = "\(alias) is primed — use ⋯ ▸ Finish Sign-In to complete it."
+                return
+            }
+            let oneTimeCode = codes.map {
+                SSHTerminalLauncher.OneTimeCode(
+                    accountName: account?.name ?? alias,
+                    currentCode: $0.current,
+                    nextCode: $0.next,
+                    periodEnd: $0.periodEnd
+                )
+            }
+            do {
+                try SSHTerminalLauncher.openWarm(
+                    tunnel: tunnel,
+                    gateways: self.gateways.map(\.config),
+                    terminalApp: self.terminalApp,
+                    oneTimeCode: oneTimeCode
+                )
+                self.globalMessage = "Finish signing in to \(alias) in \(self.terminalAppDisplayName); it stays warm afterward."
+            } catch {
+                self.warmHosts.remove(alias)
+                self.globalMessage = "Couldn't open a sign-in window for \(alias): \(error.localizedDescription)"
             }
         }
     }
@@ -1052,11 +1095,12 @@ final class MenuBarViewModel: ObservableObject {
         }
     }
 
-    /// Re-warm kept-warm hosts at launch. 2FA hosts surface Touch ID here
-    /// ("prompt at launch", per the chosen behavior).
+    /// Re-warm kept-warm hosts at launch. Silent only — hosts that need
+    /// interactive sign-in stay primed (cold) rather than popping Terminal
+    /// windows on login; the user finishes them from the row when ready.
     func warmKeptHostsAtLaunch() {
         for alias in keepWarmHosts {
-            warmHost(alias: alias)
+            warmHost(alias: alias, allowInteractive: false)
         }
     }
 
@@ -3156,6 +3200,7 @@ struct MenuBarContent: View {
                             onOpen: { viewModel.openSSHHost(alias: host.alias) },
                             onCopy: { viewModel.copySSHHostCommand(alias: host.alias) },
                             onToggleKeepWarm: { viewModel.toggleKeepWarm(alias: host.alias) },
+                            onWarmNow: { viewModel.warmHost(alias: host.alias) },
                             onHide: { viewModel.hideSSHHost(alias: host.alias) },
                             onRemove: { viewModel.removeSSHHost(alias: host.alias) }
                         )
@@ -3217,6 +3262,7 @@ private struct SSHHostRow: View {
     let onOpen: () -> Void
     let onCopy: () -> Void
     let onToggleKeepWarm: () -> Void
+    let onWarmNow: () -> Void
     let onHide: () -> Void
     let onRemove: () -> Void
 
@@ -3237,7 +3283,9 @@ private struct SSHHostRow: View {
     }
     private var flameHelp: String {
         guard isKeptWarm else { return "Keep \(host.alias) warm — instant terminals, 2FA once" }
-        return isWarm ? "Warm — terminals open instantly. Click to stop." : "Keeping warm (cold now). Click to stop."
+        return isWarm
+            ? "Warm — terminals open instantly. Click to stop."
+            : "Kept warm (cold now). Click to stop, or use ⋯ ▸ Finish Sign-In."
     }
 
     var body: some View {
@@ -3296,7 +3344,14 @@ private struct SSHHostRow: View {
                 Button("Open SSH in Terminal", action: onOpen)
                 Button("Copy SSH Command", action: onCopy)
                 Divider()
-                Button(isKeptWarm ? "Stop Keeping Warm" : "Keep Warm", action: onToggleKeepWarm)
+                if isKeptWarm {
+                    if !isWarm {
+                        Button("Finish Sign-In / Warm Now…", action: onWarmNow)
+                    }
+                    Button("Stop Keeping Warm", action: onToggleKeepWarm)
+                } else {
+                    Button("Keep Warm", action: onToggleKeepWarm)
+                }
                 Button("Hide from Menu", action: onHide)
                 Button("Remove from ~/.ssh/config…", role: .destructive, action: onRemove)
             } label: {
