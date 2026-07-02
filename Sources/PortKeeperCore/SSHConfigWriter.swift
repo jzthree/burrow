@@ -117,25 +117,6 @@ public enum SSHConfigWriter {
             throw WriteError.invalidEntry("Couldn't read \(url.lastPathComponent).")
         }
 
-        func keyword(_ line: String) -> String? {
-            let trimmed = line.trimmingCharacters(in: .whitespaces)
-            guard !trimmed.isEmpty, !trimmed.hasPrefix("#") else { return nil }
-            guard let range = trimmed.rangeOfCharacter(from: CharacterSet(charactersIn: " \t=")) else {
-                return trimmed.lowercased()
-            }
-            return String(trimmed[..<range.lowerBound]).lowercased()
-        }
-        func hostTokens(_ line: String) -> [String] {
-            let trimmed = line.trimmingCharacters(in: .whitespaces)
-            guard let range = trimmed.rangeOfCharacter(from: CharacterSet(charactersIn: " \t=")) else {
-                return []
-            }
-            return String(trimmed[range.upperBound...])
-                .trimmingCharacters(in: CharacterSet(charactersIn: " \t="))
-                .split(whereSeparator: { $0 == " " || $0 == "\t" })
-                .map(String.init)
-        }
-
         let lines = contents.components(separatedBy: "\n")
         var result: [String] = []
         var removedAny = false
@@ -177,5 +158,101 @@ public enum SSHConfigWriter {
         }
         try result.joined(separator: "\n").write(to: url, atomically: true, encoding: .utf8)
         try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
+    }
+
+    /// Edits an existing host's HostName / User / Port *in place*, touching only
+    /// those directive lines inside the alias's stanza and leaving every other
+    /// line (ControlMaster, ProxyJump, comments, formatting) verbatim. A nil/empty
+    /// user or a nil/22 port removes that directive. Hosts in Included files
+    /// aren't in this file and throw notFound.
+    public static func editHost(
+        alias: String,
+        hostName: String?,
+        user: String?,
+        port: Int?,
+        in url: URL = SSHConfigParser.defaultConfigURL()
+    ) throws {
+        let target = alias.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !target.isEmpty else {
+            throw WriteError.invalidEntry("No host alias given.")
+        }
+        let newHostName = hostName?.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let newHostName, !newHostName.isEmpty, !newHostName.contains(where: { $0.isWhitespace }) else {
+            throw WriteError.invalidEntry("A host name (address) is required.")
+        }
+        let newUser = user?.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let newUser, newUser.contains(where: { $0.isWhitespace }) {
+            throw WriteError.invalidEntry("A user name can't contain spaces.")
+        }
+        guard let contents = try? String(contentsOf: url, encoding: .utf8) else {
+            throw WriteError.invalidEntry("Couldn't read \(url.lastPathComponent).")
+        }
+
+        var lines = contents.components(separatedBy: "\n")
+        let targetLower = target.lowercased()
+        guard let hostLineIndex = lines.firstIndex(where: {
+            keyword($0) == "host" && hostTokens($0).contains { $0.lowercased() == targetLower }
+        }) else {
+            throw WriteError.invalidEntry("Host “\(alias)” wasn't found in \(url.lastPathComponent) (it may be in an Included file).")
+        }
+
+        // The stanza body runs from just after the Host line to the next
+        // Host/Match line (or end of file).
+        var bodyEnd = hostLineIndex + 1
+        while bodyEnd < lines.count {
+            let kw = keyword(lines[bodyEnd])
+            if kw == "host" || kw == "match" { break }
+            bodyEnd += 1
+        }
+        let bodyRange = (hostLineIndex + 1)..<bodyEnd
+        var body = Array(lines[bodyRange])
+
+        // Reuse an existing directive's indent so inserted lines match the stanza.
+        let indent = body
+            .first(where: { !$0.trimmingCharacters(in: .whitespaces).isEmpty })
+            .map { String($0.prefix { $0 == " " || $0 == "\t" }) } ?? "    "
+
+        func setDirective(_ name: String, value: String?) {
+            let lower = name.lowercased()
+            if let existing = body.firstIndex(where: { keyword($0) == lower }) {
+                if let value {
+                    let lineIndent = String(body[existing].prefix { $0 == " " || $0 == "\t" })
+                    body[existing] = "\(lineIndent)\(name) \(value)"
+                } else {
+                    body.remove(at: existing)
+                }
+            } else if let value {
+                body.insert("\(indent)\(name) \(value)", at: 0)
+            }
+        }
+
+        // Insert in reverse so a fresh stanza ends up HostName, User, Port.
+        setDirective("Port", value: (port != nil && port != 22) ? String(port!) : nil)
+        setDirective("User", value: (newUser?.isEmpty == false) ? newUser : nil)
+        setDirective("HostName", value: newHostName)
+
+        lines.replaceSubrange(bodyRange, with: body)
+        try lines.joined(separator: "\n").write(to: url, atomically: true, encoding: .utf8)
+        try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
+    }
+
+    private static func keyword(_ line: String) -> String? {
+        let trimmed = line.trimmingCharacters(in: .whitespaces)
+        guard !trimmed.isEmpty, !trimmed.hasPrefix("#") else { return nil }
+        guard let range = trimmed.rangeOfCharacter(from: CharacterSet(charactersIn: " \t=")) else {
+            return trimmed.lowercased()
+        }
+        return String(trimmed[..<range.lowerBound]).lowercased()
+    }
+
+    private static func hostTokens(_ line: String) -> [String] {
+        let trimmed = line.trimmingCharacters(in: .whitespaces)
+        guard let range = trimmed.rangeOfCharacter(from: CharacterSet(charactersIn: " \t=")) else {
+            return []
+        }
+        return String(trimmed[range.upperBound...])
+            .trimmingCharacters(in: CharacterSet(charactersIn: " \t="))
+            .split(whereSeparator: { $0 == " " || $0 == "\t" })
+            .map(String.init)
     }
 }

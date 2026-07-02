@@ -441,6 +441,64 @@ enum SSHHostPrompt {
             port: port
         )
     }
+
+    struct EditResult {
+        let hostName: String
+        let user: String?
+        let port: Int?
+    }
+
+    /// Edits an existing host's address / user / port. The alias is fixed (shown
+    /// in the title, not editable — renaming is a separate concern); fields are
+    /// pre-filled with the current values. Only these three directives change.
+    @MainActor
+    static func requestEdit(alias: String, hostName: String, user: String?, port: Int?) -> EditResult? {
+        let alert = NSAlert()
+        alert.messageText = "Edit \(alias)"
+        alert.informativeText = "Updates HostName / User / Port for “\(alias)” in ~/.ssh/config. Burrow changes only those lines and leaves the rest of the stanza (ControlMaster, ProxyJump, comments, …) untouched."
+
+        let width: CGFloat = 360
+        let container = NSStackView(frame: NSRect(x: 0, y: 0, width: width, height: 88))
+        container.orientation = .vertical
+        container.alignment = .leading
+        container.spacing = 6
+
+        let hostField = NSTextField(frame: NSRect(x: 0, y: 0, width: width, height: 24))
+        hostField.placeholderString = "Host address (e.g. gpu.lab.edu or 10.0.0.5)"
+        hostField.stringValue = hostName
+        let userField = NSTextField(frame: NSRect(x: 0, y: 0, width: width, height: 24))
+        userField.placeholderString = "User (optional)"
+        userField.stringValue = user ?? ""
+        let portField = NSTextField(frame: NSRect(x: 0, y: 0, width: width, height: 24))
+        portField.placeholderString = "Port (optional, default 22)"
+        portField.stringValue = port.map(String.init) ?? ""
+
+        for field in [hostField, userField, portField] {
+            field.translatesAutoresizingMaskIntoConstraints = false
+            field.widthAnchor.constraint(equalToConstant: width).isActive = true
+            container.addArrangedSubview(field)
+        }
+        alert.accessoryView = container
+        alert.window.initialFirstResponder = hostField
+
+        alert.addButton(withTitle: "Save Changes")
+        alert.addButton(withTitle: "Cancel")
+
+        guard alert.runModal() == .alertFirstButtonReturn else {
+            return nil
+        }
+        let host = hostField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        let editedUser = userField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        let editedPort = Int(portField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines))
+        guard !host.isEmpty else {
+            return nil
+        }
+        return EditResult(
+            hostName: host,
+            user: editedUser.isEmpty ? nil : editedUser,
+            port: editedPort
+        )
+    }
 }
 
 enum AskPassSupport {

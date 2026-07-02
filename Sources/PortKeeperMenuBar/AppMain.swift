@@ -1218,6 +1218,35 @@ final class MenuBarViewModel: ObservableObject {
         }
     }
 
+    /// Edits an existing host's address / user / port in place (no remove-and-
+    /// re-add). The stanza's other directives are preserved by SSHConfigWriter.
+    func editSSHHost(alias: String) {
+        guard let host = sshConfigHosts.first(where: { $0.alias == alias }) else {
+            globalMessage = "SSH host '\(alias)' not found in ~/.ssh/config."
+            return
+        }
+        guard let edited = SSHHostPrompt.requestEdit(
+            alias: alias,
+            hostName: host.hostName ?? host.effectiveHost,
+            user: host.user,
+            port: host.port
+        ) else {
+            return
+        }
+        do {
+            try SSHConfigWriter.editHost(
+                alias: alias,
+                hostName: edited.hostName,
+                user: edited.user,
+                port: edited.port
+            )
+            sshConfigHosts = SSHConfigParser.parse()
+            globalMessage = "Updated \(alias) in ~/.ssh/config."
+        } catch {
+            globalMessage = "Couldn't update \(alias): \(error.localizedDescription)"
+        }
+    }
+
     func openSSHHost(alias: String) {
         guard let tunnel = tunnel(forSSHHostAlias: alias) else {
             globalMessage = "SSH host '\(alias)' not found in ~/.ssh/config."
@@ -3324,6 +3353,7 @@ struct MenuBarContent: View {
                             linkedTwoFactorName: viewModel.linkedTwoFactorName(forHostAlias: host.alias),
                             twoFactorAccountNames: viewModel.twoFactorAccountNames,
                             onSetTwoFactor: { viewModel.setTwoFactorLink(accountName: $0, forHostAlias: host.alias) },
+                            onEdit: { viewModel.editSSHHost(alias: host.alias) },
                             onHide: { viewModel.hideSSHHost(alias: host.alias) },
                             onRemove: { viewModel.removeSSHHost(alias: host.alias) }
                         )
@@ -3390,6 +3420,7 @@ private struct SSHHostRow: View {
     let linkedTwoFactorName: String?
     let twoFactorAccountNames: [String]
     let onSetTwoFactor: (String?) -> Void
+    let onEdit: () -> Void
     let onHide: () -> Void
     let onRemove: () -> Void
 
@@ -3399,6 +3430,12 @@ private struct SSHHostRow: View {
         var text = host.user.map { "\($0)@\(host.effectiveHost)" } ?? host.effectiveHost
         if let port = host.port, port != 22 {
             text += ":\(port)"
+        }
+        // Surface genuinely distinct extra aliases (skip an FQDN that just repeats
+        // the host address — that one buys nothing).
+        let extras = host.additionalAliases.filter { $0.lowercased() != host.effectiveHost.lowercased() }
+        if !extras.isEmpty {
+            text += "  ·  also " + extras.joined(separator: ", ")
         }
         return text
     }
@@ -3514,6 +3551,8 @@ private struct SSHHostRow: View {
                         }
                     }
                 }
+                Divider()
+                Button("Edit…", action: onEdit)
                 Button("Hide from Menu", action: onHide)
                 Button("Remove from ~/.ssh/config…", role: .destructive, action: onRemove)
             } label: {

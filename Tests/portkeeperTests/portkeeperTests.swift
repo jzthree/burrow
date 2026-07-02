@@ -462,6 +462,53 @@ private func waitUntil(timeout: TimeInterval, condition: @escaping @Sendable () 
     #expect(hosts[1].additionalAliases.isEmpty)
 }
 
+@Test func sshConfigWriterEditsHostInPlacePreservingOtherLines() async throws {
+    let dir = FileManager.default.temporaryDirectory
+        .appendingPathComponent("burrow-edit-\(UUID().uuidString)", isDirectory: true)
+    try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: dir) }
+    let url = dir.appendingPathComponent("config")
+
+    try """
+    Host vista vista.tacc.utexas.edu
+        HostName vista.tacc.utexas.edu
+        User jzthree
+        ControlMaster auto
+        ControlPersist 72h
+
+    Host other
+        HostName other.example.com
+    """.write(to: url, atomically: true, encoding: .utf8)
+
+    try SSHConfigWriter.editHost(alias: "vista", hostName: "vista2.tacc.utexas.edu", user: "newuser", port: 2222, in: url)
+
+    let text = try String(contentsOf: url, encoding: .utf8)
+    // Edited directives changed…
+    #expect(text.contains("HostName vista2.tacc.utexas.edu"))
+    #expect(text.contains("User newuser"))
+    #expect(text.contains("Port 2222"))
+    // …while everything else in the stanza survived verbatim.
+    #expect(text.contains("ControlMaster auto"))
+    #expect(text.contains("ControlPersist 72h"))
+    #expect(text.contains("Host vista vista.tacc.utexas.edu"))
+    // The other stanza is untouched.
+    #expect(text.contains("HostName other.example.com"))
+    #expect(!text.contains("jzthree"))
+
+    // Re-parse to confirm the model reflects the edit.
+    let vista = try #require(SSHConfigParser.parse(fileAt: url).first { $0.alias == "vista" })
+    #expect(vista.effectiveHost == "vista2.tacc.utexas.edu")
+    #expect(vista.user == "newuser")
+    #expect(vista.port == 2222)
+
+    // Clearing user/port removes those directives; hostname stays required.
+    try SSHConfigWriter.editHost(alias: "vista", hostName: "vista2.tacc.utexas.edu", user: nil, port: nil, in: url)
+    let after = try String(contentsOf: url, encoding: .utf8)
+    #expect(!after.contains("User newuser"))
+    #expect(!after.contains("Port 2222"))
+    #expect(after.contains("ControlMaster auto"))
+}
+
 @Test func warmDiagnosisClassifiesSSHFailures() async throws {
     #expect(WarmDiagnosis.classify("jzthree@vista: Permission denied (keyboard-interactive).") == .authRejected)
     #expect(WarmDiagnosis.classify("ssh: connect to host x port 22: Operation timed out") == .network)
