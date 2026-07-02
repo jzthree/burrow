@@ -1373,6 +1373,42 @@ final class MenuBarViewModel: ObservableObject {
         }
     }
 
+    // MARK: - 2FA <-> host linking
+
+    /// The 2FA account explicitly linked to a host alias, if any.
+    func linkedTwoFactorName(forHostAlias alias: String) -> String? {
+        twoFactorAccounts.first { $0.sshHost == alias }?.name
+    }
+
+    var twoFactorAccountNames: [String] {
+        twoFactorAccounts.map(\.name)
+    }
+
+    /// Links a 2FA account to a host alias (at most one account per host): clears
+    /// the link from any account currently pointing at this host, then sets it on
+    /// the chosen one. `accountName == nil` just clears the host's link. This is
+    /// the explicit alternative to name/host guessing, so keep-warm answers the
+    /// token prompt deterministically.
+    func setTwoFactorLink(accountName: String?, forHostAlias alias: String) {
+        do {
+            for account in twoFactorAccounts where account.sshHost == alias && account.name != accountName {
+                var cleared = account
+                cleared.sshHost = nil
+                try store.upsertTwoFactorAccount(cleared, replacing: account.name)
+            }
+            if let accountName, var target = twoFactorAccounts.first(where: { $0.name == accountName }) {
+                target.sshHost = alias
+                try store.upsertTwoFactorAccount(target, replacing: accountName)
+                globalMessage = "Linked \(accountName) 2FA to \(alias)."
+            } else {
+                globalMessage = "Cleared the 2FA link for \(alias)."
+            }
+            loadConfig()
+        } catch {
+            globalMessage = "Couldn't update the 2FA link: \(error.localizedDescription)"
+        }
+    }
+
     // MARK: - Profiles
 
     @Published private(set) var profilesCache: [Profile] = []
@@ -3285,6 +3321,9 @@ struct MenuBarContent: View {
                             onToggleKeepWarm: { viewModel.toggleKeepWarm(alias: host.alias) },
                             onWarmNow: { viewModel.warmHost(alias: host.alias) },
                             onWarmInTerminal: { viewModel.warmHostInTerminal(alias: host.alias) },
+                            linkedTwoFactorName: viewModel.linkedTwoFactorName(forHostAlias: host.alias),
+                            twoFactorAccountNames: viewModel.twoFactorAccountNames,
+                            onSetTwoFactor: { viewModel.setTwoFactorLink(accountName: $0, forHostAlias: host.alias) },
                             onHide: { viewModel.hideSSHHost(alias: host.alias) },
                             onRemove: { viewModel.removeSSHHost(alias: host.alias) }
                         )
@@ -3348,6 +3387,9 @@ private struct SSHHostRow: View {
     let onToggleKeepWarm: () -> Void
     let onWarmNow: () -> Void
     let onWarmInTerminal: () -> Void
+    let linkedTwoFactorName: String?
+    let twoFactorAccountNames: [String]
+    let onSetTwoFactor: (String?) -> Void
     let onHide: () -> Void
     let onRemove: () -> Void
 
@@ -3403,6 +3445,14 @@ private struct SSHHostRow: View {
             .buttonStyle(.plain)
             .help("Open ssh \(host.alias) in a terminal")
 
+            // Shows a linked 2FA account at a glance (used when warming).
+            if let linkedTwoFactorName {
+                Image(systemName: "lock.shield")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary.opacity(0.7))
+                    .help("2FA: \(linkedTwoFactorName) — entered automatically when warming")
+            }
+
             // Visible inline actions (no right-click required).
             Button(action: onToggleKeepWarm) {
                 Image(systemName: flameIcon)
@@ -3452,6 +3502,17 @@ private struct SSHHostRow: View {
                 }
                 if !isWarm {
                     Button("Sign in via Terminal…", action: onWarmInTerminal)
+                }
+                if !twoFactorAccountNames.isEmpty {
+                    Picker("2FA Account", selection: Binding(
+                        get: { linkedTwoFactorName },
+                        set: { onSetTwoFactor($0) }
+                    )) {
+                        Text("None").tag(String?.none)
+                        ForEach(twoFactorAccountNames, id: \.self) { name in
+                            Text(name).tag(Optional(name))
+                        }
+                    }
                 }
                 Button("Hide from Menu", action: onHide)
                 Button("Remove from ~/.ssh/config…", role: .destructive, action: onRemove)
