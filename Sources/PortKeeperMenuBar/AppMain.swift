@@ -1036,39 +1036,62 @@ final class MenuBarViewModel: ObservableObject {
             let environment = (savedPassword != nil || codes != nil)
                 ? try? AskPassSupport.warmEnvironment(password: savedPassword, otpCode: codes?.current)
                 : nil
-            let ok = await Task.detached(operation: { SSHHostWarmer.warm(alias: alias, environment: environment) }).value
-            if ok {
+            let silent = await Task.detached(operation: { SSHHostWarmer.warm(alias: alias, environment: environment) }).value
+            if silent.succeeded {
                 self.warmHosts.insert(alias)
                 self.globalMessage = "\(alias) is warm — terminals open instantly."
                 return
             }
 
             // 2. Silent auth couldn't complete. Ask for the current code (and a
-            //    password, if the host uses one) in a dialog and answer the SSH
-            //    prompts with it via askpass.
+            //    password, if the host uses one) and answer the SSH prompts via
+            //    askpass — retrying a rejected/expired code in place.
             guard allowInteractive else {
                 self.warmHosts.remove(alias)
                 self.globalMessage = "\(alias) is primed — use ⋯ ▸ Finish Sign-In to complete it."
                 return
             }
-            guard let entered = WarmSignInPrompt.request(alias: alias, host: tunnel.host) else {
-                self.warmHosts.remove(alias)
-                self.globalMessage = "\(alias) not warmed."
-                return
+
+            var lastReason: String?
+            for attempt in 0..<3 {
+                guard let entered = WarmSignInPrompt.request(
+                    alias: alias,
+                    host: tunnel.host,
+                    retry: attempt > 0,
+                    reason: lastReason
+                ) else {
+                    self.warmHosts.remove(alias)
+                    self.globalMessage = "\(alias) not warmed."
+                    return
+                }
+                let interactiveEnv = try? AskPassSupport.warmEnvironment(
+                    password: entered.password ?? savedPassword,
+                    otpCode: entered.code ?? codes?.current
+                )
+                self.globalMessage = "Signing in to \(alias)…"
+                let outcome = await Task.detached(operation: { SSHHostWarmer.warm(alias: alias, environment: interactiveEnv) }).value
+                if outcome.succeeded {
+                    if await Task.detached(operation: { SSHHostWarmer.isWarm(alias: alias) }).value {
+                        self.warmHosts.insert(alias)
+                        self.globalMessage = "\(alias) is warm — terminals open instantly."
+                    } else {
+                        self.warmHosts.remove(alias)
+                        self.globalMessage = "\(alias) signed in but kept no master — add `ControlMaster auto` / `ControlPersist` to its ssh config."
+                    }
+                    return
+                }
+                // Only a rejected code is worth re-asking; network / host-key
+                // failures won't improve by retyping.
+                let kind = WarmDiagnosis.classify(outcome.output)
+                guard kind == .authRejected || kind == .unknown else {
+                    self.warmHosts.remove(alias)
+                    self.globalMessage = "Couldn't warm \(alias): \(WarmDiagnosis.shortReason(outcome.output))."
+                    return
+                }
+                lastReason = WarmDiagnosis.shortReason(outcome.output)
             }
-            let interactiveEnv = try? AskPassSupport.warmEnvironment(
-                password: entered.password ?? savedPassword,
-                otpCode: entered.code ?? codes?.current
-            )
-            self.globalMessage = "Signing in to \(alias)…"
-            let signedIn = await Task.detached(operation: { SSHHostWarmer.warm(alias: alias, environment: interactiveEnv) }).value
-            if signedIn {
-                self.warmHosts.insert(alias)
-                self.globalMessage = "\(alias) is warm — terminals open instantly."
-            } else {
-                self.warmHosts.remove(alias)
-                self.globalMessage = "Couldn't warm \(alias) with that code. For a Duo push, use ⋯ ▸ Sign in via Terminal."
-            }
+            self.warmHosts.remove(alias)
+            self.globalMessage = "Couldn't warm \(alias) after 3 tries: \(lastReason ?? "sign-in failed"). For a Duo push, use ⋯ ▸ Sign in via Terminal."
         }
     }
 

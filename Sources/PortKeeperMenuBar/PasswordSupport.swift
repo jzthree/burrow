@@ -333,11 +333,19 @@ enum WarmSignInPrompt {
     /// Asks for the current 2FA code (and, optionally, an SSH password) so
     /// Burrow can warm a host that needs interactive auth. The values answer the
     /// SSH prompts for this one connection via askpass and are never stored.
+    /// `retry`/`reason` re-ask after a rejected attempt.
     @MainActor
-    static func request(alias: String, host: String) -> Result? {
+    static func request(alias: String, host: String, retry: Bool = false, reason: String? = nil) -> Result? {
         let alert = NSAlert()
-        alert.messageText = "Sign in to keep \(alias) warm"
-        alert.informativeText = "Burrow is opening a persistent SSH connection to \(host).\n\nEnter your current 2FA code (e.g. the 6-digit token or a Duo passcode). Add an SSH password only if this host asks for one.\n\nThese answer the SSH prompts for this one connection and are not stored. If your host uses a Duo push instead of a code, cancel and use “Sign in via Terminal”."
+        if retry {
+            alert.messageText = "That didn’t work — try \(alias) again"
+            alert.alertStyle = .warning
+            let detail = reason.map { "\($0.prefix(1).capitalized)\($0.dropFirst())." } ?? "The previous attempt was rejected."
+            alert.informativeText = "\(detail)\n\nEnter a fresh 2FA code for \(host) (codes expire quickly). Add an SSH password only if this host asks for one. If your host uses a Duo push instead of a code, cancel and use “Sign in via Terminal”."
+        } else {
+            alert.messageText = "Sign in to keep \(alias) warm"
+            alert.informativeText = "Burrow is opening a persistent SSH connection to \(host).\n\nEnter your current 2FA code (e.g. the 6-digit token or a Duo passcode). Add an SSH password only if this host asks for one.\n\nThese answer the SSH prompts for this one connection and are not stored. If your host uses a Duo push instead of a code, cancel and use “Sign in via Terminal”."
+        }
 
         let width: CGFloat = 320
         let container = NSStackView(frame: NSRect(x: 0, y: 0, width: width, height: 54))

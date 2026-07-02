@@ -462,6 +462,19 @@ private func waitUntil(timeout: TimeInterval, condition: @escaping @Sendable () 
     #expect(hosts[1].additionalAliases.isEmpty)
 }
 
+@Test func warmDiagnosisClassifiesSSHFailures() async throws {
+    #expect(WarmDiagnosis.classify("jzthree@vista: Permission denied (keyboard-interactive).") == .authRejected)
+    #expect(WarmDiagnosis.classify("ssh: connect to host x port 22: Operation timed out") == .network)
+    #expect(WarmDiagnosis.classify("ssh: Could not resolve hostname nope") == .network)
+    #expect(WarmDiagnosis.classify("@@@ REMOTE HOST IDENTIFICATION HAS CHANGED! @@@") == .hostKey)
+    #expect(WarmDiagnosis.classify("Host key verification failed.") == .hostKey)
+    #expect(WarmDiagnosis.classify("some unexpected banter") == .unknown)
+
+    #expect(WarmDiagnosis.shortReason("Permission denied (keyboard-interactive).") == "the code or password was rejected")
+    // Unknown output falls back to ssh's own last non-empty line.
+    #expect(WarmDiagnosis.shortReason("first line\n  weird tail line  \n") == "weird tail line")
+}
+
 @Test func sshConfigParserFollowsIncludes() async throws {
     let tempDirectory = FileManager.default.temporaryDirectory
         .appendingPathComponent("burrow-sshconfig-\(UUID().uuidString)", isDirectory: true)
