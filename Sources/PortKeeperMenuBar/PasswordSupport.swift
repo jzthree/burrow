@@ -324,6 +324,55 @@ enum PasswordPrompt {
     }
 }
 
+enum WarmSignInPrompt {
+    struct Result {
+        let code: String?
+        let password: String?
+    }
+
+    /// Asks for the current 2FA code (and, optionally, an SSH password) so
+    /// Burrow can warm a host that needs interactive auth. The values answer the
+    /// SSH prompts for this one connection via askpass and are never stored.
+    @MainActor
+    static func request(alias: String, host: String) -> Result? {
+        let alert = NSAlert()
+        alert.messageText = "Sign in to keep \(alias) warm"
+        alert.informativeText = "Burrow is opening a persistent SSH connection to \(host).\n\nEnter your current 2FA code (e.g. the 6-digit token or a Duo passcode). Add an SSH password only if this host asks for one.\n\nThese answer the SSH prompts for this one connection and are not stored. If your host uses a Duo push instead of a code, cancel and use “Sign in via Terminal”."
+
+        let width: CGFloat = 320
+        let container = NSStackView(frame: NSRect(x: 0, y: 0, width: width, height: 54))
+        container.orientation = .vertical
+        container.alignment = .leading
+        container.spacing = 6
+
+        let codeField = NSTextField(frame: NSRect(x: 0, y: 0, width: width, height: 24))
+        codeField.placeholderString = "Current 2FA code"
+        let passwordField = NSSecureTextField(frame: NSRect(x: 0, y: 0, width: width, height: 24))
+        passwordField.placeholderString = "SSH password (only if prompted)"
+
+        for field in [codeField, passwordField] as [NSTextField] {
+            field.translatesAutoresizingMaskIntoConstraints = false
+            field.widthAnchor.constraint(equalToConstant: width).isActive = true
+            container.addArrangedSubview(field)
+        }
+        alert.accessoryView = container
+        alert.window.initialFirstResponder = codeField
+
+        alert.addButton(withTitle: "Warm")
+        alert.addButton(withTitle: "Cancel")
+
+        guard alert.runModal() == .alertFirstButtonReturn else {
+            return nil
+        }
+        let code = codeField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        let password = passwordField.stringValue.trimmingCharacters(in: .newlines)
+        return Result(
+            code: code.isEmpty ? nil : code,
+            password: password.isEmpty ? nil : password
+        )
+    }
+}
+
 enum SSHHostPrompt {
     @MainActor
     static func request() -> SSHConfigWriter.HostEntry? {

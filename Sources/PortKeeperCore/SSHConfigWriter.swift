@@ -72,7 +72,10 @@ public enum SSHConfigWriter {
         guard !hostName.isEmpty, !hostName.contains(where: { $0.isWhitespace }) else {
             throw WriteError.invalidEntry("A host name (address) is required.")
         }
-        if SSHConfigParser.parse(fileAt: url).contains(where: { $0.alias.lowercased() == alias.lowercased() }) {
+        let existingAliases = SSHConfigParser.parse(fileAt: url)
+            .flatMap { $0.allAliases }
+            .map { $0.lowercased() }
+        if existingAliases.contains(alias.lowercased()) {
             throw WriteError.duplicateAlias(alias)
         }
 

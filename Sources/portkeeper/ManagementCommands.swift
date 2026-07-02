@@ -46,7 +46,7 @@ extension CLI {
         let hosts = SSHConfigParser.parse()
         let selected: [SSHConfigHost]
         if let alias = rest.first(where: { !$0.hasPrefix("-") }) {
-            selected = hosts.filter { $0.alias == alias }
+            selected = hosts.filter { $0.matchesAlias(alias) }
             if selected.isEmpty {
                 print("Host '\(alias)' not found in \(SSHConfigParser.defaultConfigURL().path).")
                 return
@@ -90,7 +90,7 @@ extension CLI {
         guard let alias = rest.first(where: { !$0.hasPrefix("-") }) else {
             throw CLIError("usage: burrow hosts warm <alias>")
         }
-        guard SSHConfigParser.parse().contains(where: { $0.alias == alias }) else {
+        guard SSHConfigParser.parse().contains(where: { $0.matchesAlias(alias) }) else {
             throw CLIError("host '\(alias)' not found in \(SSHConfigParser.defaultConfigURL().path)")
         }
         if SSHHostWarmer.isWarm(alias: alias) {

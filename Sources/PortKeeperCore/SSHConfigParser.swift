@@ -3,6 +3,10 @@ import Foundation
 
 public struct SSHConfigHost: Sendable, Equatable {
     public var alias: String
+    /// Extra names on the same `Host` line (e.g. an FQDN listed next to a short
+    /// name). They target the same stanza, so the host is shown as a single
+    /// entry keyed on `alias`, not one row per name.
+    public var additionalAliases: [String]
     public var hostName: String?
     public var user: String?
     public var port: Int?
@@ -12,6 +16,7 @@ public struct SSHConfigHost: Sendable, Equatable {
 
     public init(
         alias: String,
+        additionalAliases: [String] = [],
         hostName: String? = nil,
         user: String? = nil,
         port: Int? = nil,
@@ -20,6 +25,7 @@ public struct SSHConfigHost: Sendable, Equatable {
         forwards: [ForwardSpec] = []
     ) {
         self.alias = alias
+        self.additionalAliases = additionalAliases
         self.hostName = hostName
         self.user = user
         self.port = port
@@ -31,6 +37,16 @@ public struct SSHConfigHost: Sendable, Equatable {
     public var effectiveHost: String {
         hostName ?? alias
     }
+
+    /// Every name this stanza answers to — the primary alias and any extras.
+    public var allAliases: [String] {
+        [alias] + additionalAliases
+    }
+
+    /// Whether `candidate` is this stanza's primary or any additional alias.
+    public func matchesAlias(_ candidate: String) -> Bool {
+        alias == candidate || additionalAliases.contains(candidate)
+    }
 }
 
 public enum SSHConfigParser {
@@ -40,9 +56,11 @@ public enum SSHConfigParser {
             .appendingPathComponent("config", isDirectory: false)
     }
 
-    /// Parses an OpenSSH client config into per-alias host entries.
-    /// Wildcard host patterns (`*`, `?`, `!`) are skipped: they describe defaults,
-    /// not concrete endpoints a tunnel can target.
+    /// Parses an OpenSSH client config into one entry per `Host` stanza. A
+    /// `Host` line with several names becomes a single entry keyed on the first
+    /// name, with the rest kept in `additionalAliases`. Wildcard host patterns
+    /// (`*`, `?`, `!`) are skipped: they describe defaults, not concrete
+    /// endpoints a tunnel can target.
     public static func parse(fileAt url: URL = defaultConfigURL()) -> [SSHConfigHost] {
         var visited: Set<String> = []
         let lines = collectLines(fileAt: url, visited: &visited)
@@ -73,9 +91,13 @@ public enum SSHConfigParser {
 
             if keyword == "host" {
                 flush()
-                currentHosts = tokenize(value)
+                let patterns = tokenize(value)
                     .filter { !$0.contains("*") && !$0.contains("?") && !$0.hasPrefix("!") }
-                    .map { SSHConfigHost(alias: $0) }
+                if let primary = patterns.first {
+                    currentHosts = [SSHConfigHost(alias: primary, additionalAliases: Array(patterns.dropFirst()))]
+                } else {
+                    currentHosts = []
+                }
                 continue
             }
 

@@ -439,6 +439,29 @@ private func waitUntil(timeout: TimeInterval, condition: @escaping @Sendable () 
     #expect(web.port == 22)
 }
 
+@Test func sshConfigParserCollapsesMultiNameHostLine() async throws {
+    let contents = """
+    Host vista vista.tacc.utexas.edu
+      HostName vista.tacc.utexas.edu
+      User jzthree
+
+    Host plain
+      User bob
+    """
+
+    let hosts = SSHConfigParser.parse(contents: contents)
+
+    #expect(hosts.count == 2)
+    let vista = try #require(hosts.first)
+    #expect(vista.alias == "vista")
+    #expect(vista.additionalAliases == ["vista.tacc.utexas.edu"])
+    #expect(vista.allAliases == ["vista", "vista.tacc.utexas.edu"])
+    #expect(vista.matchesAlias("vista.tacc.utexas.edu"))
+    #expect(vista.effectiveHost == "vista.tacc.utexas.edu")
+    #expect(vista.user == "jzthree")
+    #expect(hosts[1].additionalAliases.isEmpty)
+}
+
 @Test func sshConfigParserFollowsIncludes() async throws {
     let tempDirectory = FileManager.default.temporaryDirectory
         .appendingPathComponent("burrow-sshconfig-\(UUID().uuidString)", isDirectory: true)

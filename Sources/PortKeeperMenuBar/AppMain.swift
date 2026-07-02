@@ -986,10 +986,11 @@ final class MenuBarViewModel: ObservableObject {
     /// Establishes the background master for a host. First tries silently —
     /// key-only hosts and ones fully answerable from a saved password and/or an
     /// enrolled 2FA seed warm with no window. When silent auth can't complete
-    /// (a password we don't have, a Duo push, a code Burrow can't generate) and
-    /// `allowInteractive` is set, it opens a Terminal so the user finishes the
-    /// sign-in by hand; the resulting persistent master is then detected warm by
-    /// the periodic refresh. 2FA generation presents Touch ID once.
+    /// (a password we don't have, a code Burrow can't generate) and
+    /// `allowInteractive` is set, it pops a dialog for the current 2FA code (and
+    /// password, if needed) and answers the SSH prompts with it via askpass.
+    /// For a Duo push, `warmHostInTerminal` opens a terminal instead. 2FA
+    /// generation presents Touch ID once.
     func warmHost(alias: String, allowInteractive: Bool = true) {
         guard let tunnel = tunnel(forSSHHostAlias: alias) else { return }
         let account = linkedTwoFactorAccount(for: tunnel)
@@ -1042,19 +1043,67 @@ final class MenuBarViewModel: ObservableObject {
                 return
             }
 
-            // 2. Silent auth couldn't complete. Let the user finish it by hand.
+            // 2. Silent auth couldn't complete. Ask for the current code (and a
+            //    password, if the host uses one) in a dialog and answer the SSH
+            //    prompts with it via askpass.
             guard allowInteractive else {
                 self.warmHosts.remove(alias)
                 self.globalMessage = "\(alias) is primed — use ⋯ ▸ Finish Sign-In to complete it."
                 return
             }
-            let oneTimeCode = codes.map {
-                SSHTerminalLauncher.OneTimeCode(
-                    accountName: account?.name ?? alias,
-                    currentCode: $0.current,
-                    nextCode: $0.next,
-                    periodEnd: $0.periodEnd
-                )
+            guard let entered = WarmSignInPrompt.request(alias: alias, host: tunnel.host) else {
+                self.warmHosts.remove(alias)
+                self.globalMessage = "\(alias) not warmed."
+                return
+            }
+            let interactiveEnv = try? AskPassSupport.warmEnvironment(
+                password: entered.password ?? savedPassword,
+                otpCode: entered.code ?? codes?.current
+            )
+            self.globalMessage = "Signing in to \(alias)…"
+            let signedIn = await Task.detached(operation: { SSHHostWarmer.warm(alias: alias, environment: interactiveEnv) }).value
+            if signedIn {
+                self.warmHosts.insert(alias)
+                self.globalMessage = "\(alias) is warm — terminals open instantly."
+            } else {
+                self.warmHosts.remove(alias)
+                self.globalMessage = "Couldn't warm \(alias) with that code. For a Duo push, use ⋯ ▸ Sign in via Terminal."
+            }
+        }
+    }
+
+    /// Interactive warm via a Terminal — the fallback for hosts a dialog can't
+    /// answer, e.g. a Duo push you approve on your phone. Auto-answers a token
+    /// prompt when a seed is enrolled; otherwise you complete each prompt in the
+    /// terminal. The persistent master is picked up warm by the periodic refresh.
+    func warmHostInTerminal(alias: String) {
+        guard let tunnel = tunnel(forSSHHostAlias: alias) else { return }
+        let account = linkedTwoFactorAccount(for: tunnel)
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            var oneTimeCode: SSHTerminalLauncher.OneTimeCode?
+            if let account {
+                do {
+                    let codes = try await self.twoFactorStore.currentAndNextCodes(
+                        for: account,
+                        reason: "Keep \(alias) warm with the \(account.name) 2FA code",
+                        at: Date(),
+                        unlockCacheSeconds: self.twoFactorUnlockCacheSeconds
+                    )
+                    oneTimeCode = SSHTerminalLauncher.OneTimeCode(
+                        accountName: account.name,
+                        currentCode: codes.current,
+                        nextCode: codes.next,
+                        periodEnd: codes.periodEnd
+                    )
+                } catch let error as TwoFactorStoreError {
+                    if case .cancelled = error { return }
+                    self.globalMessage = error.localizedDescription
+                    return
+                } catch {
+                    self.globalMessage = error.localizedDescription
+                    return
+                }
             }
             do {
                 try SSHTerminalLauncher.openWarm(
@@ -1065,7 +1114,6 @@ final class MenuBarViewModel: ObservableObject {
                 )
                 self.globalMessage = "Finish signing in to \(alias) in \(self.terminalAppDisplayName); it stays warm afterward."
             } catch {
-                self.warmHosts.remove(alias)
                 self.globalMessage = "Couldn't open a sign-in window for \(alias): \(error.localizedDescription)"
             }
         }
@@ -1107,7 +1155,7 @@ final class MenuBarViewModel: ObservableObject {
     /// A minimal tunnel standing in for a config host: name == alias so the
     /// launcher emits `ssh <alias>` and inherits the user's full ssh config.
     private func tunnel(forSSHHostAlias alias: String) -> TunnelConfig? {
-        guard let host = sshConfigHosts.first(where: { $0.alias == alias }) else {
+        guard let host = sshConfigHosts.first(where: { $0.matchesAlias(alias) }) else {
             return nil
         }
         return TunnelConfig(
@@ -3201,6 +3249,7 @@ struct MenuBarContent: View {
                             onCopy: { viewModel.copySSHHostCommand(alias: host.alias) },
                             onToggleKeepWarm: { viewModel.toggleKeepWarm(alias: host.alias) },
                             onWarmNow: { viewModel.warmHost(alias: host.alias) },
+                            onWarmInTerminal: { viewModel.warmHostInTerminal(alias: host.alias) },
                             onHide: { viewModel.hideSSHHost(alias: host.alias) },
                             onRemove: { viewModel.removeSSHHost(alias: host.alias) }
                         )
@@ -3263,6 +3312,7 @@ private struct SSHHostRow: View {
     let onCopy: () -> Void
     let onToggleKeepWarm: () -> Void
     let onWarmNow: () -> Void
+    let onWarmInTerminal: () -> Void
     let onHide: () -> Void
     let onRemove: () -> Void
 
@@ -3340,6 +3390,19 @@ private struct SSHHostRow: View {
             .help("Copy the ssh command")
             .opacity(hovering ? 1 : 0.35)
 
+            // Hide reveals only on hover — a light-touch way to declutter the
+            // menu without opening the ⋯ menu (also still available there).
+            Button(action: onHide) {
+                Image(systemName: "eye.slash")
+                    .font(.system(size: 11.5))
+                    .foregroundStyle(.secondary.opacity(0.7))
+                    .frame(width: 24, height: 26)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .help("Hide \(host.alias) from the menu (unhide from the SSH Hosts header)")
+            .opacity(hovering ? 1 : 0)
+
             Menu {
                 Button("Open SSH in Terminal", action: onOpen)
                 Button("Copy SSH Command", action: onCopy)
@@ -3351,6 +3414,9 @@ private struct SSHHostRow: View {
                     Button("Stop Keeping Warm", action: onToggleKeepWarm)
                 } else {
                     Button("Keep Warm", action: onToggleKeepWarm)
+                }
+                if !isWarm {
+                    Button("Sign in via Terminal…", action: onWarmInTerminal)
                 }
                 Button("Hide from Menu", action: onHide)
                 Button("Remove from ~/.ssh/config…", role: .destructive, action: onRemove)
