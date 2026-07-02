@@ -1064,11 +1064,23 @@ final class MenuBarViewModel: ObservableObject {
                     self.globalMessage = "\(alias) not warmed."
                     return
                 }
-                let interactiveEnv = try? AskPassSupport.warmEnvironment(
-                    password: entered.password ?? savedPassword,
-                    otpCode: entered.code ?? codes?.current
-                )
-                self.globalMessage = "Signing in to \(alias)…"
+                let interactiveEnv: [String: String]?
+                if entered.sendDuoPush {
+                    // Answer the Duo device menu with the push option (1) and let
+                    // ssh block until the phone approval comes back.
+                    interactiveEnv = try? AskPassSupport.warmEnvironment(
+                        password: entered.password ?? savedPassword,
+                        otpCode: nil,
+                        duoOption: "1"
+                    )
+                    self.globalMessage = "Sent a Duo push to \(alias) — approve it on your device…"
+                } else {
+                    interactiveEnv = try? AskPassSupport.warmEnvironment(
+                        password: entered.password ?? savedPassword,
+                        otpCode: entered.code ?? codes?.current
+                    )
+                    self.globalMessage = "Signing in to \(alias)…"
+                }
                 let outcome = await Task.detached(operation: { SSHHostWarmer.warm(alias: alias, environment: interactiveEnv) }).value
                 if outcome.succeeded {
                     if await Task.detached(operation: { SSHHostWarmer.isWarm(alias: alias) }).value {

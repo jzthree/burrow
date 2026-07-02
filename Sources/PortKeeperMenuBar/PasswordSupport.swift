@@ -328,12 +328,16 @@ enum WarmSignInPrompt {
     struct Result {
         let code: String?
         let password: String?
+        /// The user chose "Send Duo Push" — answer the Duo device menu with the
+        /// push option and wait for phone approval instead of a typed code.
+        let sendDuoPush: Bool
     }
 
-    /// Asks for the current 2FA code (and, optionally, an SSH password) so
-    /// Burrow can warm a host that needs interactive auth. The values answer the
-    /// SSH prompts for this one connection via askpass and are never stored.
-    /// `retry`/`reason` re-ask after a rejected attempt.
+    /// Asks for the current 2FA code (and, optionally, an SSH password), or lets
+    /// the user send a Duo push, so Burrow can warm a host that needs
+    /// interactive auth. The values answer the SSH prompts for this one
+    /// connection via askpass and are never stored. `retry`/`reason` re-ask after
+    /// a rejected attempt.
     @MainActor
     static func request(alias: String, host: String, retry: Bool = false, reason: String? = nil) -> Result? {
         let alert = NSAlert()
@@ -341,10 +345,10 @@ enum WarmSignInPrompt {
             alert.messageText = "That didn’t work — try \(alias) again"
             alert.alertStyle = .warning
             let detail = reason.map { "\($0.prefix(1).capitalized)\($0.dropFirst())." } ?? "The previous attempt was rejected."
-            alert.informativeText = "\(detail)\n\nEnter a fresh 2FA code for \(host) (codes expire quickly). Add an SSH password only if this host asks for one. If your host uses a Duo push instead of a code, cancel and use “Sign in via Terminal”."
+            alert.informativeText = "\(detail)\n\nEnter a fresh 2FA code for \(host) (codes expire quickly), or send a Duo push. Add an SSH password only if this host asks for one."
         } else {
             alert.messageText = "Sign in to keep \(alias) warm"
-            alert.informativeText = "Burrow is opening a persistent SSH connection to \(host).\n\nEnter your current 2FA code (e.g. the 6-digit token or a Duo passcode). Add an SSH password only if this host asks for one.\n\nThese answer the SSH prompts for this one connection and are not stored. If your host uses a Duo push instead of a code, cancel and use “Sign in via Terminal”."
+            alert.informativeText = "Burrow is opening a persistent SSH connection to \(host).\n\nEnter your current 2FA code (e.g. the 6-digit token or a Duo passcode), or send a Duo push and approve it on your phone. Add an SSH password only if this host asks for one.\n\nThese answer the SSH prompts for this one connection and are not stored."
         }
 
         let width: CGFloat = 320
@@ -366,17 +370,23 @@ enum WarmSignInPrompt {
         alert.accessoryView = container
         alert.window.initialFirstResponder = codeField
 
-        alert.addButton(withTitle: "Warm")
-        alert.addButton(withTitle: "Cancel")
+        alert.addButton(withTitle: "Warm")          // .alertFirstButtonReturn
+        alert.addButton(withTitle: "Send Duo Push") // .alertSecondButtonReturn
+        alert.addButton(withTitle: "Cancel")        // .alertThirdButtonReturn
 
-        guard alert.runModal() == .alertFirstButtonReturn else {
+        let response = alert.runModal()
+        if response == .alertThirdButtonReturn {
             return nil
         }
-        let code = codeField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
         let password = passwordField.stringValue.trimmingCharacters(in: .newlines)
+        if response == .alertSecondButtonReturn {
+            return Result(code: nil, password: password.isEmpty ? nil : password, sendDuoPush: true)
+        }
+        let code = codeField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
         return Result(
             code: code.isEmpty ? nil : code,
-            password: password.isEmpty ? nil : password
+            password: password.isEmpty ? nil : password,
+            sendDuoPush: false
         )
     }
 }
@@ -450,10 +460,12 @@ enum AskPassSupport {
     }
 
     /// Askpass env for warming a host: answers password prompts with `password`
-    /// (if any) and 2FA / one-time-code prompts with `otpCode`. Used for the
-    /// no-tty `ssh -fN` warm connection, where SSH_ASKPASS_REQUIRE=force routes
-    /// keyboard-interactive prompts through the helper.
-    static func warmEnvironment(password: String?, otpCode: String?) throws -> [String: String] {
+    /// (if any), 2FA / one-time-code prompts with `otpCode`, and a Duo device
+    /// menu ("Passcode or option (1-3):") with `duoOption` (the push choice) when
+    /// set. Used for the no-tty `ssh -fN` warm connection, where
+    /// SSH_ASKPASS_REQUIRE=force routes keyboard-interactive prompts through the
+    /// helper.
+    static func warmEnvironment(password: String?, otpCode: String?, duoOption: String? = nil) throws -> [String: String] {
         let scriptURL = try promptAwareScriptURL()
         var env: [String: String] = [
             "SSH_ASKPASS": scriptURL.path,
@@ -462,6 +474,7 @@ enum AskPassSupport {
         ]
         if let password { env["BURROW_PASSWORD"] = password }
         if let otpCode { env["BURROW_OTP_CODE"] = otpCode }
+        if let duoOption { env["BURROW_DUO_OPTION"] = duoOption }
         return env
     }
 
@@ -483,12 +496,18 @@ enum AskPassSupport {
 
     private static func promptAwareScriptURL() throws -> URL {
         let scriptURL = try binDirectory().appendingPathComponent("askpass-warm.sh")
-        // $1 is the prompt text. Code-ish prompts get the OTP; everything else
-        // gets the password. Falls back to the other value if one is empty.
+        // $1 is the prompt text. A Duo device menu ("...option (1-3):") gets the
+        // push option; code-ish prompts get the OTP; everything else gets the
+        // password. Each branch falls back to the other value if one is empty.
         let contents = """
         #!/bin/sh
         prompt=$(printf '%s' "$1" | tr 'A-Z' 'a-z')
         case "$prompt" in
+          *option*|*duo*push*)
+            if [ -n "$BURROW_DUO_OPTION" ]; then printf '%s\\n' "$BURROW_DUO_OPTION"
+            elif [ -n "$BURROW_OTP_CODE" ]; then printf '%s\\n' "$BURROW_OTP_CODE"
+            else printf '%s\\n' "$BURROW_PASSWORD"; fi
+            ;;
           *verification*code*|*one-time*|*one\\ time*|*token*|*passcode*|*otp*|*duo*|*authenticator*|*2fa*)
             if [ -n "$BURROW_OTP_CODE" ]; then printf '%s\\n' "$BURROW_OTP_CODE"; else printf '%s\\n' "$BURROW_PASSWORD"; fi
             ;;
