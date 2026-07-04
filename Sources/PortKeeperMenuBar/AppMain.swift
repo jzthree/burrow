@@ -283,6 +283,27 @@ final class MenuBarViewModel: ObservableObject {
             for state in self.tunnels where self.tasks[state.id] != nil {
                 self.restartTunnel(named: state.id)
             }
+            self.rewarmKeptHostsAfterWake()
+        }
+    }
+
+    /// A kept-warm master's TCP dies on sleep even while its process lingers (up
+    /// to ServerAliveCountMax×Interval). Probe each kept-warm host; if it isn't
+    /// actually responsive, drop the stale master and re-warm silently. Key-only
+    /// hosts and ones with a linked 2FA seed come back on their own (the seed is
+    /// behind Touch ID / the unlock cache); hosts that need a typed code go cold
+    /// for the user to warm. Responsive masters are left untouched — no needless
+    /// re-auth.
+    private func rewarmKeptHostsAfterWake() {
+        for alias in keepWarmHosts {
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                let responsive = await Task.detached { SSHHostWarmer.isResponsive(alias: alias) }.value
+                guard !responsive else { return }
+                await Task.detached { SSHHostWarmer.cool(alias: alias) }.value
+                self.warmHosts.remove(alias)
+                self.warmHost(alias: alias, allowInteractive: false)
+            }
         }
     }
 
@@ -1411,6 +1432,18 @@ final class MenuBarViewModel: ObservableObject {
 
     var twoFactorAccountNames: [String] {
         twoFactorAccounts.map(\.name)
+    }
+
+    /// Enrolls a TOTP seed named after the host and links it in one step, so
+    /// keep-warm can answer the host's 2FA prompt automatically behind Touch ID.
+    func enrollAndLinkTwoFactor(forHostAlias alias: String) {
+        guard let secret = SSHHostPrompt.requestTwoFactorSecret(alias: alias) else {
+            return
+        }
+        if enrollTwoFactor(name: alias, secret: secret) {
+            setTwoFactorLink(accountName: alias, forHostAlias: alias)
+            globalMessage = "Enrolled and linked 2FA for \(alias) — warming will enter codes automatically."
+        }
     }
 
     /// Links a 2FA account to a host alias (at most one account per host): clears
@@ -3353,6 +3386,7 @@ struct MenuBarContent: View {
                             linkedTwoFactorName: viewModel.linkedTwoFactorName(forHostAlias: host.alias),
                             twoFactorAccountNames: viewModel.twoFactorAccountNames,
                             onSetTwoFactor: { viewModel.setTwoFactorLink(accountName: $0, forHostAlias: host.alias) },
+                            onEnrollTwoFactor: { viewModel.enrollAndLinkTwoFactor(forHostAlias: host.alias) },
                             onEdit: { viewModel.editSSHHost(alias: host.alias) },
                             onHide: { viewModel.hideSSHHost(alias: host.alias) },
                             onRemove: { viewModel.removeSSHHost(alias: host.alias) }
@@ -3420,6 +3454,7 @@ private struct SSHHostRow: View {
     let linkedTwoFactorName: String?
     let twoFactorAccountNames: [String]
     let onSetTwoFactor: (String?) -> Void
+    let onEnrollTwoFactor: () -> Void
     let onEdit: () -> Void
     let onHide: () -> Void
     let onRemove: () -> Void
@@ -3550,6 +3585,9 @@ private struct SSHHostRow: View {
                             Text(name).tag(Optional(name))
                         }
                     }
+                }
+                if linkedTwoFactorName == nil {
+                    Button("Enroll 2FA for This Host…", action: onEnrollTwoFactor)
                 }
                 Divider()
                 Button("Edit…", action: onEdit)

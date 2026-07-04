@@ -442,6 +442,30 @@ enum SSHHostPrompt {
         )
     }
 
+    /// Collects a host's TOTP setup key so Burrow can enter 2FA codes for it
+    /// automatically. Sensitive but shown plainly (matching the Authenticator) so
+    /// the user can verify what they paste.
+    @MainActor
+    static func requestTwoFactorSecret(alias: String) -> String? {
+        let alert = NSAlert()
+        alert.messageText = "Enroll 2FA for \(alias)"
+        alert.informativeText = "Paste this host's authenticator setup key — its otpauth:// link or the “can't scan” base32 secret.\n\nBurrow stores it in your macOS Keychain and enters the code automatically (behind Touch ID / your Mac password) whenever it keeps \(alias) warm. This works only for TOTP-based 2FA — a Duo push or hardware token has no key to enroll."
+
+        let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 340, height: 24))
+        field.placeholderString = "otpauth://… or base32 key"
+        alert.accessoryView = field
+        alert.window.initialFirstResponder = field
+
+        alert.addButton(withTitle: "Enroll & Link")
+        alert.addButton(withTitle: "Cancel")
+
+        guard alert.runModal() == .alertFirstButtonReturn else {
+            return nil
+        }
+        let secret = field.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        return secret.isEmpty ? nil : secret
+    }
+
     struct EditResult {
         let hostName: String
         let user: String?
