@@ -347,36 +347,76 @@ enum WarmSignInPrompt {
     @MainActor
     static func request(alias: String, host: String, retry: Bool = false, reason: String? = nil, serverPrompts: [String] = []) -> Result? {
         let alert = NSAlert()
-        // What the host literally asked, captured from the last attempt's
-        // askpass — so the user answers the actual question instead of
-        // guessing between code, password, and push.
-        let asked = renderedPrompts(serverPrompts).map { "\n\n\(host) asked:\n\($0)" } ?? ""
+        // The copy stays agnostic about what the host wants — password, 2FA
+        // code, or Duo push are all equally possible. The host's own words,
+        // shown prominently below, are what tells the user which to answer.
         if retry {
             alert.messageText = "That didn’t work — try \(alias) again"
             alert.alertStyle = .warning
             let detail = reason.map { "\($0.prefix(1).capitalized)\($0.dropFirst())." } ?? "The previous attempt was rejected."
-            alert.informativeText = "\(detail)\(asked)\n\nEnter a fresh 2FA code for \(host) (codes expire quickly), or send a Duo push. Add an SSH password only if this host asks for one."
+            alert.informativeText = "\(detail)\n\nAnswer the host's prompt below with fresh values — codes expire quickly. Entries are used once and not stored."
         } else {
             alert.messageText = "Sign in to keep \(alias) warm"
-            alert.informativeText = "Burrow is opening a persistent SSH connection to \(host).\(asked)\n\nEnter your current 2FA code (e.g. the 6-digit token or a Duo passcode), or send a Duo push and approve it on your phone. Add an SSH password only if this host asks for one.\n\nThese answer the SSH prompts for this one connection and are not stored."
+            alert.informativeText = serverPrompts.isEmpty
+                ? "Burrow is opening a persistent SSH connection to \(host). Depending on the host, it may ask for a password, a 2FA code, or a Duo push. Entries are used once and not stored."
+                : "Burrow is opening a persistent SSH connection to \(host). Answer what it asked below. Entries are used once and not stored."
         }
 
-        let width: CGFloat = 320
-        let container = NSStackView(frame: NSRect(x: 0, y: 0, width: width, height: 54))
+        let width: CGFloat = 340
+        let container = NSStackView()
         container.orientation = .vertical
         container.alignment = .leading
-        container.spacing = 6
+        container.spacing = 8
+        container.translatesAutoresizingMaskIntoConstraints = false
+        container.widthAnchor.constraint(equalToConstant: width).isActive = true
 
-        let codeField = NSTextField(frame: NSRect(x: 0, y: 0, width: width, height: 24))
-        codeField.placeholderString = "Current 2FA code"
-        let passwordField = NSSecureTextField(frame: NSRect(x: 0, y: 0, width: width, height: 24))
-        passwordField.placeholderString = "SSH password (only if prompted)"
+        // The server's prompt is the headline of this dialog: a caption plus
+        // the host's literal words in a bordered, terminal-style box.
+        if let promptText = renderedPrompts(serverPrompts) {
+            let caption = NSTextField(labelWithString: "\(host) asked:")
+            caption.font = .systemFont(ofSize: 11, weight: .semibold)
+            caption.textColor = .secondaryLabelColor
+            container.addArrangedSubview(caption)
+
+            let promptLabel = NSTextField(wrappingLabelWithString: promptText)
+            promptLabel.font = .monospacedSystemFont(ofSize: 11.5, weight: .regular)
+            promptLabel.isSelectable = true
+            promptLabel.translatesAutoresizingMaskIntoConstraints = false
+
+            // A layer-backed panel whose height is driven by the wrapping
+            // label's constraints (NSBox.contentView doesn't do that, so it
+            // clips to one line). This is the visual centerpiece of the dialog.
+            let box = NSView()
+            box.wantsLayer = true
+            box.layer?.cornerRadius = 6
+            box.layer?.borderWidth = 1
+            box.layer?.borderColor = NSColor.separatorColor.cgColor
+            box.layer?.backgroundColor = NSColor.unemphasizedSelectedContentBackgroundColor.cgColor
+            box.translatesAutoresizingMaskIntoConstraints = false
+            box.addSubview(promptLabel)
+            NSLayoutConstraint.activate([
+                box.widthAnchor.constraint(equalToConstant: width),
+                promptLabel.leadingAnchor.constraint(equalTo: box.leadingAnchor, constant: 10),
+                promptLabel.trailingAnchor.constraint(equalTo: box.trailingAnchor, constant: -10),
+                promptLabel.topAnchor.constraint(equalTo: box.topAnchor, constant: 8),
+                promptLabel.bottomAnchor.constraint(equalTo: box.bottomAnchor, constant: -8),
+            ])
+            container.addArrangedSubview(box)
+        }
+
+        let codeField = NSTextField()
+        codeField.placeholderString = "2FA code / passcode (if asked)"
+        let passwordField = NSSecureTextField()
+        passwordField.placeholderString = "Password (if asked)"
 
         for field in [codeField, passwordField] as [NSTextField] {
             field.translatesAutoresizingMaskIntoConstraints = false
             field.widthAnchor.constraint(equalToConstant: width).isActive = true
+            field.heightAnchor.constraint(equalToConstant: 24).isActive = true
             container.addArrangedSubview(field)
         }
+        container.layoutSubtreeIfNeeded()
+        container.setFrameSize(container.fittingSize)
         alert.accessoryView = container
         // Focus whichever field the host's own prompts point at; a
         // password-only host shouldn't land the cursor in the code field.
@@ -409,12 +449,11 @@ enum WarmSignInPrompt {
         )
     }
 
-    /// The last few prompt lines, quoted and clipped for the dialog. A Duo
+    /// The last few prompt lines, clipped for the dialog's prompt box. A Duo
     /// device menu arrives as several lines; the tail is the current state.
     private static func renderedPrompts(_ prompts: [String]) -> String? {
-        let lines = prompts.suffix(5).map { prompt -> String in
-            let clipped = prompt.count > 160 ? "\(prompt.prefix(160))…" : prompt
-            return "“\(clipped)”"
+        let lines = prompts.suffix(6).map { prompt -> String in
+            prompt.count > 160 ? "\(prompt.prefix(160))…" : prompt
         }
         return lines.isEmpty ? nil : lines.joined(separator: "\n")
     }
