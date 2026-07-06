@@ -165,6 +165,18 @@ final class MenuBarViewModel: ObservableObject {
     /// Aliases whose master connection is currently live (runtime status).
     @Published private(set) var warmHosts: Set<String> = []
 
+    /// What the last failed silent warm probe learned about a host: the
+    /// credentials it was tried with and the prompts the host sent. Lets the
+    /// next interactive warm skip the multi-second doomed ssh attempt and
+    /// open the sign-in dialog immediately.
+    private struct WarmProbeResult {
+        let hadPassword: Bool
+        let hadCodeSource: Bool
+        let prompts: [String]
+    }
+
+    private var warmProbeFailures: [String: WarmProbeResult] = [:]
+
     @Published private(set) var sshConfigHosts: [SSHConfigHost] = []
 
     private let notifier = BurrowNotifier()
@@ -237,6 +249,9 @@ final class MenuBarViewModel: ObservableObject {
         ) { [weak self] _ in
             // willTerminate fires only on a clean exit (Quit, ⌘Q, logout) — not
             // on a crash/SIGKILL — so this is exactly "intentional close".
+            // assumeIsolated is sound only because the observer above is
+            // registered with `queue: .main`; teardown must also run
+            // synchronously here — a Task would be dropped mid-terminate.
             MainActor.assumeIsolated {
                 self?.performShutdownTeardown()
             }
@@ -469,8 +484,12 @@ final class MenuBarViewModel: ObservableObject {
         }
         // Belt-and-suspenders for any ssh that outlived its SIGTERM.
         for tunnel in config.tunnels {
-            if let prepared = try? preparedTunnelForLaunch(tunnel) {
-                try? PortKeeperRuntimeRegistry.reclaimOwnedProcess(for: prepared)
+            do {
+                try PortKeeperRuntimeRegistry.reclaimOwnedProcess(for: preparedTunnelForLaunch(tunnel))
+            } catch {
+                // We're tearing down — no UI left to show this in, but leave a
+                // trace: a failed reclaim can strand an ssh holding the port.
+                NSLog("Burrow: could not reclaim ssh for %@: %@", tunnel.name, error.localizedDescription)
             }
         }
     }
@@ -764,9 +783,14 @@ final class MenuBarViewModel: ObservableObject {
         notifier.forget(name: name)
         let task = tasks[name]
         if task == nil,
-           let tunnel = tunnels.first(where: { $0.id == name })?.tunnel,
-           let preparedTunnel = try? preparedTunnelForLaunch(tunnel) {
-            try? PortKeeperRuntimeRegistry.reclaimOwnedProcess(for: preparedTunnel)
+           let tunnel = tunnels.first(where: { $0.id == name })?.tunnel {
+            do {
+                try PortKeeperRuntimeRegistry.reclaimOwnedProcess(for: preparedTunnelForLaunch(tunnel))
+            } catch {
+                // A failed reclaim can leave an orphaned ssh holding the local
+                // port; that is exactly what this stop was meant to clear.
+                globalMessage = "Could not clean up \(name)'s ssh process: \(error.localizedDescription)"
+            }
         }
 
         guard let task else {
@@ -866,12 +890,33 @@ final class MenuBarViewModel: ObservableObject {
         }
     }
 
+    func checkForUpdates() {
+        globalMessage = "Checking for updates…"
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            do {
+                let release = try await UpdateChecker.latestRelease()
+                let current = BurrowVersion.display()
+                if BurrowVersion.isNewer(release.tagName, than: current) {
+                    self.globalMessage = "Update available: \(release.tagName) (you have \(current))."
+                    if let url = URL(string: release.htmlURL) {
+                        NSWorkspace.shared.open(url)
+                    }
+                } else {
+                    self.globalMessage = "Burrow \(current) is up to date."
+                }
+            } catch {
+                self.globalMessage = "Update check failed: \(error.localizedDescription)"
+            }
+        }
+    }
+
     func setTerminalApp(_ value: String) {
         let selected = normalizedTerminalApp(value)
         do {
-            var config = try store.load()
-            config.terminalApp = selected
-            try store.save(config)
+            try store.mutate { config in
+                config.terminalApp = selected
+            }
             terminalApp = selected
             globalMessage = "SSH sessions will open in \(terminalAppDisplayName)."
         } catch {
@@ -900,9 +945,9 @@ final class MenuBarViewModel: ObservableObject {
     func setTwoFactorUnlockCacheSeconds(_ value: Int) {
         let selected = normalizedTwoFactorUnlockCacheSeconds(value)
         do {
-            var config = try store.load()
-            config.twoFactorUnlockCacheSeconds = selected
-            try store.save(config)
+            try store.mutate { config in
+                config.twoFactorUnlockCacheSeconds = selected
+            }
             twoFactorUnlockCacheSeconds = selected
             twoFactorStore.clearCache()
             globalMessage = selected == 0
@@ -1015,11 +1060,18 @@ final class MenuBarViewModel: ObservableObject {
     func warmHost(alias: String, allowInteractive: Bool = true) {
         guard let tunnel = tunnel(forSSHHostAlias: alias) else { return }
         let account = linkedTwoFactorAccount(for: tunnel)
-        let savedPassword: String? = {
-            guard let key = TunnelCredentialKey(tunnel: tunnel) else { return nil }
-            return (try? passwordStore.password(for: key)) ?? nil
-        }()
-        globalMessage = "Warming \(alias)…"
+        var savedPassword: String?
+        var keychainProblem: String?
+        if let key = TunnelCredentialKey(tunnel: tunnel) {
+            do {
+                savedPassword = try passwordStore.password(for: key)
+            } catch {
+                // A Keychain failure is not "no password saved" — say so instead
+                // of silently degrading to an interactive prompt.
+                keychainProblem = "Keychain error for \(key.account): \(error.localizedDescription)"
+            }
+        }
+        globalMessage = keychainProblem ?? "Warming \(alias)…"
         Task { @MainActor [weak self] in
             guard let self else { return }
 
@@ -1030,47 +1082,81 @@ final class MenuBarViewModel: ObservableObject {
                 return
             }
 
-            // Generate the current + next 2FA codes once (single Touch ID) when a
-            // seed is linked, so both the silent attempt and the interactive
-            // fallback can reuse them without a second prompt.
+            // An identical silent probe already failed? Skip the multi-second
+            // doomed ssh attempt and open the dialog at once with the cached
+            // prompts — the same credentials on offer give the same outcome.
+            // Background (launch/wake) attempts always probe: a fresh code can
+            // succeed, and nobody is waiting on them.
+            let cachedProbe = self.warmProbeFailures[alias]
+            let skipSilentProbe = allowInteractive
+                && cachedProbe != nil
+                && cachedProbe?.hadPassword == (savedPassword != nil)
+                && cachedProbe?.hadCodeSource == (account != nil)
+
             var codes: (current: String, next: String, periodEnd: Date)?
-            if let account {
-                do {
-                    codes = try await self.twoFactorStore.currentAndNextCodes(
-                        for: account,
-                        reason: "Keep \(alias) warm with the \(account.name) 2FA code",
-                        at: Date(),
-                        unlockCacheSeconds: self.twoFactorUnlockCacheSeconds
-                    )
-                } catch let error as TwoFactorStoreError {
-                    if case .cancelled = error { return }
-                    self.globalMessage = error.localizedDescription
-                    return
-                } catch {
-                    self.globalMessage = error.localizedDescription
+            var serverPrompts: [String]
+
+            if skipSilentProbe {
+                serverPrompts = cachedProbe?.prompts ?? []
+            } else {
+                // Generate the current + next 2FA codes once (single Touch ID)
+                // when a seed is linked, so both the silent attempt and the
+                // interactive fallback can reuse them without a second prompt.
+                if let account {
+                    do {
+                        codes = try await self.twoFactorStore.currentAndNextCodes(
+                            for: account,
+                            reason: "Keep \(alias) warm with the \(account.name) 2FA code",
+                            at: Date(),
+                            unlockCacheSeconds: self.twoFactorUnlockCacheSeconds
+                        )
+                    } catch let error as TwoFactorStoreError {
+                        if case .cancelled = error { return }
+                        self.globalMessage = error.localizedDescription
+                        return
+                    } catch {
+                        self.globalMessage = error.localizedDescription
+                        return
+                    }
+                }
+
+                // 1. Silent attempt. The askpass records every prompt the host
+                //    sends; with nothing to answer it aborts fast (never submitting
+                //    an empty response), so even a credential-less attempt tells
+                //    the dialog below what the host actually asked for.
+                let promptLog = AskPassSupport.makePromptLog()
+                let environment = try? AskPassSupport.warmEnvironment(
+                    password: savedPassword,
+                    otpCode: codes?.current,
+                    promptLog: promptLog
+                )
+                let silent = await Task.detached(operation: { SSHHostWarmer.warm(alias: alias, environment: environment) }).value
+                if silent.succeeded {
+                    _ = AskPassSupport.consumePrompts(at: promptLog)
+                    self.warmProbeFailures[alias] = nil
+                    self.warmHosts.insert(alias)
+                    self.globalMessage = "\(alias) is warm — terminals open instantly."
                     return
                 }
-            }
+                serverPrompts = AskPassSupport.consumePrompts(at: promptLog)
+                // Only a probe the host answered with prompts predicts the next
+                // one; a network hiccup (no prompts) shouldn't be cached.
+                if !serverPrompts.isEmpty {
+                    self.warmProbeFailures[alias] = WarmProbeResult(
+                        hadPassword: savedPassword != nil,
+                        hadCodeSource: account != nil,
+                        prompts: serverPrompts
+                    )
+                }
 
-            // 1. Silent attempt. A nil environment still works for key-only hosts;
-            //    hosts needing interactive input fail fast (no tty, no askpass).
-            let environment = (savedPassword != nil || codes != nil)
-                ? try? AskPassSupport.warmEnvironment(password: savedPassword, otpCode: codes?.current)
-                : nil
-            let silent = await Task.detached(operation: { SSHHostWarmer.warm(alias: alias, environment: environment) }).value
-            if silent.succeeded {
-                self.warmHosts.insert(alias)
-                self.globalMessage = "\(alias) is warm — terminals open instantly."
-                return
-            }
-
-            // 2. Silent auth couldn't complete. Ask for the current code (and a
-            //    password, if the host uses one) and answer the SSH prompts via
-            //    askpass — retrying a rejected/expired code in place.
-            guard allowInteractive else {
-                self.warmHosts.remove(alias)
-                self.globalMessage = "\(alias) is primed — use ⋯ ▸ Finish Sign-In to complete it."
-                return
+                // 2. Silent auth couldn't complete. Ask for the current code (and a
+                //    password, if the host uses one) and answer the SSH prompts via
+                //    askpass — retrying a rejected/expired code in place.
+                guard allowInteractive else {
+                    self.warmHosts.remove(alias)
+                    self.globalMessage = "\(alias) is primed — use ⋯ ▸ Finish Sign-In to complete it."
+                    return
+                }
             }
 
             var lastReason: String?
@@ -1079,12 +1165,14 @@ final class MenuBarViewModel: ObservableObject {
                     alias: alias,
                     host: tunnel.host,
                     retry: attempt > 0,
-                    reason: lastReason
+                    reason: lastReason,
+                    serverPrompts: serverPrompts
                 ) else {
                     self.warmHosts.remove(alias)
                     self.globalMessage = "\(alias) not warmed."
                     return
                 }
+                let attemptLog = AskPassSupport.makePromptLog()
                 let interactiveEnv: [String: String]?
                 if entered.sendDuoPush {
                     // Answer the Duo device menu with the push option (1) and let
@@ -1092,18 +1180,52 @@ final class MenuBarViewModel: ObservableObject {
                     interactiveEnv = try? AskPassSupport.warmEnvironment(
                         password: entered.password ?? savedPassword,
                         otpCode: nil,
-                        duoOption: "1"
+                        duoOption: "1",
+                        promptLog: attemptLog
                     )
                     self.globalMessage = "Sent a Duo push to \(alias) — approve it on your device…"
                 } else {
+                    // Deferred Touch ID: only now do we know the user wants the
+                    // linked seed (they left the code field empty), so the
+                    // dialog itself never waited on biometrics.
+                    if entered.code == nil, codes == nil, let account {
+                        do {
+                            codes = try await self.twoFactorStore.currentAndNextCodes(
+                                for: account,
+                                reason: "Keep \(alias) warm with the \(account.name) 2FA code",
+                                at: Date(),
+                                unlockCacheSeconds: self.twoFactorUnlockCacheSeconds
+                            )
+                        } catch let error as TwoFactorStoreError {
+                            if case .cancelled = error { return }
+                            self.globalMessage = error.localizedDescription
+                            return
+                        } catch {
+                            self.globalMessage = error.localizedDescription
+                            return
+                        }
+                    }
                     interactiveEnv = try? AskPassSupport.warmEnvironment(
                         password: entered.password ?? savedPassword,
-                        otpCode: entered.code ?? codes?.current
+                        otpCode: entered.code ?? codes?.current,
+                        promptLog: attemptLog
                     )
                     self.globalMessage = "Signing in to \(alias)…"
                 }
                 let outcome = await Task.detached(operation: { SSHHostWarmer.warm(alias: alias, environment: interactiveEnv) }).value
+                // Refresh "what the host asked" for the next dialog; keep the
+                // previous capture if this attempt died before any prompt.
+                let freshPrompts = AskPassSupport.consumePrompts(at: attemptLog)
+                if !freshPrompts.isEmpty {
+                    serverPrompts = freshPrompts
+                    self.warmProbeFailures[alias] = WarmProbeResult(
+                        hadPassword: savedPassword != nil,
+                        hadCodeSource: account != nil,
+                        prompts: freshPrompts
+                    )
+                }
                 if outcome.succeeded {
+                    self.warmProbeFailures[alias] = nil
                     if await Task.detached(operation: { SSHHostWarmer.isWarm(alias: alias) }).value {
                         self.warmHosts.insert(alias)
                         self.globalMessage = "\(alias) is warm — terminals open instantly."
@@ -1681,13 +1803,17 @@ final class MenuBarViewModel: ObservableObject {
 
     func setAutoConnect(named name: String, enabled: Bool) {
         do {
-            var config = try store.load()
-            guard let index = config.tunnels.firstIndex(where: { $0.name == name }) else {
+            let found = try store.mutate { config -> Bool in
+                guard let index = config.tunnels.firstIndex(where: { $0.name == name }) else {
+                    return false
+                }
+                config.tunnels[index].enabled = enabled
+                return true
+            }
+            guard found else {
                 globalMessage = "Tunnel '\(name)' not found."
                 return
             }
-            config.tunnels[index].enabled = enabled
-            try store.save(config)
             loadConfig()
             globalMessage = enabled ? "Enabled auto-connect for \(name)." : "Disabled auto-connect for \(name)."
         } catch {
@@ -2076,7 +2202,14 @@ final class MenuBarViewModel: ObservableObject {
         var pendingSave: PendingCredentialSave?
         if let credentialKey = TunnelCredentialKey(gateway: gateway) {
             let isRetry = invalidGatewayCredentialKeys.contains(credentialKey)
-            let savedPassword = isRetry ? nil : ((try? passwordStore.password(for: credentialKey)) ?? nil)
+            var savedPassword: String?
+            if !isRetry {
+                do {
+                    savedPassword = try passwordStore.password(for: credentialKey)
+                } catch {
+                    globalMessage = "Keychain error for \(credentialKey.account): \(error.localizedDescription)"
+                }
+            }
             if let savedPassword, !savedPassword.isEmpty {
                 credential = .password(savedPassword)
             } else if allowPasswordPrompt {
@@ -2212,12 +2345,30 @@ final class MenuBarViewModel: ObservableObject {
         }
 
         let socksPort = gatewayConfig.socksPort
-        let targetHost = prepared.tunnel.host
-        let targetPort = prepared.tunnel.sshPort
+        // For a jump tunnel the gateway only ever dials the FIRST HOP — the
+        // final target is reachable solely through the jump, so probing it
+        // via the proxy would wait forever on a healthy setup.
+        let probe = GatewayLinker.gatewayProbeEndpoint(for: prepared.directTunnel)
+        let targetHost = probe.host
+        let targetPort = probe.port
+        let jumpAlias = prepared.directTunnel.jumpHost.flatMap { JumpHostSpec.firstHop(of: $0)?.host }
 
         updateState(for: prepared.name, isRunning: false, state: .connecting, message: "Waiting for gateway \(gatewayName)")
         Task { @MainActor [weak self] in
             guard let self else { return }
+            // A live warm master for the jump alias means ssh will reuse its
+            // socket and never dial at all — no point holding the launch for
+            // gateway readiness (the master may predate the VPN going down).
+            if let jumpAlias {
+                let jumpWarm = await Task.detached {
+                    SSHHostWarmer.isWarm(alias: jumpAlias)
+                }.value
+                if jumpWarm {
+                    self.launchPreparedTunnel(prepared)
+                    return
+                }
+            }
+
             // Adopt a working proxy if one is already there — e.g. a VPN left
             // running by a previous Burrow session. If it can reach the target,
             // use it directly instead of forcing a fresh (SAML) reconnect.
@@ -2444,18 +2595,19 @@ final class MenuBarViewModel: ObservableObject {
     /// running ones so the new route applies immediately.
     func setGateway(_ gatewayName: String?, forTunnels names: [String]) {
         do {
-            var config = try store.load()
-            var changed: [String] = []
-            for index in config.tunnels.indices where names.contains(config.tunnels[index].name) {
-                if config.tunnels[index].gateway != gatewayName {
-                    config.tunnels[index].gateway = gatewayName
-                    changed.append(config.tunnels[index].name)
+            let changed = try store.mutate { config -> [String] in
+                var changed: [String] = []
+                for index in config.tunnels.indices where names.contains(config.tunnels[index].name) {
+                    if config.tunnels[index].gateway != gatewayName {
+                        config.tunnels[index].gateway = gatewayName
+                        changed.append(config.tunnels[index].name)
+                    }
                 }
+                return changed
             }
             guard !changed.isEmpty else {
                 return
             }
-            try store.save(config)
             loadConfig()
 
             let routeLabel = gatewayName.map { "via \($0)" } ?? "directly"
@@ -2514,8 +2666,12 @@ final class MenuBarViewModel: ObservableObject {
         }
         invalidGatewayCredentialKeys.insert(credentialKey)
         pendingGatewayCredentialSaves[name] = nil
-        try? passwordStore.deletePassword(for: credentialKey)
-        globalMessage = "VPN password for \(credentialKey.account) was rejected. Connect again to re-enter it."
+        do {
+            try passwordStore.deletePassword(for: credentialKey)
+            globalMessage = "VPN password for \(credentialKey.account) was rejected. Connect again to re-enter it."
+        } catch {
+            globalMessage = "VPN password for \(credentialKey.account) was rejected, but removing it from the Keychain failed: \(error.localizedDescription)"
+        }
     }
 
     private func connectionPreparation(
@@ -2614,20 +2770,25 @@ final class MenuBarViewModel: ObservableObject {
     /// Fires lifecycle hooks and coalesced notifications on real state edges.
     private func handleStateTransition(tunnel: TunnelConfig, from old: ConnectionState, to new: ConnectionState, message: String) {
         let name = tunnel.name
+        let reportHookFailure: @Sendable (String) -> Void = { [weak self] failure in
+            Task { @MainActor [weak self] in
+                self?.globalMessage = failure
+            }
+        }
         switch new {
         case .connected where old != .connected:
-            HookRunner.run(tunnel.onConnect, event: .connected, tunnel: tunnel)
+            HookRunner.run(tunnel.onConnect, event: .connected, tunnel: tunnel, onFailure: reportHookFailure)
             notifier.reportRecovery(name: name)
         case .failed:
             if old == .connected {
-                HookRunner.run(tunnel.onDisconnect, event: .disconnected, tunnel: tunnel)
+                HookRunner.run(tunnel.onDisconnect, event: .disconnected, tunnel: tunnel, onFailure: reportHookFailure)
                 notifier.reportProblem(name: name, reason: message)
             } else if message.localizedCaseInsensitiveContains("authentication failed")
                 || message.localizedCaseInsensitiveContains("permission denied") {
                 notifier.reportProblem(name: name, reason: message)
             }
         case .disconnected where old == .connected:
-            HookRunner.run(tunnel.onDisconnect, event: .disconnected, tunnel: tunnel)
+            HookRunner.run(tunnel.onDisconnect, event: .disconnected, tunnel: tunnel, onFailure: reportHookFailure)
             notifier.forget(name: name)
         default:
             break
@@ -3163,6 +3324,11 @@ struct MenuBarContent: View {
                         }
                     }
                 }
+
+                Divider()
+
+                Text("Burrow \(BurrowVersion.display())")
+                Button("Check for Updates…", action: viewModel.checkForUpdates)
 
                 Divider()
 

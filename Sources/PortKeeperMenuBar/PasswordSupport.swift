@@ -214,14 +214,20 @@ final class PasswordStore {
             kSecAttrAccount as String: vaultAccount,
         ]
 
+        // ThisDeviceOnly keeps the vault out of anything that leaves this Mac
+        // (Migration Assistant, backups) — matching the 2FA seed store.
+        // Included in the update too, so pre-existing vaults are upgraded on
+        // their next save.
         let update: [String: Any] = [
             kSecValueData as String: data,
+            kSecAttrAccessible as String: kSecAttrAccessibleWhenUnlockedThisDeviceOnly,
         ]
 
         let status = SecItemUpdate(query as CFDictionary, update as CFDictionary)
         if status == errSecItemNotFound {
             var create = query
             create[kSecValueData as String] = data
+            create[kSecAttrAccessible as String] = kSecAttrAccessibleWhenUnlockedThisDeviceOnly
             let addStatus = SecItemAdd(create as CFDictionary, nil)
             guard addStatus == errSecSuccess else {
                 throw PasswordStoreError.unhandled(addStatus)
@@ -339,16 +345,20 @@ enum WarmSignInPrompt {
     /// connection via askpass and are never stored. `retry`/`reason` re-ask after
     /// a rejected attempt.
     @MainActor
-    static func request(alias: String, host: String, retry: Bool = false, reason: String? = nil) -> Result? {
+    static func request(alias: String, host: String, retry: Bool = false, reason: String? = nil, serverPrompts: [String] = []) -> Result? {
         let alert = NSAlert()
+        // What the host literally asked, captured from the last attempt's
+        // askpass — so the user answers the actual question instead of
+        // guessing between code, password, and push.
+        let asked = renderedPrompts(serverPrompts).map { "\n\n\(host) asked:\n\($0)" } ?? ""
         if retry {
             alert.messageText = "That didn’t work — try \(alias) again"
             alert.alertStyle = .warning
             let detail = reason.map { "\($0.prefix(1).capitalized)\($0.dropFirst())." } ?? "The previous attempt was rejected."
-            alert.informativeText = "\(detail)\n\nEnter a fresh 2FA code for \(host) (codes expire quickly), or send a Duo push. Add an SSH password only if this host asks for one."
+            alert.informativeText = "\(detail)\(asked)\n\nEnter a fresh 2FA code for \(host) (codes expire quickly), or send a Duo push. Add an SSH password only if this host asks for one."
         } else {
             alert.messageText = "Sign in to keep \(alias) warm"
-            alert.informativeText = "Burrow is opening a persistent SSH connection to \(host).\n\nEnter your current 2FA code (e.g. the 6-digit token or a Duo passcode), or send a Duo push and approve it on your phone. Add an SSH password only if this host asks for one.\n\nThese answer the SSH prompts for this one connection and are not stored."
+            alert.informativeText = "Burrow is opening a persistent SSH connection to \(host).\(asked)\n\nEnter your current 2FA code (e.g. the 6-digit token or a Duo passcode), or send a Duo push and approve it on your phone. Add an SSH password only if this host asks for one.\n\nThese answer the SSH prompts for this one connection and are not stored."
         }
 
         let width: CGFloat = 320
@@ -368,7 +378,16 @@ enum WarmSignInPrompt {
             container.addArrangedSubview(field)
         }
         alert.accessoryView = container
-        alert.window.initialFirstResponder = codeField
+        // Focus whichever field the host's own prompts point at; a
+        // password-only host shouldn't land the cursor in the code field.
+        let asksCode = serverPrompts.contains(where: looksLikeCodePrompt)
+        let asksDuoMenu = serverPrompts.contains(where: looksLikeDuoMenu)
+        let asksPassword = serverPrompts.contains {
+            let lowered = $0.lowercased()
+            return lowered.contains("password") || lowered.contains("passphrase")
+        }
+        alert.window.initialFirstResponder =
+            (asksPassword && !asksCode && !asksDuoMenu) ? passwordField : codeField
 
         alert.addButton(withTitle: "Warm")          // .alertFirstButtonReturn
         alert.addButton(withTitle: "Send Duo Push") // .alertSecondButtonReturn
@@ -388,6 +407,27 @@ enum WarmSignInPrompt {
             password: password.isEmpty ? nil : password,
             sendDuoPush: false
         )
+    }
+
+    /// The last few prompt lines, quoted and clipped for the dialog. A Duo
+    /// device menu arrives as several lines; the tail is the current state.
+    private static func renderedPrompts(_ prompts: [String]) -> String? {
+        let lines = prompts.suffix(5).map { prompt -> String in
+            let clipped = prompt.count > 160 ? "\(prompt.prefix(160))…" : prompt
+            return "“\(clipped)”"
+        }
+        return lines.isEmpty ? nil : lines.joined(separator: "\n")
+    }
+
+    private static func looksLikeCodePrompt(_ prompt: String) -> Bool {
+        let lowered = prompt.lowercased()
+        return ["verification code", "one-time", "one time", "token", "passcode", "otp", "authenticator", "2fa"]
+            .contains { lowered.contains($0) }
+    }
+
+    private static func looksLikeDuoMenu(_ prompt: String) -> Bool {
+        let lowered = prompt.lowercased()
+        return lowered.contains("duo") || (lowered.contains("option") && lowered.contains("1."))
     }
 }
 
@@ -449,7 +489,7 @@ enum SSHHostPrompt {
     static func requestTwoFactorSecret(alias: String) -> String? {
         let alert = NSAlert()
         alert.messageText = "Enroll 2FA for \(alias)"
-        alert.informativeText = "Paste this host's authenticator setup key — its otpauth:// link or the “can't scan” base32 secret.\n\nBurrow stores it in your macOS Keychain and enters the code automatically (behind Touch ID / your Mac password) whenever it keeps \(alias) warm. This works only for TOTP-based 2FA — a Duo push or hardware token has no key to enroll."
+        alert.informativeText = "Paste this host's authenticator setup key — its otpauth:// link or the “can't scan” base32 secret.\n\nBurrow stores it in your macOS Keychain and asks for Touch ID / your Mac password before generating a code whenever it keeps \(alias) warm. This works only for TOTP-based 2FA — a Duo push or hardware token has no key to enroll."
 
         let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 340, height: 24))
         field.placeholderString = "otpauth://… or base32 key"
@@ -528,6 +568,7 @@ enum SSHHostPrompt {
 enum AskPassSupport {
     static func environment(password: String) throws -> [String: String] {
         let scriptURL = try askPassScriptURL()
+        cleanUpStaleLogs()
         let logURL = FileManager.default.temporaryDirectory
             .appendingPathComponent("burrow-askpass-\(UUID().uuidString).log")
         return [
@@ -547,7 +588,7 @@ enum AskPassSupport {
     /// set. Used for the no-tty `ssh -fN` warm connection, where
     /// SSH_ASKPASS_REQUIRE=force routes keyboard-interactive prompts through the
     /// helper.
-    static func warmEnvironment(password: String?, otpCode: String?, duoOption: String? = nil) throws -> [String: String] {
+    static func warmEnvironment(password: String?, otpCode: String?, duoOption: String? = nil, promptLog: URL? = nil) throws -> [String: String] {
         let scriptURL = try promptAwareScriptURL()
         var env: [String: String] = [
             "SSH_ASKPASS": scriptURL.path,
@@ -557,7 +598,52 @@ enum AskPassSupport {
         if let password { env["BURROW_PASSWORD"] = password }
         if let otpCode { env["BURROW_OTP_CODE"] = otpCode }
         if let duoOption { env["BURROW_DUO_OPTION"] = duoOption }
+        if let promptLog { env["BURROW_PROMPT_LOG"] = promptLog.path }
         return env
+    }
+
+    /// A private file the warm askpass appends each server prompt to, so the
+    /// sign-in dialog can show what the host actually asked instead of making
+    /// the user guess. The name carries the askpass prefix so the stale-log
+    /// sweep covers any file a crashed attempt leaves behind.
+    static func makePromptLog() -> URL {
+        FileManager.default.temporaryDirectory
+            .appendingPathComponent("burrow-askpass-prompts-\(UUID().uuidString).log")
+    }
+
+    /// The prompts recorded during one attempt, oldest first, de-duplicated.
+    /// Consumes the log — call exactly once per attempt, success or failure.
+    static func consumePrompts(at url: URL) -> [String] {
+        defer { try? FileManager.default.removeItem(at: url) }
+        guard let text = try? String(contentsOf: url, encoding: .utf8) else {
+            return []
+        }
+        var seen = Set<String>()
+        return text.split(whereSeparator: \.isNewline)
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty && seen.insert($0).inserted }
+    }
+
+    /// Each launch mints a fresh askpass log that nothing deletes afterwards;
+    /// sweep old ones so they don't accumulate for the life of the temp dir.
+    /// The mtime cutoff keeps logs a still-running session may yet write to.
+    private static func cleanUpStaleLogs() {
+        let fileManager = FileManager.default
+        let directory = fileManager.temporaryDirectory
+        guard let entries = try? fileManager.contentsOfDirectory(
+            at: directory,
+            includingPropertiesForKeys: [.contentModificationDateKey]
+        ) else { return }
+
+        let cutoff = Date().addingTimeInterval(-24 * 60 * 60)
+        for url in entries
+        where url.lastPathComponent.hasPrefix("burrow-askpass-") && url.pathExtension == "log" {
+            let modified = (try? url.resourceValues(forKeys: [.contentModificationDateKey]))?
+                .contentModificationDate ?? .distantPast
+            if modified < cutoff {
+                try? fileManager.removeItem(at: url)
+            }
+        }
     }
 
     private static func askPassScriptURL() throws -> URL {
@@ -583,6 +669,16 @@ enum AskPassSupport {
         // password. Each branch falls back to the other value if one is empty.
         let contents = """
         #!/bin/sh
+        # Record what the host asked (server text, not a secret) so the app
+        # can show it in the sign-in dialog.
+        if [ -n "$BURROW_PROMPT_LOG" ]; then
+          ( umask 077; printf '%s\\n' "$1" >> "$BURROW_PROMPT_LOG" ) 2>/dev/null
+        fi
+        # Nothing to answer with? Abort rather than submit an empty response —
+        # the attempt fails fast and harmlessly, but the prompt is captured.
+        if [ -z "$BURROW_DUO_OPTION" ] && [ -z "$BURROW_OTP_CODE" ] && [ -z "$BURROW_PASSWORD" ]; then
+          exit 1
+        fi
         prompt=$(printf '%s' "$1" | tr 'A-Z' 'a-z')
         case "$prompt" in
           *option*|*duo*push*)

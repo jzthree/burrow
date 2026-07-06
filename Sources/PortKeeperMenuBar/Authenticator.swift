@@ -111,7 +111,7 @@ struct AuthenticatorSheet: View {
             VStack(alignment: .leading, spacing: 1) {
                 Text("Authenticator")
                     .font(.system(size: 16, weight: .bold))
-                Text("Verification codes, unlocked with Mac authentication.")
+                Text("Burrow asks for Touch ID before generating codes from your Keychain.")
                     .font(.system(size: 10.5))
                     .foregroundStyle(.secondary)
             }

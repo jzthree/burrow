@@ -51,7 +51,7 @@ enum SSHTerminalLauncher {
             controlPath: oneTimeCode == nil ? nil : controlPath
         )
         try script.write(to: scriptURL, atomically: true, encoding: .utf8)
-        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: scriptURL.path)
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: scriptURL.path)
         if openScript(scriptURL, terminalApp: terminalApp) {
             return
         }
@@ -86,7 +86,7 @@ enum SSHTerminalLauncher {
             routeMessage: route.message
         )
         try script.write(to: scriptURL, atomically: true, encoding: .utf8)
-        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: scriptURL.path)
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: scriptURL.path)
         if openScript(scriptURL, terminalApp: terminalApp) {
             return
         }
@@ -469,7 +469,7 @@ enum SSHTerminalLauncher {
         }
 
         for option in tunnel.extraSSHOptions {
-            parts += ["-o", shellQuote(normalizedOption(option))]
+            parts += ["-o", shellQuote(option)]
         }
     }
 
@@ -516,18 +516,8 @@ enum SSHTerminalLauncher {
         }
     }
 
-    private static func normalizedOption(_ option: String) -> String {
-        guard let eq = option.firstIndex(of: "=") else { return option }
-        return "\(option[..<eq])=\(option[option.index(after: eq)...])"
-    }
-
     private static func shellQuote(_ s: String) -> String {
-        guard !s.isEmpty else { return "''" }
-        let safe = CharacterSet(charactersIn: "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_+-./:=,@%")
-        if s.unicodeScalars.allSatisfy({ safe.contains($0) }) {
-            return s
-        }
-        return "'\(s.replacingOccurrences(of: "'", with: "'\\''"))'"
+        ShellQuoting.quote(s)
     }
 
 }

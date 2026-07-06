@@ -10,7 +10,12 @@ enum HookRunner {
         case disconnected
     }
 
-    static func run(_ command: String?, event: Event, tunnel: TunnelConfig) {
+    static func run(
+        _ command: String?,
+        event: Event,
+        tunnel: TunnelConfig,
+        onFailure: @escaping @Sendable (String) -> Void = { _ in }
+    ) {
         guard let command, !command.trimmingCharacters(in: .whitespaces).isEmpty else {
             return
         }
@@ -33,6 +38,19 @@ enum HookRunner {
         process.environment = env
         process.standardOutput = FileHandle.nullDevice
         process.standardError = FileHandle.nullDevice
-        try? process.run()
+        // Fire-and-forget, but not silent: a hook that fails to launch or
+        // exits nonzero should say so instead of leaving the user to wonder
+        // why their mount/ping/sync never happened.
+        let label = "\(event.rawValue) hook for \(tunnel.name)"
+        process.terminationHandler = { finished in
+            if finished.terminationStatus != 0 {
+                onFailure("\(label) exited with code \(finished.terminationStatus).")
+            }
+        }
+        do {
+            try process.run()
+        } catch {
+            onFailure("\(label) failed to launch: \(error.localizedDescription)")
+        }
     }
 }
