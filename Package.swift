@@ -36,7 +36,9 @@ let package = Package(
         ),
         .testTarget(
             name: "portkeeperTests",
-            dependencies: ["PortKeeperCore"]
+            // The dependency on the `portkeeper` executable makes `swift test`
+            // build the burrow binary so the CLI smoke tests can spawn it.
+            dependencies: ["PortKeeperCore", "portkeeper"]
         ),
     ],
     swiftLanguageModes: [.v6]
