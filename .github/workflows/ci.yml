@@ -9,7 +9,7 @@ jobs:
   build-and-test:
     runs-on: macos-26
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       # The package pins swift-tools-version 6.3; pick the newest Xcode on the
       # image rather than trusting the image default to be recent enough.
