@@ -13,9 +13,9 @@ extension CLI {
         let rest = Array(arguments.dropFirst())
         switch sub {
         case "list", "ls":
-            listSSHHosts()
+            try listSSHHosts(json: rest.contains("--json"))
         case "status":
-            sshHostStatus(rest)
+            try sshHostStatus(rest)
         case "add":
             try addSSHHost(rest)
         case "remove", "rm":
@@ -31,8 +31,12 @@ extension CLI {
         }
     }
 
-    private func listSSHHosts() {
+    private func listSSHHosts(json: Bool) throws {
         let hosts = SSHConfigParser.parse()
+        if json {
+            try printJSON(hosts.map { hostRow(for: $0) })
+            return
+        }
         guard !hosts.isEmpty else {
             print("No hosts found in \(SSHConfigParser.defaultConfigURL().path).")
             return
@@ -42,7 +46,7 @@ extension CLI {
         }
     }
 
-    private func sshHostStatus(_ rest: [String]) {
+    private func sshHostStatus(_ rest: [String]) throws {
         let hosts = SSHConfigParser.parse()
         let selected: [SSHConfigHost]
         if let alias = rest.first(where: { !$0.hasPrefix("-") }) {
@@ -54,6 +58,10 @@ extension CLI {
         } else {
             selected = hosts
         }
+        if rest.contains("--json") {
+            try printJSON(selected.map { hostRow(for: $0, warm: SSHHostWarmer.isWarm(alias: $0.alias)) })
+            return
+        }
         guard !selected.isEmpty else {
             print("No hosts to check.")
             return
@@ -62,6 +70,18 @@ extension CLI {
             let state = SSHHostWarmer.isWarm(alias: host.alias) ? "warm" : "cold"
             print("\(host.alias)\t\(state)\t\(sshTarget(host))")
         }
+    }
+
+    private struct HostRow: Encodable {
+        let alias: String
+        let host: String
+        let user: String?
+        let port: Int?
+        let warm: Bool?
+    }
+
+    private func hostRow(for host: SSHConfigHost, warm: Bool? = nil) -> HostRow {
+        HostRow(alias: host.alias, host: host.effectiveHost, user: host.user, port: host.port, warm: warm)
     }
 
     private func addSSHHost(_ rest: [String]) throws {
@@ -131,18 +151,41 @@ extension CLI {
         let rest = Array(arguments.dropFirst())
         switch sub {
         case "list", "ls":
-            try listGateways()
+            try listGateways(json: rest.contains("--json"))
         case "status":
             try gatewayStatus(rest)
+        case "connect", "up":
+            try connectGateway(rest)
         case "help", "-h", "--help":
             print(Self.gatewayHelp)
         default:
-            throw CLIError("unknown gateway command '\(sub)'. Try: list, status")
+            throw CLIError("unknown gateway command '\(sub)'. Try: list, status, connect")
         }
     }
 
-    private func listGateways() throws {
+    private func listGateways(json: Bool) throws {
         let config = try store.load()
+        if json {
+            struct Row: Encodable {
+                let name: String
+                let vpnProtocol: String
+                let auth: String
+                let user: String?
+                let server: String
+                let socksPort: Int
+            }
+            try printJSON(config.gateways.map {
+                Row(
+                    name: $0.name,
+                    vpnProtocol: $0.vpnProtocol,
+                    auth: $0.usesSAML ? "saml" : "password",
+                    user: $0.user,
+                    server: $0.server,
+                    socksPort: $0.socksPort
+                )
+            })
+            return
+        }
         guard !config.gateways.isEmpty else {
             print("No gateways configured.")
             return
@@ -165,6 +208,17 @@ extension CLI {
         } else {
             selected = config.gateways
         }
+        if rest.contains("--json") {
+            struct Row: Encodable {
+                let name: String
+                let up: Bool
+                let socksPort: Int
+            }
+            try printJSON(selected.map {
+                Row(name: $0.name, up: PortProbe.canConnect(host: "127.0.0.1", port: $0.socksPort), socksPort: $0.socksPort)
+            })
+            return
+        }
         guard !selected.isEmpty else {
             print("No gateways configured.")
             return
@@ -175,13 +229,60 @@ extension CLI {
         }
     }
 
+    /// Runs openconnect in the foreground for gateways that don't need a
+    /// browser: openconnect prompts for the password on this terminal, and
+    /// ocproxy exposes the session as the configured SOCKS port. SAML
+    /// gateways genuinely need the app's sign-in window.
+    private func connectGateway(_ rest: [String]) throws {
+        guard let name = rest.first(where: { !$0.hasPrefix("-") }) else {
+            throw CLIError("usage: burrow gateway connect <name>")
+        }
+        let config = try store.load()
+        guard let gateway = config.gateways.first(where: { $0.name == name }) else {
+            throw CLIError("gateway '\(name)' was not found")
+        }
+        guard !gateway.usesSAML else {
+            throw CLIError("gateway '\(name)' signs in via SAML in a browser — connect it from the Burrow app")
+        }
+        guard let openconnectPath = GatewayCommandBuilder.openconnectPath() else {
+            throw CLIError("openconnect not found. Install it with: brew install openconnect ocproxy")
+        }
+        guard let ocproxyPath = GatewayCommandBuilder.ocproxyPath() else {
+            throw CLIError("ocproxy not found. Install it with: brew install ocproxy")
+        }
+        if PortProbe.canConnect(host: "127.0.0.1", port: gateway.socksPort) {
+            print("'\(name)' is already up (SOCKS 127.0.0.1:\(gateway.socksPort)).")
+            return
+        }
+        GatewayPortReclaimer.reclaimStaleListeners(port: gateway.socksPort) { print($0) }
+
+        print("Connecting '\(name)' — answer openconnect's prompts below. Ctrl-C disconnects.")
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: openconnectPath)
+        // .none leaves out --passwd-on-stdin, so openconnect prompts on this tty.
+        process.arguments = GatewayCommandBuilder.buildArguments(
+            for: gateway,
+            ocproxyPath: ocproxyPath,
+            credential: .none
+        )
+        try process.run()
+        process.waitUntilExit()
+        let code = process.terminationStatus
+        // 130/143: the user's own Ctrl-C / SIGTERM — a clean disconnect.
+        guard code == 0 || code == 130 || code == 143 else {
+            throw CLIError("openconnect exited with code \(code)")
+        }
+        print("Disconnected '\(name)'.")
+    }
+
     // MARK: - 2fa
 
     func twoFactorCommand(_ arguments: [String]) throws {
         let sub = arguments.first ?? "list"
+        let rest = Array(arguments.dropFirst())
         switch sub {
         case "list", "ls":
-            try listTwoFactor()
+            try listTwoFactor(json: rest.contains("--json"))
         case "help", "-h", "--help":
             print(Self.twoFactorHelp)
         default:
@@ -189,8 +290,20 @@ extension CLI {
         }
     }
 
-    private func listTwoFactor() throws {
+    private func listTwoFactor(json: Bool) throws {
         let config = try store.load()
+        if json {
+            struct Row: Encodable {
+                let name: String
+                let sshHost: String?
+                let digits: Int
+                let period: Int
+            }
+            try printJSON(config.twoFactorAccounts.map {
+                Row(name: $0.name, sshHost: $0.sshHost, digits: $0.digits, period: $0.period)
+            })
+            return
+        }
         guard !config.twoFactorAccounts.isEmpty else {
             print("No 2FA accounts enrolled.")
             return
@@ -219,13 +332,14 @@ extension CLI {
     """
 
     static let gatewayHelp = """
-    burrow gateway — VPN gateways (read-only)
+    burrow gateway — VPN gateways
 
-      list                 name, protocol/auth, user@server, SOCKS port
-      status [NAME]         whether the gateway's local SOCKS port is up
+      list [--json]         name, protocol/auth, user@server, SOCKS port
+      status [NAME] [--json] whether the gateway's local SOCKS port is up
+      connect NAME          run openconnect in this terminal (password auth);
+                            Ctrl-C disconnects
 
-    Connecting a gateway (including SAML browser sign-in) is done in the
-    Burrow app; the CLI only inspects them.
+    SAML browser sign-in needs the Burrow app; everything else works here.
     """
 
     static let twoFactorHelp = """

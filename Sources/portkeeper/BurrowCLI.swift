@@ -41,17 +41,21 @@ struct CLI {
         switch command {
         case "help", "--help", "-h":
             printHelp()
+        case "version", "--version", "-V":
+            print("burrow \(BurrowVersion.current)")
         case "init":
             let url = try store.ensureExists()
             print("Config ready at \(url.path)")
         case "list":
-            try listTunnels()
+            try listTunnels(json: arguments.contains("--json"))
         case "print-config":
             try printConfig()
         case "sample-config":
             printSampleConfig()
         case "add":
             try addTunnel(arguments: Array(arguments.dropFirst()))
+        case "edit":
+            try editTunnel(arguments: Array(arguments.dropFirst()))
         case "remove":
             try removeTunnel(arguments: Array(arguments.dropFirst()))
         case "enable":
@@ -71,8 +75,29 @@ struct CLI {
         }
     }
 
-    private func listTunnels() throws {
+    private func listTunnels(json: Bool) throws {
         let config = try store.load()
+        if json {
+            struct Row: Encodable {
+                let name: String
+                let enabled: Bool
+                let host: String
+                let user: String?
+                let gateway: String?
+                let forwards: [String]
+            }
+            try printJSON(config.tunnels.map { tunnel in
+                Row(
+                    name: tunnel.name,
+                    enabled: tunnel.enabled,
+                    host: tunnel.host,
+                    user: tunnel.user,
+                    gateway: tunnel.gateway,
+                    forwards: tunnel.forwards.map(renderForward)
+                )
+            })
+            return
+        }
         if config.tunnels.isEmpty {
             print("No tunnels configured. Use `burrow add ...` or `burrow sample-config`.")
             return
@@ -83,6 +108,15 @@ struct CLI {
             let forwardList = tunnel.forwards.map(renderForward).joined(separator: ", ")
             print("\(tunnel.name)\t\(status)\t\(tunnel.host)\t\(forwardList)")
         }
+    }
+
+    func printJSON<T: Encodable>(_ value: T) throws {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        guard let text = String(data: try encoder.encode(value), encoding: .utf8) else {
+            throw CLIError("failed to render JSON")
+        }
+        print(text)
     }
 
     private func printConfig() throws {
@@ -146,6 +180,41 @@ struct CLI {
         print("Saved tunnel '\(name)' to \(store.configURL.path)")
     }
 
+    /// Partial update of an existing tunnel: only the flags you pass change.
+    /// Pass an empty value ("") to clear an optional field.
+    private func editTunnel(arguments: [String]) throws {
+        guard let name = arguments.first, !name.hasPrefix("--") else {
+            throw CLIError("usage: burrow edit <name> [--host H] [--user U] [--port N] [--identity PATH] [--jump HOST] [--gateway NAME] [--reconnect-delay N] [--local|--remote|--dynamic SPEC]... [--ssh-option KEY=VALUE]...")
+        }
+        let parser = ArgumentParser(arguments: Array(arguments.dropFirst()))
+        let newForwards = try parser.values(for: "--local").map(parseLocalForward)
+            + parser.values(for: "--remote").map(parseRemoteForward)
+            + parser.values(for: "--dynamic").map(parseDynamicForward)
+        let newOptions = parser.values(for: "--ssh-option")
+
+        let found = try store.mutate { config -> Bool in
+            guard let index = config.tunnels.firstIndex(where: { $0.name == name }) else {
+                return false
+            }
+            var tunnel = config.tunnels[index]
+            if let host = parser.value(for: "--host"), !host.isEmpty { tunnel.host = host }
+            if let user = parser.value(for: "--user") { tunnel.user = user.isEmpty ? nil : user }
+            if let port = try parser.intValue(for: "--port") { tunnel.sshPort = port }
+            if let identity = parser.value(for: "--identity") { tunnel.identityFile = identity.isEmpty ? nil : identity }
+            if let jump = parser.value(for: "--jump") { tunnel.jumpHost = jump.isEmpty ? nil : jump }
+            if let gateway = parser.value(for: "--gateway") { tunnel.gateway = gateway.isEmpty ? nil : gateway }
+            if let delay = try parser.intValue(for: "--reconnect-delay") { tunnel.reconnectDelaySeconds = delay }
+            if !newForwards.isEmpty { tunnel.forwards = newForwards }
+            if !newOptions.isEmpty { tunnel.extraSSHOptions = newOptions }
+            config.tunnels[index] = tunnel
+            return true
+        }
+        guard found else {
+            throw CLIError("tunnel '\(name)' was not found")
+        }
+        print("Updated tunnel '\(name)'")
+    }
+
     private func removeTunnel(arguments: [String]) throws {
         guard let name = arguments.first, !name.isEmpty else {
             throw CLIError("usage: burrow remove <name>")
@@ -163,13 +232,16 @@ struct CLI {
             throw CLIError("usage: burrow \(enabled ? "enable" : "disable") <name>")
         }
 
-        var config = try store.load()
-        guard let index = config.tunnels.firstIndex(where: { $0.name == name }) else {
+        let found = try store.mutate { config -> Bool in
+            guard let index = config.tunnels.firstIndex(where: { $0.name == name }) else {
+                return false
+            }
+            config.tunnels[index].enabled = enabled
+            return true
+        }
+        guard found else {
             throw CLIError("tunnel '\(name)' was not found")
         }
-
-        config.tunnels[index].enabled = enabled
-        try store.save(config)
         print("\(enabled ? "Enabled" : "Disabled") tunnel '\(name)'")
     }
 
@@ -196,7 +268,14 @@ struct CLI {
             if let gatewayName = tunnel.gateway,
                let gateway = config.gateways.first(where: { $0.name == gatewayName }),
                !PortProbe.canConnect(host: "127.0.0.1", port: gateway.socksPort) {
-                print("warning: \(tunnel.name) uses gateway '\(gatewayName)' but nothing is listening on 127.0.0.1:\(gateway.socksPort). Start it in the Burrow app or run openconnect manually.")
+                let hint = "Start it with `burrow gateway connect \(gatewayName)` or in the Burrow app."
+                // A single named tunnel would just fail confusingly inside its
+                // ProxyCommand — stop here with the fix. With --all, the other
+                // tunnels shouldn't be held hostage; warn and continue.
+                if tunnelName != nil {
+                    throw CLIError("\(tunnel.name) routes via gateway '\(gatewayName)' but nothing is listening on 127.0.0.1:\(gateway.socksPort). \(hint)")
+                }
+                print("warning: \(tunnel.name) uses gateway '\(gatewayName)' but nothing is listening on 127.0.0.1:\(gateway.socksPort). \(hint)")
             }
         }
 
@@ -332,34 +411,37 @@ struct CLI {
 
             Commands:
               init
-              list
+              list [--json]
               print-config
               sample-config
+              version | --version
               add --name NAME --host HOST [--user USER] [--port 22] [--identity PATH] [--jump HOST]
                   [--local [BIND:]LOCAL_PORT:DEST_HOST:DEST_PORT]...
                   [--remote [BIND:]REMOTE_PORT:DEST_HOST:DEST_PORT]...
                   [--dynamic [BIND:]SOCKS_PORT]...
                   [--server-alive-interval 30] [--server-alive-count-max 3]
                   [--reconnect-delay 5] [--ssh-option KEY=VALUE]... [--disabled]
+              edit NAME [any of the add flags]   (only passed flags change; "" clears)
               remove NAME
               enable NAME
               disable NAME
               run [--all|NAME]
 
             SSH hosts (~/.ssh/config):
-              hosts list
-              hosts status [ALIAS]
+              hosts list [--json]
+              hosts status [ALIAS] [--json]
               hosts add --alias ALIAS --host HOST [--user USER] [--port 22]
               hosts remove ALIAS
               hosts warm ALIAS      (open a persistent master; sign in here)
               hosts cool ALIAS
 
-            VPN gateways (read-only; connect from the Burrow app):
-              gateway list
-              gateway status [NAME]
+            VPN gateways:
+              gateway list [--json]
+              gateway status [NAME] [--json]
+              gateway connect NAME  (password auth; SAML needs the app)
 
             Two-factor accounts (metadata only; codes stay in the app):
-              2fa list
+              2fa list [--json]
 
             Config path:
               \(store.configURL.path)

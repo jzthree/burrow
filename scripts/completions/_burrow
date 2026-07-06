@@ -1,0 +1,73 @@
+#compdef burrow
+# zsh completion for the burrow CLI.
+# Install: copy into a directory on your $fpath (e.g. ~/.zsh/completions),
+# then `autoload -Uz compinit && compinit`.
+
+_burrow_tunnels() {
+  local -a tunnels
+  tunnels=(${(f)"$(burrow list 2>/dev/null | cut -f1)"})
+  _describe 'tunnel' tunnels
+}
+
+_burrow_hosts() {
+  local -a hosts
+  hosts=(${(f)"$(burrow hosts list 2>/dev/null | cut -f1)"})
+  _describe 'host' hosts
+}
+
+_burrow_gateways() {
+  local -a gateways
+  gateways=(${(f)"$(burrow gateway list 2>/dev/null | cut -f1)"})
+  _describe 'gateway' gateways
+}
+
+_burrow() {
+  local -a commands
+  commands=(
+    'init:create the shared config file'
+    'list:list tunnels'
+    'print-config:dump config.json'
+    'sample-config:print an example config'
+    'version:print the burrow version'
+    'add:add a tunnel'
+    'edit:edit an existing tunnel'
+    'remove:remove a tunnel'
+    'enable:enable a tunnel'
+    'disable:disable a tunnel'
+    'run:run tunnels in the foreground'
+    'hosts:manage ~/.ssh/config login hosts'
+    'gateway:inspect and connect VPN gateways'
+    '2fa:list two-factor accounts'
+    'help:show help'
+  )
+
+  if (( CURRENT == 2 )); then
+    _describe 'command' commands
+    return
+  fi
+
+  case $words[2] in
+    enable|disable|remove|edit|run)
+      _burrow_tunnels
+      ;;
+    hosts|host)
+      if (( CURRENT == 3 )); then
+        _values 'subcommand' list status add remove warm cool
+      else
+        _burrow_hosts
+      fi
+      ;;
+    gateway|gateways|vpn)
+      if (( CURRENT == 3 )); then
+        _values 'subcommand' list status connect
+      else
+        _burrow_gateways
+      fi
+      ;;
+    2fa|totp)
+      _values 'subcommand' list
+      ;;
+  esac
+}
+
+_burrow "$@"

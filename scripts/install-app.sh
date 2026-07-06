@@ -15,6 +15,9 @@ if [ -z "${SIGNING_IDENTITY:-}" ]; then
 fi
 SIGNING_IDENTITY="${SIGNING_IDENTITY:--}"
 BUILD_CONFIGURATION="${BUILD_CONFIGURATION:-release}"
+# Stamp the actual build (tag or commit) so installs are distinguishable;
+# a hardcoded "1.0" would make every source build claim the same version.
+VERSION="$(git -C "$ROOT_DIR" describe --tags --always 2>/dev/null || echo 0.0.0)"
 
 echo "Building ${APP_NAME} (${BUILD_CONFIGURATION})..."
 swift build \
@@ -77,9 +80,9 @@ cat > "$APP_DIR/Contents/Info.plist" <<EOF
   <key>CFBundlePackageType</key>
   <string>APPL</string>
   <key>CFBundleShortVersionString</key>
-  <string>1.0</string>
+  <string>${VERSION}</string>
   <key>CFBundleVersion</key>
-  <string>1</string>
+  <string>${VERSION}</string>
   <key>LSMinimumSystemVersion</key>
   <string>13.0</string>
   <key>LSUIElement</key>
@@ -90,12 +93,30 @@ cat > "$APP_DIR/Contents/Info.plist" <<EOF
 </plist>
 EOF
 
+# No --deep: it is deprecated, and this bundle has a single flat executable —
+# nothing nested to sign. (make-dmg.sh signs its nested helpers inside-out.)
 /usr/bin/codesign \
   --force \
-  --deep \
   --sign "$SIGNING_IDENTITY" \
   --timestamp=none \
   "$APP_DIR"
+
+# --- burrow CLI ---------------------------------------------------------
+# The app is only half the product; put the CLI on the user's PATH too.
+CLI_INSTALL_DIR="${BURROW_BIN_DIR:-$HOME/.local/bin}"
+echo "Building burrow CLI..."
+swift build --package-path "$ROOT_DIR" -c "$BUILD_CONFIGURATION" --product burrow
+mkdir -p "$CLI_INSTALL_DIR"
+cp "${BIN_DIR}/burrow" "$CLI_INSTALL_DIR/burrow"
+chmod 755 "$CLI_INSTALL_DIR/burrow"
+echo "Installed burrow CLI to ${CLI_INSTALL_DIR}/burrow"
+case ":$PATH:" in
+  *":$CLI_INSTALL_DIR:"*) ;;
+  *)
+    echo "note: ${CLI_INSTALL_DIR} is not on your PATH. Add this to ~/.zprofile:"
+    echo "  export PATH=\"${CLI_INSTALL_DIR}:\$PATH\""
+    ;;
+esac
 
 echo "Installed ${APP_NAME} to ${APP_DIR}"
 echo "Bundle identifier: ${BUNDLE_ID}"
