@@ -1,0 +1,25 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  build-and-test:
+    runs-on: macos-26
+    steps:
+      - uses: actions/checkout@v4
+
+      # The package pins swift-tools-version 6.3; pick the newest Xcode on the
+      # image rather than trusting the image default to be recent enough.
+      - name: Select latest Xcode
+        run: |
+          sudo xcode-select -s "$(ls -d /Applications/Xcode*.app | sort -V | tail -1)/Contents/Developer"
+          swift --version
+
+      - name: Build
+        run: swift build
+
+      - name: Test
+        run: swift test

@@ -43,7 +43,7 @@ git clone https://github.com/jzthree/Burrow.git && cd Burrow
 
 ## Requirements
 
-- macOS 13 or later, and the Xcode Command Line Tools to build (`xcode-select --install`).
+- macOS 13 or later, and the Xcode Command Line Tools to build (`xcode-select --install`). Building needs Swift 6.3 or newer (`swift --version`); if the build fails with a tools-version error, update Xcode or the Command Line Tools.
 - **Tunnels need nothing extra.** Burrow supervises the system `/usr/bin/ssh`; there are no runtime dependencies for the core app.
 - **VPN gateways are optional** and use two open-source tools:
   - [`openconnect`](https://www.infradead.org/openconnect/) (LGPL-2.1) — speaks the AnyConnect, GlobalProtect, Pulse, and Fortinet protocols.
@@ -128,32 +128,40 @@ open Burrow.xcodeproj
 
 ```bash
 burrow init
-burrow list
+burrow list [--json]
 burrow print-config
 burrow sample-config
+burrow version
 burrow add --name NAME --host HOST --local [bind:]local_port:dest_host:dest_port
 burrow add --name NAME --host HOST --remote [bind:]remote_port:dest_host:dest_port
 burrow add --name NAME --host HOST --dynamic [bind:]socks_port
+burrow edit NAME [any add flag]   # only passed flags change; "" clears a field
 burrow enable NAME
 burrow disable NAME
 burrow remove NAME
 burrow run [--all|NAME]
 
 # ~/.ssh/config login hosts (incl. keep-warm)
-burrow hosts list
-burrow hosts status [ALIAS]
+burrow hosts list [--json]
+burrow hosts status [ALIAS] [--json]
 burrow hosts add --alias ALIAS --host HOST [--user USER] [--port 22]
 burrow hosts remove ALIAS
 burrow hosts warm ALIAS      # open a persistent master; sign in in the terminal
 burrow hosts cool ALIAS
 
-# VPN gateways (read-only; connect from the app)
-burrow gateway list
-burrow gateway status [NAME]
+# VPN gateways
+burrow gateway list [--json]
+burrow gateway status [NAME] [--json]
+burrow gateway connect NAME  # password-auth gateways; SAML needs the app
 
 # Two-factor accounts (metadata only; codes stay in the app)
-burrow 2fa list
+burrow 2fa list [--json]
 ```
+
+`scripts/install-app.sh` installs the CLI to `~/.local/bin/burrow` alongside
+the app (override with `BURROW_BIN_DIR`). Zsh completions live at
+`scripts/completions/_burrow` — copy the file into a directory on your
+`$fpath`.
 
 `hosts warm` establishes a background SSH ControlMaster and leaves it
 authenticated, so a later `ssh <alias>` — from any terminal or from the app — is
@@ -211,7 +219,8 @@ Create gateways from the menu-bar app (the `+` button in the VPN Gateways sectio
 ```
 
 - Tunnels with a `gateway` automatically get `ProxyCommand` via the gateway's SOCKS port; starting such a tunnel starts the gateway first and waits for it to come up (Duo-style approvals included).
-- `authMode: "saml"` handles browser-based single sign-on: GlobalProtect logins open in an embedded sign-in window (Burrow captures the prelogin cookie for openconnect), AnyConnect uses openconnect's external-browser flow. Your IdP session persists between connects, so re-auth is usually instant.
+- A tunnel with a **jump host** is routed at the first hop: the jump connection is dialed through the gateway (the final target is usually reachable only from the jump). Readiness likewise probes the jump hop, and a live keep-warm master for the jump skips the gateway wait entirely — the connection reuses the socket.
+- `authMode: "saml"` handles browser-based single sign-on: GlobalProtect logins open in an embedded sign-in window (Burrow captures the prelogin cookie for openconnect), AnyConnect uses openconnect's external-browser flow. Your IdP session persists between connects, so re-auth is usually instant. (Those session cookies live in Burrow's own WebKit storage under `~/Library/WebKit/` — delete that folder if you ever need a hard SAML sign-out.)
 - With `authMode: "password"`, VPN passwords live in the macOS Keychain, saved after the first successful connection.
 - If openconnect rejects the server certificate (it uses its own CA bundle, not the macOS Keychain), Burrow shows the suggested `pin-sha256` fingerprint and offers Trust and Reconnect — the pin is saved to the gateway's extra arguments.
 - `sshHostPatterns` (comma-separated, wildcards allowed) generates an ssh include file so plain `ssh somehost.example.edu` also routes through the gateway: Settings → "Copy SSH Config Include Line", paste into `~/.ssh/config` once.

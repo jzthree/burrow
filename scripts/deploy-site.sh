@@ -25,11 +25,27 @@ PROJECT="${CF_PAGES_PROJECT:-burrow}"
 DMG="$(ls -t "$ROOT_DIR"/build/Burrow-*.dmg 2>/dev/null | head -1 || true)"
 mkdir -p "$ROOT_DIR/docs/downloads"
 if [ -n "$DMG" ]; then
+  # The site claims a notarized download; refuse to ship one that isn't.
+  # (ALLOW_UNNOTARIZED=1 overrides for a staging deploy.)
+  if ! xcrun stapler validate "$DMG" >/dev/null 2>&1; then
+    if [ "${ALLOW_UNNOTARIZED:-0}" = "1" ]; then
+      echo "warning: $(basename "$DMG") is NOT notarized — deploying anyway (ALLOW_UNNOTARIZED=1)."
+    else
+      echo "error: $(basename "$DMG") is not notarized (stapler validate failed)." >&2
+      echo "       Gatekeeper will block it on other Macs, and the site says 'notarized'." >&2
+      echo "       Build with scripts/make-dmg.sh (Developer ID + notary profile)," >&2
+      echo "       or set ALLOW_UNNOTARIZED=1 to deploy anyway." >&2
+      exit 1
+    fi
+  fi
   cp "$DMG" "$ROOT_DIR/docs/downloads/Burrow.dmg"
   echo "Staged $(basename "$DMG") → docs/downloads/Burrow.dmg ($(du -h "$DMG" | cut -f1))"
+elif [ "${ALLOW_MISSING_DMG:-0}" = "1" ]; then
+  echo "warning: no build/Burrow-*.dmg found — deploying with a dead download link (ALLOW_MISSING_DMG=1)."
 else
-  echo "warning: no build/Burrow-*.dmg found — run scripts/make-dmg.sh first."
-  echo "         Deploying the site anyway; the download link will 404 until a DMG is staged."
+  echo "error: no build/Burrow-*.dmg found — the download buttons would 404." >&2
+  echo "       Run scripts/make-dmg.sh first, or set ALLOW_MISSING_DMG=1 to deploy anyway." >&2
+  exit 1
 fi
 
 echo "Deploying docs/ to Cloudflare Pages project '$PROJECT'…"

@@ -25,8 +25,8 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 APP_NAME="Burrow"
-BUNDLE_ID="com.jianzhou.burrow"
-TEAM_ID="5AD7QB9795"
+BUNDLE_ID="${BURROW_BUNDLE_ID:-com.jianzhou.burrow}"
+TEAM_ID="${BURROW_TEAM_ID:-5AD7QB9795}"
 NOTARY_PROFILE="${NOTARY_PROFILE:-burrow-notary}"
 VERSION="${1:-$(git -C "$ROOT_DIR" describe --tags --always 2>/dev/null || echo 0.0.0)}"
 

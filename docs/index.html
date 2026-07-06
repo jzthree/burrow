@@ -11,8 +11,10 @@
   <meta property="og:url" content="https://burrow.ideaxlab.net/" />
   <meta property="og:title" content="Burrow — calm SSH tunnels & VPNs for macOS" />
   <meta property="og:description" content="Native menu-bar SSH tunnel manager that also runs VPNs as local SOCKS proxies — no root, no routing changes. Free." />
-  <meta property="og:image" content="https://burrow.ideaxlab.net/assets/burrow-menu.svg" />
+  <!-- PNG, not SVG: link-preview scrapers (Slack, iMessage, Twitter) don't render SVG og:images. -->
+  <meta property="og:image" content="https://burrow.ideaxlab.net/assets/burrow-menu-og.png" />
   <meta name="twitter:card" content="summary_large_image" />
+  <meta name="twitter:image" content="https://burrow.ideaxlab.net/assets/burrow-menu-og.png" />
 
   <link rel="icon" type="image/svg+xml" href="assets/favicon.svg" />
   <link rel="stylesheet" href="styles.css" />
@@ -107,7 +109,7 @@
         <article class="card">
           <div class="ico">👆</div>
           <h3>Touch ID authenticator</h3>
-          <p>A built-in 2FA code vault: enroll any <code>otpauth://</code> secret, reveal the current code with a fingerprint, auto-copied with a live countdown. Seeds never leave your Keychain.</p>
+          <p>A built-in 2FA code vault: enroll any <code>otpauth://</code> secret; Burrow asks for Touch ID before generating a code, auto-copied with a live countdown. Seeds stay in your login Keychain.</p>
         </article>
 
         <article class="card">

@@ -1,0 +1,101 @@
+name: Release DMG
+
+# Builds the notarized DMG with scripts/make-dmg.sh and uploads it to the
+# GitHub release for the pushed tag. Requires these repository secrets:
+#
+#   DEVELOPER_ID_P12           base64 of a "Developer ID Application" .p12
+#                              (export from Keychain Access; base64 -i cert.p12)
+#   DEVELOPER_ID_P12_PASSWORD  the .p12's password
+#   APPLE_ID                   Apple ID email used for notarization
+#   APPLE_TEAM_ID              the 10-character team id
+#   NOTARY_APP_PASSWORD        app-specific password from appleid.apple.com
+#
+# Without them, the workflow fails at the "Check signing secrets" step with a
+# clear message instead of producing an unsigned DMG.
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+jobs:
+  dmg:
+    runs-on: macos-26
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # make-dmg.sh derives the version from git describe
+
+      - name: Check signing secrets
+        env:
+          DEVELOPER_ID_P12: ${{ secrets.DEVELOPER_ID_P12 }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          NOTARY_APP_PASSWORD: ${{ secrets.NOTARY_APP_PASSWORD }}
+        run: |
+          missing=()
+          [ -n "$DEVELOPER_ID_P12" ] || missing+=(DEVELOPER_ID_P12)
+          [ -n "$APPLE_ID" ] || missing+=(APPLE_ID)
+          [ -n "$APPLE_TEAM_ID" ] || missing+=(APPLE_TEAM_ID)
+          [ -n "$NOTARY_APP_PASSWORD" ] || missing+=(NOTARY_APP_PASSWORD)
+          if [ "${#missing[@]}" -gt 0 ]; then
+            echo "Missing repository secrets: ${missing[*]}" >&2
+            echo "See the comment at the top of .github/workflows/release.yml." >&2
+            exit 1
+          fi
+
+      - name: Select latest Xcode
+        run: |
+          sudo xcode-select -s "$(ls -d /Applications/Xcode*.app | sort -V | tail -1)/Contents/Developer"
+          swift --version
+
+      - name: Install DMG build tools
+        run: brew install dylibbundler create-dmg openconnect ocproxy
+
+      - name: Import Developer ID certificate
+        env:
+          DEVELOPER_ID_P12: ${{ secrets.DEVELOPER_ID_P12 }}
+          DEVELOPER_ID_P12_PASSWORD: ${{ secrets.DEVELOPER_ID_P12_PASSWORD }}
+        run: |
+          KEYCHAIN="$RUNNER_TEMP/build.keychain-db"
+          KEYCHAIN_PASSWORD="$(uuidgen)"
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          printf '%s' "$DEVELOPER_ID_P12" | base64 --decode > "$RUNNER_TEMP/cert.p12"
+          security import "$RUNNER_TEMP/cert.p12" -k "$KEYCHAIN" \
+            -P "$DEVELOPER_ID_P12_PASSWORD" -T /usr/bin/codesign
+          rm "$RUNNER_TEMP/cert.p12"
+          security set-key-partition-list -S apple-tool:,apple: -s \
+            -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN" > /dev/null
+          security list-keychains -d user -s "$KEYCHAIN" login.keychain-db
+
+      - name: Store notarization credentials
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          NOTARY_APP_PASSWORD: ${{ secrets.NOTARY_APP_PASSWORD }}
+        run: |
+          xcrun notarytool store-credentials burrow-notary \
+            --apple-id "$APPLE_ID" \
+            --team-id "$APPLE_TEAM_ID" \
+            --password "$NOTARY_APP_PASSWORD"
+
+      - name: Build, notarize, and publish DMG
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BURROW_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          if [ "$GITHUB_REF_TYPE" = "tag" ]; then
+            # Tag build: notarize and attach the DMG to the tag's release.
+            PUBLISH=1 NOTARY_PROFILE=burrow-notary scripts/make-dmg.sh "${GITHUB_REF_NAME#v}"
+          else
+            # Manual run: build and notarize only; the DMG lands in artifacts.
+            NOTARY_PROFILE=burrow-notary scripts/make-dmg.sh "$(git describe --tags --always)"
+          fi
+
+      - name: Upload DMG artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Burrow-dmg
+          path: build/*.dmg
