@@ -210,6 +210,14 @@ public enum PortKeeperRuntimeRegistry {
             return false
         }
 
+        // A forward-less tunnel (an SSH host row) has no -L/-R/-D to match on;
+        // fall back to its per-tunnel known-hosts file, which is just as
+        // specific. Requiring a forward here would mean reclaim never matches
+        // such tunnels and silently strands their ssh.
+        guard !tunnel.forwards.isEmpty else {
+            return command.contains("/\(tunnel.name).known_hosts")
+        }
+
         return tunnel.forwards.contains { forward in
             command.contains(forwardOwnershipFragment(forward))
         }

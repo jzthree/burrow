@@ -69,7 +69,10 @@ public final class TunnelSupervisor: @unchecked Sendable {
                 }
 
                 do {
-                    try await Task.sleep(for: .seconds(tunnel.reconnectDelaySeconds))
+                    // Floor of 1s: a configured 0 (or negative) with an
+                    // instantly-failing ssh would otherwise spawn-fail-respawn
+                    // in a tight loop, pegging a core and hammering the host.
+                    try await Task.sleep(for: .seconds(max(1, tunnel.reconnectDelaySeconds)))
                 } catch {
                     break
                 }
@@ -94,13 +97,20 @@ public final class TunnelSupervisor: @unchecked Sendable {
         process.environment = ProcessInfo.processInfo.environment.merging(environment) { _, new in new }
 
         let outputPipe = Pipe()
+        let outputDrained = DispatchSemaphore(value: 0)
         if captureOutput {
             process.standardOutput = outputPipe
             process.standardError = outputPipe
 
             outputPipe.fileHandleForReading.readabilityHandler = { [logger, tunnel] handle in
                 let data = handle.availableData
-                guard !data.isEmpty, let text = String(data: data, encoding: .utf8) else {
+                guard !data.isEmpty else {
+                    // EOF: all writers closed, everything has been classified.
+                    handle.readabilityHandler = nil
+                    outputDrained.signal()
+                    return
+                }
+                guard let text = String(data: data, encoding: .utf8) else {
                     return
                 }
 
@@ -131,6 +141,15 @@ public final class TunnelSupervisor: @unchecked Sendable {
         }
         process.waitUntilExit()
 
+        if captureOutput {
+            // The readability handler runs on its own queue with no ordering
+            // guarantee against waitUntilExit — ssh's final line (a
+            // "Permission denied" right before exit) may still be in flight.
+            // Wait for EOF so it is classified before we decide why the
+            // process exited. Bounded, because a child that inherited the
+            // pipe and never closes it must not hang the supervisor.
+            _ = outputDrained.wait(timeout: .now() + 2)
+        }
         outputPipe.fileHandleForReading.readabilityHandler = nil
 
         processLock.lock()
@@ -238,8 +257,12 @@ public final class TunnelSupervisor: @unchecked Sendable {
             lsof.waitUntilExit()
             return lsof.terminationStatus == 0
         } catch {
-            // Fall back to the older reachability probe if lsof is unavailable.
-            return true
+            // "Not verified" — a launch failure must not report a foreign
+            // listener as ours (the false green this check exists to prevent).
+            // The readiness loop polls again in 200ms, so a transient failure
+            // costs one iteration, not the connection.
+            logger("[\(tunnel.name)] could not verify listener ownership (lsof failed to launch: \(error.localizedDescription))")
+            return false
         }
     }
 

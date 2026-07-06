@@ -91,27 +91,28 @@ public enum SSHHostWarmer {
 
     /// Whether a live master *process* exists for the alias. Note this can report
     /// true for a master whose TCP died on sleep — see `isResponsive`.
-    public static func isWarm(alias: String) -> Bool {
-        run(["-O", "check", alias], environment: nil, inheritStdio: false, wait: true) == 0
+    /// `executablePath` is injectable for tests, like TunnelSupervisor's.
+    public static func isWarm(alias: String, executablePath: String = "/usr/bin/ssh") -> Bool {
+        run(["-O", "check", alias], environment: nil, inheritStdio: false, wait: true, executablePath: executablePath) == 0
     }
 
     /// Whether the master answers a real multiplexed round-trip quickly. Catches
     /// a master whose connection died (e.g. on sleep) but whose process lingers
     /// for up to ServerAliveCountMax×Interval before ssh notices.
-    public static func isResponsive(alias: String) -> Bool {
-        guard isWarm(alias: alias) else { return false }
+    public static func isResponsive(alias: String, executablePath: String = "/usr/bin/ssh") -> Bool {
+        guard isWarm(alias: alias, executablePath: executablePath) else { return false }
         // Reuse the existing master only; a short client-side timeout bounds a
         // stale master that would otherwise hang until its own keepalive gives up.
-        return runWithTimeout(["-o", "BatchMode=yes", alias, "true"], seconds: 6) == 0
+        return runWithTimeout(["-o", "BatchMode=yes", alias, "true"], seconds: 6, executablePath: executablePath) == 0
     }
 
     /// Establishes the master, capturing ssh's output for diagnosis. Succeeds
     /// once ssh has authenticated and backgrounded itself (-f). `environment`
     /// carries the askpass that answers a password and/or 2FA prompt. Blocking —
     /// call off the main thread.
-    public static func warm(alias: String, environment: [String: String]?) -> WarmOutcome {
+    public static func warm(alias: String, environment: [String: String]?, executablePath: String = "/usr/bin/ssh") -> WarmOutcome {
         let arguments = ["-f", "-o", "ConnectTimeout=20"] + baseOptions + [alias, "sleep", "\(keepAliveSeconds)"]
-        let (code, output) = runCapturing(arguments, environment: environment)
+        let (code, output) = runCapturing(arguments, environment: environment, executablePath: executablePath)
         return WarmOutcome(succeeded: code == 0, output: output)
     }
 
@@ -119,13 +120,13 @@ public enum SSHHostWarmer {
     /// a password / 2FA prompt (or approve a Duo push) directly. `-f` backgrounds
     /// the pinned master after authentication. Returns ssh's exit code.
     @discardableResult
-    public static func warmForeground(alias: String) -> Int32 {
-        run(["-f", "-o", "ConnectTimeout=45"] + baseOptions + [alias, "sleep", "\(keepAliveSeconds)"], environment: nil, inheritStdio: true, wait: true)
+    public static func warmForeground(alias: String, executablePath: String = "/usr/bin/ssh") -> Int32 {
+        run(["-f", "-o", "ConnectTimeout=45"] + baseOptions + [alias, "sleep", "\(keepAliveSeconds)"], environment: nil, inheritStdio: true, wait: true, executablePath: executablePath)
     }
 
     /// Tears the master down.
-    public static func cool(alias: String) {
-        _ = run(["-O", "exit", alias], environment: nil, inheritStdio: false, wait: true)
+    public static func cool(alias: String, executablePath: String = "/usr/bin/ssh") {
+        _ = run(["-O", "exit", alias], environment: nil, inheritStdio: false, wait: true, executablePath: executablePath)
     }
 
     @discardableResult
@@ -133,10 +134,11 @@ public enum SSHHostWarmer {
         _ arguments: [String],
         environment: [String: String]?,
         inheritStdio: Bool,
-        wait: Bool
+        wait: Bool,
+        executablePath: String
     ) -> Int32 {
         let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/ssh")
+        process.executableURL = URL(fileURLWithPath: executablePath)
         process.arguments = arguments
         if !inheritStdio {
             // Capture (and discard) the small control-command output; the
@@ -162,10 +164,11 @@ public enum SSHHostWarmer {
     /// large banner can't deadlock the pipe.
     private static func runCapturing(
         _ arguments: [String],
-        environment: [String: String]?
+        environment: [String: String]?,
+        executablePath: String
     ) -> (code: Int32, output: String) {
         let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/ssh")
+        process.executableURL = URL(fileURLWithPath: executablePath)
         process.arguments = arguments
         process.standardOutput = FileHandle.nullDevice
         let errorPipe = Pipe()
@@ -186,9 +189,9 @@ public enum SSHHostWarmer {
     /// Runs ssh with a hard client-side timeout: if it hasn't exited within
     /// `seconds`, it's terminated and 124 is returned. Used to bound a probe
     /// against a stale master that could otherwise hang for hours.
-    private static func runWithTimeout(_ arguments: [String], seconds: Double) -> Int32 {
+    private static func runWithTimeout(_ arguments: [String], seconds: Double, executablePath: String) -> Int32 {
         let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/ssh")
+        process.executableURL = URL(fileURLWithPath: executablePath)
         process.arguments = arguments
         process.standardOutput = Pipe()
         process.standardError = Pipe()

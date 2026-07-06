@@ -99,8 +99,17 @@ public enum SSHConfigWriter {
         }
         output += "\n" + render(normalized) + "\n"
 
-        try output.write(to: url, atomically: true, encoding: .utf8)
-        try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
+        try writeConfigText(output, to: url)
+    }
+
+    /// Writes the config through a symlinked path (dotfiles setups commonly
+    /// symlink ~/.ssh/config). An atomic write aimed at the symlink itself
+    /// would replace the link with a plain file and silently orphan the
+    /// user's real config.
+    private static func writeConfigText(_ text: String, to url: URL) throws {
+        let destination = url.resolvingSymlinksInPath()
+        try text.write(to: destination, atomically: true, encoding: .utf8)
+        try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: destination.path)
     }
 
     /// Removes a host from the config, surgically: a single-alias `Host` stanza
@@ -156,8 +165,7 @@ public enum SSHConfigWriter {
         guard removedAny else {
             throw WriteError.invalidEntry("Host “\(alias)” wasn't found in \(url.lastPathComponent) (it may be in an Included file).")
         }
-        try result.joined(separator: "\n").write(to: url, atomically: true, encoding: .utf8)
-        try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
+        try writeConfigText(result.joined(separator: "\n"), to: url)
     }
 
     /// Edits an existing host's HostName / User / Port *in place*, touching only
@@ -232,8 +240,7 @@ public enum SSHConfigWriter {
         setDirective("HostName", value: newHostName)
 
         lines.replaceSubrange(bodyRange, with: body)
-        try lines.joined(separator: "\n").write(to: url, atomically: true, encoding: .utf8)
-        try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
+        try writeConfigText(lines.joined(separator: "\n"), to: url)
     }
 
     private static func keyword(_ line: String) -> String? {

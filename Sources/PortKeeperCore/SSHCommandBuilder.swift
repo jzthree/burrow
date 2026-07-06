@@ -27,7 +27,7 @@ public enum SSHCommandBuilder {
         }
 
         for option in tunnel.extraSSHOptions {
-            args.append(contentsOf: ["-o", normalizeOption(option)])
+            args.append(contentsOf: ["-o", option])
         }
 
         for forward in tunnel.forwards {
@@ -53,7 +53,7 @@ public enum SSHCommandBuilder {
 
     public static func render(_ tunnel: TunnelConfig) -> String {
         (["/usr/bin/ssh"] + buildArguments(for: tunnel))
-            .map(shellQuote)
+            .map(ShellQuoting.quote)
             .joined(separator: " ")
     }
 
@@ -78,26 +78,4 @@ public enum SSHCommandBuilder {
         (path as NSString).expandingTildeInPath
     }
 
-    private static func normalizeOption(_ option: String) -> String {
-        guard let separatorIndex = option.firstIndex(of: "=") else {
-            return option
-        }
-
-        let key = String(option[..<separatorIndex])
-        let value = String(option[option.index(after: separatorIndex)...])
-        return "\(key)=\(value)"
-    }
-
-    private static func shellQuote(_ argument: String) -> String {
-        guard !argument.isEmpty else {
-            return "''"
-        }
-
-        let safeCharacters = CharacterSet(charactersIn: "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_+-./:=,@%")
-        if argument.unicodeScalars.allSatisfy({ safeCharacters.contains($0) }) {
-            return argument
-        }
-
-        return "'\(argument.replacingOccurrences(of: "'", with: "'\\''"))'"
-    }
 }

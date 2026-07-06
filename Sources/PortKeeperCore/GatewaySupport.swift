@@ -159,7 +159,7 @@ public enum GatewayCommandBuilder {
         var args: [String] = [
             "--protocol=\(gateway.vpnProtocol)",
             "--script-tun",
-            "--script", "\(shellQuote(ocproxyPath)) -D \(gateway.socksPort)",
+            "--script", "\(ShellQuoting.quote(ocproxyPath)) -D \(gateway.socksPort)",
         ]
 
         switch credential {
@@ -205,18 +205,55 @@ public enum GatewayCommandBuilder {
             credential = gateway.user != nil ? .password("") : .none
         }
         let args = buildArguments(for: gateway, ocproxyPath: ocproxy, credential: credential)
-        return ([executable] + args).map(shellQuote).joined(separator: " ")
+        return ([executable] + args).map(ShellQuoting.quote).joined(separator: " ")
     }
+}
 
-    private static func shellQuote(_ argument: String) -> String {
-        guard !argument.isEmpty else {
-            return "''"
+/// The first hop of an ssh -J style jump specification.
+public struct JumpHostSpec: Equatable, Sendable {
+    public let user: String?
+    public let host: String
+    public let port: Int?
+    /// Whether the raw spec listed more hops after this one.
+    public let isMultiHop: Bool
+
+    /// Parses "user@host:port[,more...]" — the forms `-J` accepts. Returns
+    /// nil for an empty spec. Bracketed IPv6 ("[::1]:22") is handled; a bare
+    /// IPv6 address is left intact (its colons are not a port).
+    public static func firstHop(of raw: String) -> JumpHostSpec? {
+        let hops = raw.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }
+        guard let first = hops.first, !first.isEmpty else {
+            return nil
         }
-        let safeCharacters = CharacterSet(charactersIn: "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_+-./:=,@%")
-        if argument.unicodeScalars.allSatisfy({ safeCharacters.contains($0) }) {
-            return argument
+
+        var rest = first
+        var user: String?
+        if let at = rest.lastIndex(of: "@") {
+            user = String(rest[..<at])
+            rest = String(rest[rest.index(after: at)...])
         }
-        return "'\(argument.replacingOccurrences(of: "'", with: "'\\''"))'"
+
+        var host = rest
+        var port: Int?
+        if rest.hasPrefix("[") {
+            if let close = rest.firstIndex(of: "]") {
+                host = String(rest[rest.index(after: rest.startIndex)..<close])
+                let tail = rest[rest.index(after: close)...]
+                if tail.hasPrefix(":"), let parsed = Int(tail.dropFirst()) {
+                    port = parsed
+                }
+            }
+        } else if let colon = rest.lastIndex(of: ":"),
+                  rest.firstIndex(of: ":") == colon, // exactly one colon — not bare IPv6
+                  let parsed = Int(rest[rest.index(after: colon)...]) {
+            host = String(rest[..<colon])
+            port = parsed
+        }
+
+        guard !host.isEmpty else {
+            return nil
+        }
+        return JumpHostSpec(user: user, host: host, port: port, isMultiHop: hops.count > 1)
     }
 }
 
@@ -224,13 +261,39 @@ public enum GatewayCommandBuilder {
 public enum GatewayLinker {
     /// Routes a tunnel's ssh connection through its gateway's SOCKS port.
     /// A user-supplied ProxyCommand in extraSSHOptions wins.
-    public static func applyingGatewayProxy(to tunnel: TunnelConfig, gateways: [GatewayConfig]) -> TunnelConfig {
+    ///
+    /// A tunnel with a jump host is routed at the FIRST HOP: ssh silently
+    /// ignores a ProxyCommand when -J is present, and the final target is
+    /// usually reachable only through the jump anyway. The -J is replaced by
+    /// an equivalent nested ProxyCommand whose inner connection dials the
+    /// jump host through the gateway. `sshHosts` resolves a jump alias to
+    /// its real HostName for the SOCKS dial (the proxy's DNS won't know
+    /// local aliases); it defaults to the user's parsed ~/.ssh/config.
+    public static func applyingGatewayProxy(
+        to tunnel: TunnelConfig,
+        gateways: [GatewayConfig],
+        sshHosts: [SSHConfigHost]? = nil
+    ) -> TunnelConfig {
         guard let gatewayName = tunnel.gateway,
               let gateway = gateways.first(where: { $0.name == gatewayName }) else {
             return tunnel
         }
         guard !tunnel.extraSSHOptions.contains(where: { $0.lowercased().hasPrefix("proxycommand") }) else {
             return tunnel
+        }
+
+        if let jumpRaw = tunnel.jumpHost, !jumpRaw.isEmpty {
+            guard let jump = JumpHostSpec.firstHop(of: jumpRaw), !jump.isMultiHop else {
+                // Multi-hop chains keep their -J; the first hop can still ride
+                // the gateway via the generated ssh include.
+                return tunnel
+            }
+            var routed = tunnel
+            routed.jumpHost = nil
+            routed.extraSSHOptions.append(
+                jumpProxyCommandOption(for: gateway, jump: jump, sshHosts: sshHosts ?? SSHConfigParser.parse())
+            )
+            return routed
         }
 
         var routed = tunnel
@@ -244,6 +307,58 @@ public enum GatewayLinker {
 
     public static func proxyCommand(for gateway: GatewayConfig) -> String {
         "/usr/bin/nc -X 5 -x 127.0.0.1:\(gateway.socksPort) %h %p"
+    }
+
+    /// `-J jump` rewritten as the ProxyCommand it stands for, with the inner
+    /// connection dialed through the gateway:
+    ///   ssh -W [%h]:%p -o ProxyCommand='nc ... <resolved-jump> <port>' jump
+    /// %h/%p are expanded by the OUTER ssh (the -W target), so the inner nc
+    /// endpoint must be literal — resolved here from the jump's ssh config.
+    /// The inner ssh still names the alias, keeping its config (keys, control
+    /// master) in effect; with a live master the dial is skipped entirely.
+    static func jumpProxyCommandOption(
+        for gateway: GatewayConfig,
+        jump: JumpHostSpec,
+        sshHosts: [SSHConfigHost]
+    ) -> String {
+        let endpoint = resolvedJumpEndpoint(jump: jump, sshHosts: sshHosts)
+        // '[%h]:%p' is quoted because ssh hands ProxyCommand to the user's
+        // login shell — zsh would otherwise glob the brackets ("no matches
+        // found"). Same quoting ssh uses for its own implicit -J command.
+        var inner = "ssh -W '[%h]:%p'"
+        if let user = jump.user, !user.isEmpty {
+            inner += " -l \(user)"
+        }
+        if let port = jump.port {
+            inner += " -p \(port)"
+        }
+        inner += " -o 'ProxyCommand=/usr/bin/nc -X 5 -x 127.0.0.1:\(gateway.socksPort) \(endpoint.host) \(endpoint.port)'"
+        inner += " \(jump.host)"
+        return "ProxyCommand=\(inner)"
+    }
+
+    /// The address the gateway must be able to reach for this tunnel to
+    /// stand a chance: the (resolved) first jump hop when there is one,
+    /// otherwise the tunnel's own target. Used for readiness probes.
+    public static func gatewayProbeEndpoint(
+        for tunnel: TunnelConfig,
+        sshHosts: [SSHConfigHost]? = nil
+    ) -> (host: String, port: Int) {
+        guard let jumpRaw = tunnel.jumpHost, !jumpRaw.isEmpty,
+              let jump = JumpHostSpec.firstHop(of: jumpRaw) else {
+            return (tunnel.host, tunnel.sshPort)
+        }
+        return resolvedJumpEndpoint(jump: jump, sshHosts: sshHosts ?? SSHConfigParser.parse())
+    }
+
+    private static func resolvedJumpEndpoint(
+        jump: JumpHostSpec,
+        sshHosts: [SSHConfigHost]
+    ) -> (host: String, port: Int) {
+        let entry = sshHosts.first { $0.matchesAlias(jump.host) }
+        let host = entry?.effectiveHost ?? jump.host
+        let port = jump.port ?? entry?.port ?? 22
+        return (host, port)
     }
 
     /// ssh config snippet routing each gateway's host patterns through its
@@ -290,12 +405,21 @@ public enum GatewayPortReclaimer {
                 continue
             }
             logger("reclaiming stale \(name) (pid \(pid)) on port \(port)")
-            kill(pid, SIGTERM)
-            usleep(300_000)
-            if kill(pid, 0) == 0 {
-                kill(pid, SIGKILL)
-            }
+            terminateVerified(pid: pid, expectedName: name)
         }
+    }
+
+    /// SIGTERM, grace period, then SIGKILL — but only after re-verifying the
+    /// pid still belongs to the same-named process. The pid comes from an
+    /// earlier snapshot; without the re-check the OS could recycle it onto an
+    /// unrelated process during the grace period and we'd kill that instead.
+    private static func terminateVerified(pid: pid_t, expectedName: String) {
+        kill(pid, SIGTERM)
+        usleep(300_000)
+        guard kill(pid, 0) == 0, processName(pid) == expectedName else {
+            return
+        }
+        kill(pid, SIGKILL)
     }
 
     /// Fully tears down a gateway's processes: the ocproxy holding the SOCKS
@@ -304,12 +428,9 @@ public enum GatewayPortReclaimer {
     public static func killGatewayProcesses(socksPort: Int, server: String, logger: @Sendable (String) -> Void = { _ in }) {
         reclaimStaleListeners(port: socksPort, logger: logger)
         for pid in openconnectPIDs(matchingServer: server) {
-            logger("terminating openconnect (pid \(pid)) for \(server)")
-            kill(pid, SIGTERM)
-            usleep(300_000)
-            if kill(pid, 0) == 0 {
-                kill(pid, SIGKILL)
-            }
+            guard let name = processName(pid) else { continue }
+            logger("terminating \(name) (pid \(pid)) for \(server)")
+            terminateVerified(pid: pid, expectedName: name)
         }
     }
 
@@ -345,7 +466,12 @@ public enum GatewayPortReclaimer {
         var pids: [pid_t] = []
         for line in output.split(whereSeparator: \.isNewline) {
             let trimmed = line.trimmingCharacters(in: .whitespaces)
-            guard trimmed.contains("openconnect"), trimmed.contains(server) else {
+            // The server is its own argv element (buildArguments appends it
+            // last), so require an exact token — a bare substring match would
+            // let one gateway's shutdown kill another whose server name merely
+            // contains this one (e.g. "vpn.edu" inside "vpn.edu.example.com").
+            guard trimmed.contains("openconnect"),
+                  trimmed.split(separator: " ").contains(Substring(server)) else {
                 continue
             }
             if let pidString = trimmed.split(separator: " ", maxSplits: 1).first,
@@ -453,7 +579,9 @@ public final class GatewaySupervisor: @unchecked Sendable {
                 }
 
                 do {
-                    try await Task.sleep(for: .seconds(gateway.reconnectDelaySeconds))
+                    // Floor of 1s — see TunnelSupervisor: a zero delay plus an
+                    // instantly-failing openconnect is a busy respawn loop.
+                    try await Task.sleep(for: .seconds(max(1, gateway.reconnectDelaySeconds)))
                 } catch {
                     break
                 }
@@ -489,11 +617,18 @@ public final class GatewaySupervisor: @unchecked Sendable {
         )
 
         let outputPipe = Pipe()
+        let outputDrained = DispatchSemaphore(value: 0)
         process.standardOutput = outputPipe
         process.standardError = outputPipe
         outputPipe.fileHandleForReading.readabilityHandler = { [logger, gateway] handle in
             let data = handle.availableData
-            guard !data.isEmpty, let text = String(data: data, encoding: .utf8) else {
+            guard !data.isEmpty else {
+                // EOF: all writers closed, everything has been classified.
+                handle.readabilityHandler = nil
+                outputDrained.signal()
+                return
+            }
+            guard let text = String(data: data, encoding: .utf8) else {
                 return
             }
             for rawLine in text.split(whereSeparator: \.isNewline) {
@@ -522,9 +657,16 @@ public final class GatewaySupervisor: @unchecked Sendable {
         try process.run()
 
         if let secret = credential.stdinSecret {
-            inputPipe.fileHandleForWriting.write(Data("\(secret)\n".utf8))
+            // The throwing write turns a closed pipe (openconnect died before
+            // reading its password) into an error instead of an uncatchable
+            // NSFileHandleOperationException that would crash the app.
+            do {
+                try inputPipe.fileHandleForWriting.write(contentsOf: Data("\(secret)\n".utf8))
+            } catch {
+                logger("[gateway \(gateway.name)] could not hand the credential to openconnect (it may have exited early): \(error.localizedDescription)")
+            }
         }
-        inputPipe.fileHandleForWriting.closeFile()
+        try? inputPipe.fileHandleForWriting.close()
 
         // Readiness = the SOCKS listener accepts connections. ocproxy is only
         // exec'd by openconnect after the VPN session is established, so an
@@ -551,6 +693,10 @@ public final class GatewaySupervisor: @unchecked Sendable {
         }
 
         process.waitUntilExit()
+        // Wait for EOF so a final auth-failure or cert-pin line printed just
+        // before exit is classified before we decide the outcome. Bounded: a
+        // lingering ocproxy that inherited the pipe must not hang the loop.
+        _ = outputDrained.wait(timeout: .now() + 2)
         outputPipe.fileHandleForReading.readabilityHandler = nil
 
         processLock.lock()

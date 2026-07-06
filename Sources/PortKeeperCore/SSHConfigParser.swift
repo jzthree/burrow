@@ -56,11 +56,13 @@ public enum SSHConfigParser {
             .appendingPathComponent("config", isDirectory: false)
     }
 
-    /// Parses an OpenSSH client config into one entry per `Host` stanza. A
-    /// `Host` line with several names becomes a single entry keyed on the first
-    /// name, with the rest kept in `additionalAliases`. Wildcard host patterns
-    /// (`*`, `?`, `!`) are skipped: they describe defaults, not concrete
-    /// endpoints a tunnel can target.
+    /// Parses an OpenSSH client config into one entry per concrete `Host`
+    /// stanza. A `Host` line with several names becomes a single entry keyed
+    /// on the first name, with the rest kept in `additionalAliases`.
+    /// Wildcard-only stanzas (`Host *`, `Host *.example.edu`) don't become
+    /// entries, but their directives are folded into every concrete host they
+    /// match — first-obtained-wins across stanzas, like ssh itself — so a
+    /// `User`/`IdentityFile` set under `Host *` shows up on each host.
     public static func parse(fileAt url: URL = defaultConfigURL()) -> [SSHConfigHost] {
         var visited: Set<String> = []
         let lines = collectLines(fileAt: url, visited: &visited)
@@ -71,52 +73,79 @@ public enum SSHConfigParser {
         parse(lines: contents.components(separatedBy: .newlines))
     }
 
+    private struct Stanza {
+        var patterns: [String]
+        var directives: [(keyword: String, value: String)] = []
+    }
+
     private static func parse(lines: [String]) -> [SSHConfigHost] {
-        var hosts: [SSHConfigHost] = []
-        var currentHosts: [SSHConfigHost] = []
-        var seenAliases: Set<String> = []
-
-        func flush() {
-            for host in currentHosts where !seenAliases.contains(host.alias) {
-                seenAliases.insert(host.alias)
-                hosts.append(host)
-            }
-            currentHosts = []
-        }
-
+        // Pass 1: split into stanzas, in file order. `Match` blocks get an
+        // empty pattern list — their conditions aren't evaluated here, so
+        // they contribute nothing rather than something wrong.
+        var stanzas: [Stanza] = []
+        var current: Stanza?
         for rawLine in lines {
             guard let (keyword, value) = parseLine(rawLine) else {
                 continue
             }
-
             if keyword == "host" {
-                flush()
-                let patterns = tokenize(value)
-                    .filter { !$0.contains("*") && !$0.contains("?") && !$0.hasPrefix("!") }
-                if let primary = patterns.first {
-                    currentHosts = [SSHConfigHost(alias: primary, additionalAliases: Array(patterns.dropFirst()))]
-                } else {
-                    currentHosts = []
+                if let current {
+                    stanzas.append(current)
                 }
+                current = Stanza(patterns: tokenize(value))
                 continue
             }
-
             if keyword == "match" {
-                flush()
+                if let current {
+                    stanzas.append(current)
+                }
+                current = Stanza(patterns: [])
                 continue
             }
-
-            guard !currentHosts.isEmpty else {
-                continue
-            }
-
-            for index in currentHosts.indices {
-                apply(keyword: keyword, value: value, to: &currentHosts[index])
-            }
+            current?.directives.append((keyword, value))
+        }
+        if let current {
+            stanzas.append(current)
         }
 
-        flush()
+        // Pass 2: one entry per concrete stanza, folding in every stanza that
+        // matches the alias (including wildcard defaults). `apply` only sets
+        // unset fields, which gives ssh's first-obtained-wins semantics.
+        var hosts: [SSHConfigHost] = []
+        var seenAliases: Set<String> = []
+        for stanza in stanzas {
+            let concrete = stanza.patterns
+                .filter { !$0.contains("*") && !$0.contains("?") && !$0.hasPrefix("!") }
+            guard let primary = concrete.first, !seenAliases.contains(primary) else {
+                continue
+            }
+            seenAliases.insert(primary)
+            var host = SSHConfigHost(alias: primary, additionalAliases: Array(concrete.dropFirst()))
+            for candidate in stanzas where stanzaMatches(candidate.patterns, alias: primary) {
+                for directive in candidate.directives {
+                    apply(keyword: directive.keyword, value: directive.value, to: &host)
+                }
+            }
+            hosts.append(host)
+        }
         return hosts
+    }
+
+    /// ssh-style pattern-list match against a host alias: `*`/`?` glob, and a
+    /// matching `!pattern` vetoes the whole stanza regardless of other
+    /// patterns.
+    private static func stanzaMatches(_ patterns: [String], alias: String) -> Bool {
+        var matched = false
+        for pattern in patterns {
+            if pattern.hasPrefix("!") {
+                if fnmatch(String(pattern.dropFirst()), alias, 0) == 0 {
+                    return false
+                }
+            } else if fnmatch(pattern, alias, 0) == 0 {
+                matched = true
+            }
+        }
+        return matched
     }
 
     private static func apply(keyword: String, value: String, to host: inout SSHConfigHost) {
