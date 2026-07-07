@@ -344,8 +344,24 @@ enum WarmSignInPrompt {
     /// interactive auth. The values answer the SSH prompts for this one
     /// connection via askpass and are never stored. `retry`/`reason` re-ask after
     /// a rejected attempt.
+    /// Retains a closure as an NSButton target for the life of the modal (the
+    /// button's `target` is weak, so a local reference must keep it alive).
+    private final class ClosureTarget: NSObject {
+        let action: () -> Void
+        init(_ action: @escaping () -> Void) { self.action = action }
+        @objc func fire() { action() }
+    }
+
     @MainActor
-    static func request(alias: String, host: String, retry: Bool = false, reason: String? = nil, serverPrompts: [String] = []) -> Result? {
+    static func request(
+        alias: String,
+        host: String,
+        retry: Bool = false,
+        reason: String? = nil,
+        serverPrompts: [String] = [],
+        linkedAccountName: String? = nil,
+        availableCode: String? = nil
+    ) -> Result? {
         let alert = NSAlert()
         // The copy stays agnostic about what the host wants — password, 2FA
         // code, or Duo push are all equally possible. The host's own words,
@@ -404,6 +420,28 @@ enum WarmSignInPrompt {
             container.addArrangedSubview(box)
         }
 
+        // Transparency: say plainly how Burrow read the host's prompt, so the
+        // "smart detection" isn't a black box. Derived from the same keyword
+        // match the askpass uses, surfaced here for the user to sanity-check.
+        let asksCodeEarly = serverPrompts.contains(where: looksLikeCodePrompt)
+        let asksDuoEarly = serverPrompts.contains(where: looksLikeDuoMenu)
+        if !serverPrompts.isEmpty {
+            let readAs: String
+            if asksDuoEarly {
+                readAs = "Burrow read this as a Duo device prompt — approve on your phone, or send a push below."
+            } else if asksCodeEarly {
+                readAs = "Burrow read this as a verification-code request and will send whatever you enter in the code field."
+            } else {
+                readAs = "Burrow didn't recognize this as a code prompt — answer it in the field that fits (code or password)."
+            }
+            let detectLabel = NSTextField(wrappingLabelWithString: readAs)
+            detectLabel.font = .systemFont(ofSize: 10.5)
+            detectLabel.textColor = .secondaryLabelColor
+            detectLabel.translatesAutoresizingMaskIntoConstraints = false
+            detectLabel.widthAnchor.constraint(equalToConstant: width).isActive = true
+            container.addArrangedSubview(detectLabel)
+        }
+
         let codeField = NSTextField()
         codeField.placeholderString = "2FA code / passcode (if asked)"
         let passwordField = NSSecureTextField()
@@ -415,6 +453,35 @@ enum WarmSignInPrompt {
             field.heightAnchor.constraint(equalToConstant: 24).isActive = true
             container.addArrangedSubview(field)
         }
+
+        // Reach the authenticator from inside the dialog: one click drops the
+        // linked code into the field so the user isn't stranded hunting for it.
+        // `availableCode` was already generated (behind Touch ID) for the silent
+        // attempt, so inserting it needs no second prompt.
+        let insertTarget: ClosureTarget?
+        if let availableCode, let linkedAccountName {
+            let target = ClosureTarget { [weak codeField] in
+                codeField?.stringValue = availableCode
+            }
+            let insertButton = NSButton(title: "Insert \(linkedAccountName) code", target: target, action: #selector(ClosureTarget.fire))
+            insertButton.bezelStyle = .rounded
+            insertButton.controlSize = .small
+            insertButton.translatesAutoresizingMaskIntoConstraints = false
+            container.addArrangedSubview(insertButton)
+            insertTarget = target
+        } else if let linkedAccountName {
+            let hint = NSTextField(wrappingLabelWithString: "Leave the code blank to use your linked \(linkedAccountName) code automatically (Touch ID).")
+            hint.font = .systemFont(ofSize: 10.5)
+            hint.textColor = .secondaryLabelColor
+            hint.translatesAutoresizingMaskIntoConstraints = false
+            hint.widthAnchor.constraint(equalToConstant: width).isActive = true
+            container.addArrangedSubview(hint)
+            insertTarget = nil
+        } else {
+            insertTarget = nil
+        }
+        _ = insertTarget // retained for the modal's lifetime
+
         container.layoutSubtreeIfNeeded()
         container.setFrameSize(container.fittingSize)
         alert.accessoryView = container

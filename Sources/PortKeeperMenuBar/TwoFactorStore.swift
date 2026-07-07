@@ -139,6 +139,58 @@ final class TwoFactorStore {
         cachedSecrets.removeAll()
     }
 
+    // MARK: - Unlock session (reveal-all)
+
+    /// Seeds held for the duration of an open Authenticator window, so a single
+    /// Touch ID reveals every code and they can tick over to the next period
+    /// without re-authenticating. Independent of `unlockCacheSeconds` (which
+    /// governs one-off reveals / keep-warm); this is cleared when the window
+    /// closes via `closeUnlockSession()`.
+    private var sessionSeeds: [String: Data]?
+
+    var hasUnlockSession: Bool { sessionSeeds != nil }
+
+    /// Authenticates once, then caches the seed bytes for every named account so
+    /// `sessionCode(for:)` can generate codes with no further prompts until
+    /// `closeUnlockSession()`. Accounts whose seed can't be read are skipped.
+    func openUnlockSession(accountNames: [String], reason: String) async throws {
+        try await authenticate(reason: reason)
+        var seeds: [String: Data] = [:]
+        for name in accountNames {
+            if let data = try? readSecretBytes(account: name) {
+                seeds[name] = data
+            }
+        }
+        sessionSeeds = seeds
+    }
+
+    func closeUnlockSession() {
+        sessionSeeds = nil
+    }
+
+    /// Adds one account's seed to an already-open session (e.g. a code the user
+    /// just enrolled), so it reveals immediately without a fresh Touch ID. No-op
+    /// if no session is open.
+    func addToUnlockSession(accountName: String) {
+        guard sessionSeeds != nil else { return }
+        if let data = try? readSecretBytes(account: accountName) {
+            sessionSeeds?[accountName] = data
+        }
+    }
+
+    /// The current code for an account from the open unlock session, or nil if no
+    /// session is open or the account's seed wasn't loaded. Never authenticates.
+    func sessionCode(for account: TwoFactorAccount, at date: Date = Date()) -> String? {
+        guard let bytes = sessionSeeds?[account.name] else { return nil }
+        let secret = TOTPSecret(
+            secret: bytes,
+            digits: account.digits,
+            period: account.period,
+            algorithm: account.totpAlgorithm
+        )
+        return TOTPGenerator.code(for: secret, at: date)
+    }
+
     private func secretBytes(
         account: String,
         reason: String,
@@ -167,12 +219,23 @@ final class TwoFactorStore {
 
     private func authenticate(reason: String) async throws {
         let context = LAContext()
+        // Prefer a biometrics-only prompt: the Touch ID sheet with no password
+        // field, so revealing a code is a fingerprint — not a password dialog.
+        // Fall back to the password-capable policy only when Touch ID is
+        // unavailable (no sensor, not enrolled, or biometry locked out).
+        var biometryError: NSError?
+        let biometricsReady = context.canEvaluatePolicy(.deviceOwnerAuthenticationWithBiometrics, error: &biometryError)
+        let policy: LAPolicy = biometricsReady ? .deviceOwnerAuthenticationWithBiometrics : .deviceOwnerAuthentication
+        if biometricsReady {
+            // Suppress the "Enter Password…" fallback button on the Touch ID sheet.
+            context.localizedFallbackTitle = ""
+        }
         var policyError: NSError?
-        guard context.canEvaluatePolicy(.deviceOwnerAuthentication, error: &policyError) else {
+        guard context.canEvaluatePolicy(policy, error: &policyError) else {
             throw TwoFactorStoreError.authenticationUnavailable(policyError?.localizedDescription ?? "unavailable")
         }
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
-            context.evaluatePolicy(.deviceOwnerAuthentication, localizedReason: reason) { success, _ in
+            context.evaluatePolicy(policy, localizedReason: reason) { success, _ in
                 if success {
                     continuation.resume()
                 } else {

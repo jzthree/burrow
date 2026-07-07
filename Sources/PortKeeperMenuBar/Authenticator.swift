@@ -78,6 +78,12 @@ struct AuthenticatorSheet: View {
                         .transition(.opacity.combined(with: .move(edge: .top)))
                     }
 
+                    // Locked fallback: the auto Touch-ID on open was cancelled or
+                    // hasn't landed yet. One tap re-tries the unlock-all.
+                    if !viewModel.twoFactorAccounts.isEmpty && !viewModel.authenticatorUnlocked && !isAdding {
+                        lockedBanner
+                    }
+
                     if viewModel.twoFactorAccounts.isEmpty && !isAdding {
                         emptyState
                     } else {
@@ -101,6 +107,36 @@ struct AuthenticatorSheet: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .frame(width: 440, height: 560)
         .background(Color(nsColor: .windowBackgroundColor))
+        .onAppear {
+            // + New ▸ New Authenticator Code opens straight into the add form.
+            if viewModel.authenticatorBeginInAdd {
+                isAdding = true
+                viewModel.authenticatorBeginInAdd = false
+            }
+        }
+    }
+
+    private var lockedBanner: some View {
+        Button {
+            viewModel.unlockAllTwoFactorCodes()
+        } label: {
+            HStack(spacing: 8) {
+                Image(systemName: "touchid")
+                    .font(.system(size: 14, weight: .semibold))
+                Text("Unlock with Touch ID")
+                    .font(.system(size: 12.5, weight: .semibold))
+                Spacer()
+            }
+            .foregroundStyle(Color.burrowAccent)
+            .padding(.horizontal, 12)
+            .frame(height: 38)
+            .background(
+                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    .fill(Color.burrowAccent.opacity(0.12))
+            )
+        }
+        .buttonStyle(.plain)
+        .help("Reveal all codes with one Touch ID")
     }
 
     private var header: some View {
@@ -111,7 +147,7 @@ struct AuthenticatorSheet: View {
             VStack(alignment: .leading, spacing: 1) {
                 Text("Authenticator")
                     .font(.system(size: 16, weight: .bold))
-                Text("Burrow asks for Touch ID before generating codes from your Keychain.")
+                Text("One Touch ID unlocks every code while this window is open. It re-locks when you close it.")
                     .font(.system(size: 10.5))
                     .foregroundStyle(.secondary)
             }
