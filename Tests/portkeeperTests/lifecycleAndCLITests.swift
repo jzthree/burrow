@@ -575,3 +575,88 @@ private func runBurrow(_ arguments: [String], configURL: URL) throws -> CLIResul
     #expect(directProbe.host == "db.example.com")
     #expect(directProbe.port == 2222)
 }
+
+// MARK: - Remote reverse-forward conflict handling
+
+@Test func remoteForwardConflictPortParsing() async throws {
+    #expect(RemoteForwardSupport.conflictingPort(in: "Warning: remote port forwarding failed for listen port 31703") == 31703)
+    #expect(RemoteForwardSupport.conflictingPort(in: "Error: remote port forwarding failed for listen port 8022") == 8022)
+    #expect(RemoteForwardSupport.conflictingPort(in: "connect_to localhost port 22: failed.") == nil)
+    #expect(RemoteForwardSupport.conflictingPort(in: "some unrelated error") == nil)
+}
+
+@Test func reverseForwardPortAndFreeCommand() async throws {
+    let tunnel = TunnelConfig(
+        name: "nebula",
+        host: "cri22in001",
+        jumpHost: "randi",
+        forwards: [
+            ForwardSpec(kind: .local, listenPort: 3000, destinationHost: "localhost", destinationPort: 3000),
+            ForwardSpec(kind: .remote, listenPort: 31703, destinationHost: "localhost", destinationPort: 22),
+        ]
+    )
+    #expect(RemoteForwardSupport.reverseForwardPort(of: tunnel) == 31703)
+
+    let command = RemoteForwardSupport.freePortCommand(31703)
+    #expect(command.contains("fuser -k 31703/tcp"))
+    #expect(command.contains("BURROW_PORT_FREE"))
+    #expect(command.contains("BURROW_PORT_BUSY"))
+}
+
+@Test func remoteExecArgumentsCarryRouteWithoutForwards() async throws {
+    let tunnel = TunnelConfig(
+        name: "nebula",
+        host: "cri22in001",
+        user: "jianzhou",
+        sshPort: 22,
+        jumpHost: "randi",
+        forwards: [ForwardSpec(kind: .remote, listenPort: 31703, destinationHost: "localhost", destinationPort: 22)]
+    )
+    let args = SSHCommandBuilder.remoteExecArguments(for: tunnel, command: "echo hi")
+
+    #expect(args.contains("-J"))
+    #expect(args.contains("randi"))
+    #expect(args.contains("jianzhou@cri22in001"))
+    #expect(args.last == "echo hi")
+    // No forwards and no -N: this is a maintenance command, not a tunnel.
+    #expect(!args.contains("-N"))
+    #expect(!args.contains("-R"))
+    #expect(!args.contains("31703:localhost:22"))
+}
+
+@Test func supervisorClassifiesRemoteForwardFailure() async throws {
+    let tempDirectory = FileManager.default.temporaryDirectory
+        .appendingPathComponent(UUID().uuidString, isDirectory: true)
+    try FileManager.default.createDirectory(at: tempDirectory, withIntermediateDirectories: true)
+    let scriptURL = tempDirectory.appendingPathComponent("fake-ssh.sh")
+    // ssh prints the warning then exits cleanly (ExitOnForwardFailure behavior).
+    let script = """
+    #!/bin/sh
+    echo "Warning: remote port forwarding failed for listen port 31703" 1>&2
+    exit 0
+    """
+    try script.write(to: scriptURL, atomically: true, encoding: .utf8)
+    try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: scriptURL.path)
+
+    let recorder = EventRecorder()
+    let tunnel = TunnelConfig(name: "nebula", host: "cri22in001", forwards: [])
+    let supervisor = TunnelSupervisor(
+        tunnel: tunnel,
+        logger: { _ in },
+        eventHandler: { recorder.append($0) },
+        executablePath: scriptURL.path
+    )
+    // A diagnostic (non-auth) failure keeps reconnecting, so run it in a
+    // cancellable task and inspect the first exit rather than awaiting run().
+    let runTask = Task { await supervisor.run() }
+    defer { runTask.cancel() }
+
+    let deadline = Date().addingTimeInterval(3)
+    while recorder.firstExitDiagnostic() == nil, Date() < deadline {
+        try await Task.sleep(for: .milliseconds(50))
+    }
+
+    // The failure is captured as a diagnostic, not an opaque clean exit.
+    let diagnostic = recorder.firstExitDiagnostic() ?? ""
+    #expect(diagnostic.lowercased().contains("remote port forwarding failed"))
+}

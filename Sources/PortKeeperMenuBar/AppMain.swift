@@ -115,6 +115,18 @@ final class MenuBarViewModel: ObservableObject {
     @Published private(set) var launchAtLoginEnabled = false
     @Published private(set) var terminalApp = "auto"
     @Published private(set) var twoFactorUnlockCacheSeconds = 0
+    /// Keep-warm needs a fresh 2FA code on every silent/background re-warm
+    /// (launch, wake). Generating one needs Touch ID, so with the interactive
+    /// unlock cache at "Every Time" (0) an unattended re-warm can never complete
+    /// — the host just goes cold. So the keep-warm code path unlocks the seed
+    /// for a longer window: one Touch ID (at launch or a manual warm) then covers
+    /// background re-warms for this long. Interactive reveals still obey the
+    /// user's own setting (the store only reuses the cache when the caller asks
+    /// for a positive window, and reveals pass 0), so this doesn't weaken them.
+    private static let keepWarmMinUnlockCacheSeconds = 8 * 60 * 60
+    private var keepWarmUnlockCacheSeconds: Int {
+        max(twoFactorUnlockCacheSeconds, Self.keepWarmMinUnlockCacheSeconds)
+    }
     /// When true, an intentional Quit leaves the VPN and tunnels running and
     /// the app re-adopts them on next launch. When false (default), Quit tears
     /// everything down. A crash/kill always leaves them running regardless.
@@ -164,6 +176,11 @@ final class MenuBarViewModel: ObservableObject {
     private static let keepWarmHostsKey = "keepWarmHosts"
     /// Aliases whose master connection is currently live (runtime status).
     @Published private(set) var warmHosts: Set<String> = []
+    /// Aliases with a warm attempt in flight (connecting / signing in). Drives a
+    /// breathing indicator so the gap between submitting a code and the master
+    /// coming up isn't a silent dead wait.
+    @Published private(set) var warmingHosts: Set<String> = []
+    func isHostWarming(_ alias: String) -> Bool { warmingHosts.contains(alias) }
 
     /// What the last failed silent warm probe learned about a host: the
     /// credentials it was tried with and the prompts the host sent. Lets the
@@ -662,6 +679,62 @@ final class MenuBarViewModel: ObservableObject {
         startTunnel(named: name)
     }
 
+    /// Whether this tunnel's latest failure is a remote reverse-forward port
+    /// conflict — drives the "Free Remote Port & Retry" affordance.
+    func remoteForwardConflictPort(forTunnel name: String) -> Int? {
+        guard let state = tunnels.first(where: { $0.id == name }),
+              state.connectionState == .failed,
+              state.lastMessage.lowercased().contains("remote port forwarding failed") else {
+            return nil
+        }
+        return RemoteForwardSupport.conflictingPort(in: state.lastMessage)
+            ?? RemoteForwardSupport.reverseForwardPort(of: state.tunnel)
+    }
+
+    /// Frees a stale reverse-forward port on the tunnel's remote host (the
+    /// remote mirror of Burrow's local stale-listener reclaim), then restarts
+    /// the tunnel. Runs a scoped kill through the tunnel's own route (jump
+    /// included) targeting only that one port. User-initiated: it terminates a
+    /// process on a remote machine, so Burrow never does it silently.
+    func freeRemoteForwardPortAndRetry(forTunnel name: String) {
+        guard let state = tunnels.first(where: { $0.id == name }) else { return }
+        guard let port = remoteForwardConflictPort(forTunnel: name)
+            ?? RemoteForwardSupport.reverseForwardPort(of: state.tunnel) else {
+            globalMessage = "\(name) has no reverse-forward port to free."
+            return
+        }
+        let tunnel = state.tunnel
+        stopTunnel(named: name)
+        updateState(for: name, isRunning: false, state: .connecting, message: "Freeing remote port \(port) on \(tunnel.host)…")
+        globalMessage = "Freeing remote port \(port) on \(tunnel.host)…"
+
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            let command = RemoteForwardSupport.freePortCommand(port)
+            let arguments = SSHCommandBuilder.remoteExecArguments(for: tunnel, command: command)
+            let result = await Task.detached {
+                RemoteCommandRunner.run(arguments: arguments)
+            }.value
+
+            let freed = result.standardOutput.contains("BURROW_PORT_FREE")
+            let stillBusy = result.standardOutput.contains("BURROW_PORT_BUSY")
+            if freed {
+                self.appendLog(for: name, message: "Freed stale remote port \(port) on \(tunnel.host).")
+                self.globalMessage = "Freed remote port \(port) — restarting \(name)."
+                self.startTunnel(named: name)
+            } else if stillBusy {
+                let msg = "Remote port \(port) on \(tunnel.host) is held by a process Burrow can't signal (no fuser, restricted /proc). Free it on the host, or change this tunnel's reverse-forward port to an unused one."
+                self.appendLog(for: name, message: msg)
+                self.updateState(for: name, isRunning: false, state: .failed, message: msg)
+            } else {
+                let detail = result.standardError.split(whereSeparator: \.isNewline).last.map(String.init) ?? "could not reach the host"
+                let msg = "Couldn't free remote port \(port): \(detail)"
+                self.appendLog(for: name, message: msg)
+                self.updateState(for: name, isRunning: false, state: .failed, message: msg)
+            }
+        }
+    }
+
     func startTunnel(named name: String, allowPasswordPrompt: Bool = true) {
         guard tasks[name] == nil else {
             updateState(for: name, isRunning: true, message: "Already running")
@@ -1098,6 +1171,10 @@ final class MenuBarViewModel: ObservableObject {
         }
         Task { @MainActor [weak self] in
             guard let self else { return }
+            // Breathe on the row for the whole attempt (silent probe, sign-in
+            // dialog, and the ssh connect that follows), cleared on every exit.
+            self.warmingHosts.insert(alias)
+            defer { self.warmingHosts.remove(alias) }
 
             // Already warm (a live master exists)? Nothing to do.
             if await Task.detached(operation: { SSHHostWarmer.isWarm(alias: alias) }).value {
@@ -1132,7 +1209,7 @@ final class MenuBarViewModel: ObservableObject {
                             for: account,
                             reason: "Keep \(alias) warm with the \(account.name) 2FA code",
                             at: Date(),
-                            unlockCacheSeconds: self.twoFactorUnlockCacheSeconds
+                            unlockCacheSeconds: self.keepWarmUnlockCacheSeconds
                         )
                     } catch let error as TwoFactorStoreError {
                         if case .cancelled = error { return }
@@ -1190,7 +1267,9 @@ final class MenuBarViewModel: ObservableObject {
                     host: tunnel.host,
                     retry: attempt > 0,
                     reason: lastReason,
-                    serverPrompts: serverPrompts
+                    serverPrompts: serverPrompts,
+                    linkedAccountName: account?.name,
+                    availableCode: codes?.current
                 ) else {
                     self.warmHosts.remove(alias)
                     self.setWarmStatus(alias, "\(alias) not warmed.")
@@ -1343,6 +1422,13 @@ final class MenuBarViewModel: ObservableObject {
         if live != warmHosts {
             warmHosts = live
         }
+        // Reconcile the status badge with reality: a host that is actually warm
+        // must never keep showing a red "primed / failed" error from an earlier
+        // attempt (e.g. a silent launch probe that failed before the user
+        // finished sign-in). Clear the stale error so the flame and badge agree.
+        for alias in live where warmStatus[alias]?.isError == true {
+            warmStatus[alias] = WarmHostStatus(message: "\(alias) is warm — terminals open instantly.", isError: false, at: Date())
+        }
     }
 
     /// Re-warm kept-warm hosts at launch. Silent only — hosts that need
@@ -1445,15 +1531,21 @@ final class MenuBarViewModel: ObservableObject {
     /// only until its TOTP period boundary, after which the row re-locks.
     @Published var revealedCodes: [String: RevealedCode] = [:]
 
-    /// Drives the dedicated Authenticator window (kept out of the main menu
-    /// while the feature is being refined).
+    /// Drives the dedicated Authenticator window.
     @Published var showingAuthenticator = false {
         didSet {
             guard oldValue != showingAuthenticator else { return }
             syncAuthenticatorWindow()
         }
     }
+    /// Set when the window should open straight into the "add a code" form
+    /// (e.g. from + New ▸ New Authenticator Code). The sheet consumes it once.
+    @Published var authenticatorBeginInAdd = false
+    /// True while the current Authenticator window is unlocked — one Touch ID on
+    /// open reveals every code and they stay live until the window closes.
+    @Published private(set) var authenticatorUnlocked = false
     private var authenticatorWindowController: AuthenticatorWindowController?
+    private var authenticatorRefreshTask: Task<Void, Never>?
 
     let twoFactorStore = TwoFactorStore()
 
@@ -1468,10 +1560,85 @@ final class MenuBarViewModel: ObservableObject {
             return
         }
         showingAuthenticator = true
+        // One Touch ID on open reveals every code (skipped if there are none yet
+        // or the user is here to add their first).
+        unlockAllTwoFactorCodes()
+    }
+
+    /// Opens the Authenticator straight into the add-a-code form.
+    func openAuthenticatorAdding() {
+        guard TwoFactorStore.authenticationAvailable() else {
+            globalMessage = "Mac authentication isn't available, so verification codes can't be stored securely."
+            return
+        }
+        authenticatorBeginInAdd = true
+        showingAuthenticator = true
+        // Reveal any existing codes too, so the window isn't half-locked.
+        unlockAllTwoFactorCodes()
     }
 
     func closeAuthenticator() {
         showingAuthenticator = false
+    }
+
+    /// Authenticates once and reveals every enrolled code, keeping them live
+    /// (ticking to the next period) until the window closes. A no-op when there
+    /// are no codes, so opening only to add one never prompts.
+    func unlockAllTwoFactorCodes() {
+        guard !twoFactorAccounts.isEmpty, !authenticatorUnlocked else { return }
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            do {
+                try await self.twoFactorStore.openUnlockSession(
+                    accountNames: self.twoFactorAccounts.map(\.name),
+                    reason: "Unlock your Burrow verification codes"
+                )
+            } catch let error as TwoFactorStoreError {
+                if case .cancelled = error { return }
+                self.globalMessage = error.localizedDescription
+                return
+            } catch {
+                self.globalMessage = error.localizedDescription
+                return
+            }
+            self.authenticatorUnlocked = true
+            self.refreshRevealedFromSession()
+            self.startAuthenticatorRefreshLoop()
+        }
+    }
+
+    /// Regenerates every revealed code from the open unlock session, refreshing
+    /// any whose TOTP period has rolled over. No authentication.
+    private func refreshRevealedFromSession() {
+        let now = Date()
+        for account in twoFactorAccounts {
+            if let existing = revealedCodes[account.id], existing.periodEnd > now { continue }
+            guard let code = twoFactorStore.sessionCode(for: account, at: now) else { continue }
+            let period = Double(max(1, account.period))
+            let periodEnd = now.addingTimeInterval(period - now.timeIntervalSince1970.truncatingRemainder(dividingBy: period))
+            revealedCodes[account.id] = RevealedCode(code: code, periodEnd: periodEnd)
+        }
+    }
+
+    private func startAuthenticatorRefreshLoop() {
+        authenticatorRefreshTask?.cancel()
+        authenticatorRefreshTask = Task { @MainActor [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(1))
+                guard let self, self.authenticatorUnlocked else { return }
+                self.refreshRevealedFromSession()
+            }
+        }
+    }
+
+    /// Re-locks the Authenticator: stops the refresh loop, clears the unlock
+    /// session, and hides all codes. Called when the window closes.
+    func lockAuthenticator() {
+        authenticatorRefreshTask?.cancel()
+        authenticatorRefreshTask = nil
+        twoFactorStore.closeUnlockSession()
+        revealedCodes.removeAll()
+        authenticatorUnlocked = false
     }
 
     private func syncAuthenticatorWindow() {
@@ -1482,6 +1649,9 @@ final class MenuBarViewModel: ObservableObject {
             authenticatorWindowController?.present()
         } else {
             authenticatorWindowController?.dismiss()
+            // Closing the window re-locks: codes should never linger revealed
+            // behind a closed Authenticator.
+            lockAuthenticator()
         }
     }
 
@@ -1546,6 +1716,12 @@ final class MenuBarViewModel: ObservableObject {
             )
             try store.upsertTwoFactorAccount(account)
             loadConfig()
+            // If the Authenticator is already unlocked, fold the new seed into
+            // the open session so it reveals right away — no second Touch ID.
+            if authenticatorUnlocked {
+                twoFactorStore.addToUnlockSession(accountName: trimmedName)
+                refreshRevealedFromSession()
+            }
             globalMessage = "Saved code for \(trimmedName)."
             return true
         } catch let error as TwoFactorStoreError {
@@ -3163,7 +3339,9 @@ struct MenuBarContent: View {
                                                 onToggleAutoConnect: { viewModel.setAutoConnect(named: tunnel.id, enabled: $0) },
                                                 onSetGateway: { viewModel.setGateway($0, forTunnels: [tunnel.id]) },
                                                 onOpenSSH: { viewModel.openSSHTerminal(for: tunnel.id) },
-                                                onCopySSH: { viewModel.copySSHCommand(for: tunnel.id) }
+                                                onCopySSH: { viewModel.copySSHCommand(for: tunnel.id) },
+                                                remoteForwardConflictPort: viewModel.remoteForwardConflictPort(forTunnel: tunnel.id),
+                                                onFreeRemotePort: { viewModel.freeRemoteForwardPortAndRetry(forTunnel: tunnel.id) }
                                             )
                                         }
                                     }
@@ -3306,7 +3484,6 @@ struct MenuBarContent: View {
                     }
                 }
                 Button("Import Tunnels from SSH Config…", action: viewModel.beginSSHConfigImport)
-                Button("Authenticator (2FA Codes)…", action: viewModel.openAuthenticator)
 
                 Divider()
 
@@ -3366,6 +3543,16 @@ struct MenuBarContent: View {
             .menuStyle(.borderlessButton)
             .fixedSize()
 
+            // Authenticator is first-class: a visible one-click button, not a
+            // buried Settings item. Touch ID on open reveals every code.
+            Button(action: viewModel.openAuthenticator) {
+                Label("Codes", systemImage: "lock.shield")
+                    .font(.system(size: 11))
+            }
+            .buttonStyle(.borderless)
+            .fixedSize()
+            .help("Authenticator — your 2FA verification codes")
+
             Spacer()
 
             Menu {
@@ -3388,6 +3575,12 @@ struct MenuBarContent: View {
                     viewModel.createProfile()
                 } label: {
                     Label("New Profile", systemImage: "square.stack")
+                }
+                Divider()
+                Button {
+                    viewModel.openAuthenticatorAdding()
+                } label: {
+                    Label("New Authenticator Code", systemImage: "lock.shield")
                 }
             } label: {
                 Label("New", systemImage: "plus")
@@ -3568,6 +3761,7 @@ struct MenuBarContent: View {
                             host: host,
                             isWarm: viewModel.isHostWarm(host.alias),
                             isKeptWarm: viewModel.isHostKeptWarm(host.alias),
+                            isWarming: viewModel.isHostWarming(host.alias),
                             status: viewModel.warmStatus[host.alias],
                             onOpen: { viewModel.openSSHHost(alias: host.alias) },
                             onCopy: { viewModel.copySSHHostCommand(alias: host.alias) },
@@ -3687,6 +3881,7 @@ private struct SSHHostRow: View {
     let host: SSHConfigHost
     let isWarm: Bool
     let isKeptWarm: Bool
+    var isWarming: Bool = false
     var status: MenuBarViewModel.WarmHostStatus? = nil
     let onOpen: () -> Void
     let onCopy: () -> Void
@@ -3702,6 +3897,7 @@ private struct SSHHostRow: View {
     let onRemove: () -> Void
 
     @State private var hovering = false
+    @State private var breathing = false
 
     private var subtitle: String {
         var text = host.user.map { "\($0)@\(host.effectiveHost)" } ?? host.effectiveHost
@@ -3749,7 +3945,17 @@ private struct SSHHostRow: View {
                         // When the last warm attempt failed, the row shows the
                         // reason itself instead of the address — no need to
                         // open anything to see what went wrong.
-                        if let status, status.isError {
+                        if isWarming {
+                            HStack(spacing: 5) {
+                                Circle()
+                                    .fill(Color.orange)
+                                    .frame(width: 6, height: 6)
+                                    .opacity(breathing ? 1 : 0.25)
+                                Text("signing in…")
+                                    .font(.system(size: 10, weight: .medium, design: .monospaced))
+                                    .foregroundStyle(.secondary)
+                            }
+                        } else if let status, status.isError {
                             Text(status.message)
                                 .font(.system(size: 10, weight: .medium, design: .monospaced))
                                 .foregroundStyle(Color.burrowFailure.opacity(0.9))
@@ -3786,14 +3992,15 @@ private struct SSHHostRow: View {
 
             // Visible inline actions (no right-click required).
             Button(action: onToggleKeepWarm) {
-                Image(systemName: flameIcon)
+                Image(systemName: isWarming ? "flame.fill" : flameIcon)
                     .font(.system(size: 12.5))
-                    .foregroundStyle(flameColor)
+                    .foregroundStyle(isWarming ? Color.orange : flameColor)
+                    .opacity(isWarming ? (breathing ? 1 : 0.35) : 1)
                     .frame(width: 26, height: 26)
                     .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
-            .help(flameHelp)
+            .help(isWarming ? "Signing in to \(host.alias)…" : flameHelp)
 
             Button(action: onCopy) {
                 Image(systemName: "doc.on.doc")
@@ -3868,6 +4075,11 @@ private struct SSHHostRow: View {
         .padding(.vertical, 7)
         .background(hovering ? Color.primary.opacity(0.03) : Color.clear)
         .onHover { hovering = $0 }
+        .animation(.easeInOut(duration: 0.85).repeatForever(autoreverses: true), value: breathing)
+        .onChange(of: isWarming) { warming in
+            breathing = warming
+        }
+        .onAppear { breathing = isWarming }
     }
 }
 
@@ -4390,6 +4602,8 @@ struct TunnelRow: View {
     var onSetGateway: (String?) -> Void = { _ in }
     var onOpenSSH: () -> Void = {}
     var onCopySSH: () -> Void = {}
+    var remoteForwardConflictPort: Int? = nil
+    var onFreeRemotePort: () -> Void = {}
     @State private var isIdentityTooltipVisible = false
     @State private var isDetailsPresented = false
     @State private var isDetailsHovered = false
@@ -4715,6 +4929,10 @@ struct TunnelRow: View {
                         }
                     }
                 }
+            }
+            if let port = remoteForwardConflictPort {
+                Divider()
+                Button("Free Remote Port \(String(port)) & Retry", action: onFreeRemotePort)
             }
             if tunnel.isRunning && tunnel.connectionState == .failed {
                 Divider()
@@ -5187,6 +5405,18 @@ private enum TunnelFailureClassifier {
                 category: "auth failed",
                 codeLine: "authentication failed",
                 hintLine: "Check the saved username or password for this endpoint.",
+                color: .burrowFailure
+            )
+        }
+
+        if lowercased.contains("remote port forwarding failed") {
+            let port = RemoteForwardSupport.conflictingPort(in: message)
+                ?? RemoteForwardSupport.reverseForwardPort(of: tunnel.tunnel)
+            let portText = port.map(String.init) ?? "the reverse-forward port"
+            return TunnelFailurePresentation(
+                category: "remote port in use",
+                codeLine: "remote port \(portText) already bound",
+                hintLine: "A leftover session on \(tunnel.tunnel.host) still holds it — use ⋯ ▸ Free Remote Port & Retry.",
                 color: .burrowFailure
             )
         }

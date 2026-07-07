@@ -57,6 +57,27 @@ public enum SSHCommandBuilder {
             .joined(separator: " ")
     }
 
+    /// ssh arguments to run a single command on the tunnel's host — same
+    /// endpoint, jump host, identity, and port as the tunnel, but no forwards
+    /// and no `-N`. Used to reach the remote for maintenance (e.g. freeing a
+    /// stale reverse-forward port).
+    public static func remoteExecArguments(for tunnel: TunnelConfig, command: String) -> [String] {
+        var args: [String] = [
+            "-o", "BatchMode=yes",
+            "-o", "ConnectTimeout=20",
+            "-p", "\(tunnel.sshPort)",
+        ]
+        if let identityFile = tunnel.identityFile, !identityFile.isEmpty {
+            args.append(contentsOf: ["-i", expandTilde(in: identityFile)])
+        }
+        if let jumpHost = tunnel.jumpHost, !jumpHost.isEmpty {
+            args.append(contentsOf: ["-J", jumpHost])
+        }
+        args.append(remoteTarget(for: tunnel))
+        args.append(command)
+        return args
+    }
+
     private static func remoteTarget(for tunnel: TunnelConfig) -> String {
         if let user = tunnel.user, !user.isEmpty {
             return "\(user)@\(tunnel.host)"

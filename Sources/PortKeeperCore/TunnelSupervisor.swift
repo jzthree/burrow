@@ -190,7 +190,12 @@ public final class TunnelSupervisor: @unchecked Sendable {
             normalized.contains("connection reset") ||
             normalized.contains("broken pipe") ||
             normalized.contains("host key verification failed") ||
-            normalized.contains("remote host identification has changed")
+            normalized.contains("remote host identification has changed") ||
+            // The remote refused to bind a -R forward's port (usually a stale
+            // reverse-forward listener from an earlier session). With
+            // ExitOnForwardFailure this exits ssh, so without capturing it the
+            // tunnel just loops on an opaque "exited code 0".
+            normalized.contains("remote port forwarding failed")
     }
 
     private func waitForForwardReadiness(process: Process, runState: RunState) -> Bool {
