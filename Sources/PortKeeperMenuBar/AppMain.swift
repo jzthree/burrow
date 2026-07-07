@@ -177,6 +177,26 @@ final class MenuBarViewModel: ObservableObject {
 
     private var warmProbeFailures: [String: WarmProbeResult] = [:]
 
+    /// The latest keep-warm outcome for a host, kept per-alias so the SSH
+    /// Hosts row can show its own status instead of relying on the transient
+    /// global channel (which the next action overwrites).
+    struct WarmHostStatus: Equatable {
+        var message: String
+        var isError: Bool
+        var at: Date
+    }
+
+    @Published private(set) var warmStatus: [String: WarmHostStatus] = [:]
+
+    /// Records a host's latest warm status and echoes it to the global
+    /// channel. `Date()` is fine here — this is UI state, never persisted.
+    @discardableResult
+    private func setWarmStatus(_ alias: String, _ message: String, error: Bool = false) -> Bool {
+        warmStatus[alias] = WarmHostStatus(message: message, isError: error, at: Date())
+        globalMessage = message
+        return true
+    }
+
     @Published private(set) var sshConfigHosts: [SSHConfigHost] = []
 
     private let notifier = BurrowNotifier()
@@ -1071,14 +1091,18 @@ final class MenuBarViewModel: ObservableObject {
                 keychainProblem = "Keychain error for \(key.account): \(error.localizedDescription)"
             }
         }
-        globalMessage = keychainProblem ?? "Warming \(alias)…"
+        if let keychainProblem {
+            setWarmStatus(alias, keychainProblem, error: true)
+        } else {
+            globalMessage = "Warming \(alias)…"
+        }
         Task { @MainActor [weak self] in
             guard let self else { return }
 
             // Already warm (a live master exists)? Nothing to do.
             if await Task.detached(operation: { SSHHostWarmer.isWarm(alias: alias) }).value {
                 self.warmHosts.insert(alias)
-                self.globalMessage = "\(alias) is already warm."
+                self.setWarmStatus(alias, "\(alias) is already warm.")
                 return
             }
 
@@ -1135,7 +1159,7 @@ final class MenuBarViewModel: ObservableObject {
                     _ = AskPassSupport.consumePrompts(at: promptLog)
                     self.warmProbeFailures[alias] = nil
                     self.warmHosts.insert(alias)
-                    self.globalMessage = "\(alias) is warm — terminals open instantly."
+                    self.setWarmStatus(alias, "\(alias) is warm — terminals open instantly.")
                     return
                 }
                 serverPrompts = AskPassSupport.consumePrompts(at: promptLog)
@@ -1154,7 +1178,7 @@ final class MenuBarViewModel: ObservableObject {
                 //    askpass — retrying a rejected/expired code in place.
                 guard allowInteractive else {
                     self.warmHosts.remove(alias)
-                    self.globalMessage = "\(alias) is primed — use ⋯ ▸ Finish Sign-In to complete it."
+                    self.setWarmStatus(alias, "\(alias) is primed — use ⋯ ▸ Finish Sign-In to complete it.", error: true)
                     return
                 }
             }
@@ -1169,7 +1193,7 @@ final class MenuBarViewModel: ObservableObject {
                     serverPrompts: serverPrompts
                 ) else {
                     self.warmHosts.remove(alias)
-                    self.globalMessage = "\(alias) not warmed."
+                    self.setWarmStatus(alias, "\(alias) not warmed.")
                     return
                 }
                 let attemptLog = AskPassSupport.makePromptLog()
@@ -1228,10 +1252,10 @@ final class MenuBarViewModel: ObservableObject {
                     self.warmProbeFailures[alias] = nil
                     if await Task.detached(operation: { SSHHostWarmer.isWarm(alias: alias) }).value {
                         self.warmHosts.insert(alias)
-                        self.globalMessage = "\(alias) is warm — terminals open instantly."
+                        self.setWarmStatus(alias, "\(alias) is warm — terminals open instantly.")
                     } else {
                         self.warmHosts.remove(alias)
-                        self.globalMessage = "\(alias) signed in but kept no master — add `ControlMaster auto` / `ControlPersist` to its ssh config."
+                        self.setWarmStatus(alias, "\(alias) signed in but kept no master — add `ControlMaster auto` / `ControlPersist` to its ssh config.", error: true)
                     }
                     return
                 }
@@ -1240,13 +1264,13 @@ final class MenuBarViewModel: ObservableObject {
                 let kind = WarmDiagnosis.classify(outcome.output)
                 guard kind == .authRejected || kind == .unknown else {
                     self.warmHosts.remove(alias)
-                    self.globalMessage = "Couldn't warm \(alias): \(WarmDiagnosis.shortReason(outcome.output))."
+                    self.setWarmStatus(alias, "Couldn't warm \(alias): \(WarmDiagnosis.shortReason(outcome.output)).", error: true)
                     return
                 }
                 lastReason = WarmDiagnosis.shortReason(outcome.output)
             }
             self.warmHosts.remove(alias)
-            self.globalMessage = "Couldn't warm \(alias) after 3 tries: \(lastReason ?? "sign-in failed"). For a Duo push, use ⋯ ▸ Sign in via Terminal."
+            self.setWarmStatus(alias, "Couldn't warm \(alias) after 3 tries: \(lastReason ?? "sign-in failed"). For a Duo push, use ⋯ ▸ Sign in via Terminal.", error: true)
         }
     }
 
@@ -1290,9 +1314,9 @@ final class MenuBarViewModel: ObservableObject {
                     terminalApp: self.terminalApp,
                     oneTimeCode: oneTimeCode
                 )
-                self.globalMessage = "Finish signing in to \(alias) in \(self.terminalAppDisplayName); it stays warm afterward."
+                self.setWarmStatus(alias, "Finish signing in to \(alias) in \(self.terminalAppDisplayName); it stays warm afterward.")
             } catch {
-                self.globalMessage = "Couldn't open a sign-in window for \(alias): \(error.localizedDescription)"
+                self.setWarmStatus(alias, "Couldn't open a sign-in window for \(alias): \(error.localizedDescription)", error: true)
             }
         }
     }
@@ -3544,6 +3568,7 @@ struct MenuBarContent: View {
                             host: host,
                             isWarm: viewModel.isHostWarm(host.alias),
                             isKeptWarm: viewModel.isHostKeptWarm(host.alias),
+                            status: viewModel.warmStatus[host.alias],
                             onOpen: { viewModel.openSSHHost(alias: host.alias) },
                             onCopy: { viewModel.copySSHHostCommand(alias: host.alias) },
                             onToggleKeepWarm: { viewModel.toggleKeepWarm(alias: host.alias) },
@@ -3606,12 +3631,63 @@ struct MenuBarContent: View {
     }
 }
 
+/// A small info button that reveals the host's latest keep-warm status —
+/// tinted red and always visible when the last attempt failed, faint
+/// otherwise. The popover carries the full message and when it happened.
+private struct WarmStatusButton: View {
+    let alias: String
+    let subtitle: String
+    let status: MenuBarViewModel.WarmHostStatus
+    @State private var presented = false
+
+    var body: some View {
+        Button {
+            presented = true
+        } label: {
+            Image(systemName: status.isError ? "exclamationmark.circle.fill" : "info.circle")
+                .font(.system(size: 11.5))
+                .foregroundStyle(status.isError ? Color.burrowFailure.opacity(0.9) : Color.secondary.opacity(0.7))
+                .frame(width: 22, height: 26)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .help(status.isError ? "Keep-warm failed — click for details" : "Latest keep-warm status")
+        .popover(isPresented: $presented, arrowEdge: .trailing) {
+            VStack(alignment: .leading, spacing: 8) {
+                HStack(spacing: 7) {
+                    Circle()
+                        .fill(status.isError ? Color.burrowFailure : Color.green)
+                        .frame(width: 7, height: 7)
+                    Text(alias)
+                        .font(.system(size: 13, weight: .semibold))
+                    Spacer()
+                    Text(status.at, style: .relative)
+                        .font(.system(size: 10))
+                        .foregroundStyle(.secondary)
+                }
+                Text(subtitle)
+                    .font(.system(size: 10, design: .monospaced))
+                    .foregroundStyle(.secondary)
+                Divider()
+                Text(status.message)
+                    .font(.system(size: 11, design: .monospaced))
+                    .foregroundStyle(status.isError ? Color.burrowFailure.opacity(0.95) : .primary.opacity(0.82))
+                    .textSelection(.enabled)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            .padding(12)
+            .frame(width: 300, alignment: .leading)
+        }
+    }
+}
+
 /// A plain ssh login target from ~/.ssh/config — no forwards, no supervision.
 /// Whole-row click opens the session; the menu also offers copy.
 private struct SSHHostRow: View {
     let host: SSHConfigHost
     let isWarm: Bool
     let isKeptWarm: Bool
+    var status: MenuBarViewModel.WarmHostStatus? = nil
     let onOpen: () -> Void
     let onCopy: () -> Void
     let onToggleKeepWarm: () -> Void
@@ -3670,11 +3746,22 @@ private struct SSHHostRow: View {
                         Text(host.alias)
                             .font(.system(size: 13, weight: .semibold))
                             .lineLimit(1)
-                        Text(subtitle)
-                            .font(.system(size: 10, design: .monospaced))
-                            .foregroundStyle(.secondary)
-                            .lineLimit(1)
-                            .truncationMode(.middle)
+                        // When the last warm attempt failed, the row shows the
+                        // reason itself instead of the address — no need to
+                        // open anything to see what went wrong.
+                        if let status, status.isError {
+                            Text(status.message)
+                                .font(.system(size: 10, weight: .medium, design: .monospaced))
+                                .foregroundStyle(Color.burrowFailure.opacity(0.9))
+                                .lineLimit(1)
+                                .truncationMode(.tail)
+                        } else {
+                            Text(subtitle)
+                                .font(.system(size: 10, design: .monospaced))
+                                .foregroundStyle(.secondary)
+                                .lineLimit(1)
+                                .truncationMode(.middle)
+                        }
                     }
                     Spacer(minLength: 6)
                 }
@@ -3682,6 +3769,12 @@ private struct SSHHostRow: View {
             }
             .buttonStyle(.plain)
             .help("Open ssh \(host.alias) in a terminal")
+
+            // Latest keep-warm status, on demand and always available (not just
+            // on error) — the full message and when it happened.
+            if let status {
+                WarmStatusButton(alias: host.alias, subtitle: subtitle, status: status)
+            }
 
             // Shows a linked 2FA account at a glance (used when warming).
             if let linkedTwoFactorName {
@@ -4106,6 +4199,7 @@ private struct GatewayRow: View {
     let onDelete: () -> Void
     var onOpenBrowser: (ChromiumBrowser) -> Void = { _ in }
     @State private var isPrimaryHovered = false
+    @State private var isDetailsPresented = false
 
     var body: some View {
         HStack(alignment: .center, spacing: 10) {
@@ -4146,12 +4240,36 @@ private struct GatewayRow: View {
 
             HStack(spacing: 5) {
                 primaryButton
+                detailsButton
                 menu
             }
-            .frame(width: 100, alignment: .trailing)
+            .frame(width: 122, alignment: .trailing)
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 10)
+    }
+
+    /// Same visible-details affordance as tunnels, exposing the gateway's
+    /// recent openconnect log (previously collected but unviewable).
+    private var detailsButton: some View {
+        Button {
+            isDetailsPresented = true
+        } label: {
+            Image(systemName: gateway.connectionState == .failed ? "exclamationmark.circle.fill" : "info.circle")
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(
+                    gateway.connectionState == .failed
+                        ? Color.burrowFailure.opacity(0.9)
+                        : Color.secondary.opacity(0.55)
+                )
+                .frame(width: 22, height: 28)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .help(gateway.connectionState == .failed ? "Failed — click for the log" : "Status and recent VPN log")
+        .popover(isPresented: $isDetailsPresented, arrowEdge: .trailing) {
+            GatewayDetailsPopover(gateway: gateway)
+        }
     }
 
     @ViewBuilder
@@ -4274,6 +4392,7 @@ struct TunnelRow: View {
     var onCopySSH: () -> Void = {}
     @State private var isIdentityTooltipVisible = false
     @State private var isDetailsPresented = false
+    @State private var isDetailsHovered = false
     @State private var isAutoHovered = false
     @State private var isPrimaryHovered = false
     @State private var isMenuHovered = false
@@ -4324,9 +4443,10 @@ struct TunnelRow: View {
             HStack(spacing: 5) {
                 autoConnectButton
                 primaryActionButton
+                detailsButton
                 rowMenu
             }
-            .frame(width: 134, alignment: .trailing)
+            .frame(width: 160, alignment: .trailing)
             .layoutPriority(2)
         }
         .padding(.horizontal, 14)
@@ -4548,6 +4668,30 @@ struct TunnelRow: View {
             return .gray
         case .failed:
             return .red
+        }
+    }
+
+    /// A visible details affordance so the log/diagnosis is one obvious click
+    /// away — it used to hide inside the ⋯ menu. Turns into a red warning
+    /// glyph when the tunnel has failed, drawing the eye to the explanation.
+    private var detailsButton: some View {
+        Button {
+            isDetailsPresented = true
+        } label: {
+            Image(systemName: tunnel.connectionState == .failed ? "exclamationmark.circle.fill" : "info.circle")
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(
+                    tunnel.connectionState == .failed
+                        ? Color.burrowFailure.opacity(0.9)
+                        : (isDetailsHovered ? Color.primary.opacity(0.72) : Color.secondary.opacity(0.5))
+                )
+                .frame(width: 22, height: 28)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .help(tunnel.connectionState == .failed ? "Failed — click for the log and diagnosis" : "Details, recent log, and SSH command")
+        .onHover { hovering in
+            withAnimation(.easeOut(duration: 0.12)) { isDetailsHovered = hovering }
         }
     }
 
@@ -4795,6 +4939,87 @@ private struct CopyPortChip: View {
             }
         }
         .help("Copy \(address)")
+    }
+}
+
+private struct GatewayDetailsPopover: View {
+    let gateway: MenuBarViewModel.GatewayState
+
+    private var statusColor: Color {
+        switch gateway.connectionState {
+        case .connected: return .green
+        case .connecting: return .orange
+        case .disconnected: return .gray
+        case .failed: return .red
+        }
+    }
+
+    private var recentLogText: String {
+        if gateway.recentLogs.isEmpty {
+            return gateway.lastMessage.isEmpty ? "No recent log" : gateway.lastMessage
+        }
+        return gateway.recentLogs.suffix(20).joined(separator: "\n")
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 7) {
+                Circle().fill(statusColor).frame(width: 7, height: 7)
+                Text(gateway.config.name)
+                    .font(.system(size: 13, weight: .semibold))
+                    .lineLimit(1)
+                Spacer()
+                Text(gateway.connectionState == .connected ? "connected"
+                    : gateway.connectionState == .connecting ? "connecting"
+                    : gateway.connectionState == .failed ? "failed" : "stopped")
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundStyle(.secondary)
+            }
+
+            VStack(alignment: .leading, spacing: 5) {
+                detailRow("Server", gateway.config.server)
+                detailRow("SOCKS", "127.0.0.1:\(String(gateway.config.socksPort))")
+                detailRow("Protocol", "\(gateway.config.vpnProtocol) · \(gateway.config.usesSAML ? "saml" : "password")")
+            }
+
+            if !gateway.lastMessage.isEmpty {
+                Divider()
+                Text(gateway.lastMessage)
+                    .font(.system(size: 10.5, weight: .medium))
+                    .foregroundStyle(gateway.connectionState == .failed ? Color.burrowFailure.opacity(0.95) : .secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            Divider()
+
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Recent log")
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundStyle(.secondary)
+                Text(recentLogText)
+                    .font(.system(size: 10, design: .monospaced))
+                    .foregroundStyle(.primary.opacity(0.78))
+                    .lineLimit(12)
+                    .textSelection(.enabled)
+            }
+        }
+        .padding(12)
+        .frame(width: 340, alignment: .leading)
+    }
+
+    private func detailRow(_ label: String, _ value: String) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: 8) {
+            Text(label)
+                .font(.system(size: 10, weight: .semibold))
+                .foregroundStyle(.secondary)
+                .frame(width: 62, alignment: .leading)
+            Text(value)
+                .font(.system(size: 10.5, design: .monospaced))
+                .foregroundStyle(.primary.opacity(0.82))
+                .lineLimit(2)
+                .truncationMode(.middle)
+                .textSelection(.enabled)
+        }
     }
 }
 
