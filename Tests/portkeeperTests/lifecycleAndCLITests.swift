@@ -338,6 +338,71 @@ private func runBurrow(_ arguments: [String], configURL: URL) throws -> CLIResul
     #expect(addWithoutForward.stderr.contains("--local"))
 }
 
+@Test func cliProfileLifecycleSmokeTest() async throws {
+    let tempDirectory = FileManager.default.temporaryDirectory
+        .appendingPathComponent(UUID().uuidString, isDirectory: true)
+    try FileManager.default.createDirectory(at: tempDirectory, withIntermediateDirectories: true)
+    let configURL = tempDirectory.appendingPathComponent("config.json")
+    _ = try runBurrow(["init"], configURL: configURL)
+    _ = try runBurrow(["add", "--name", "web", "--host", "h1", "--local", "8080:localhost:80"], configURL: configURL)
+
+    let create = try runBurrow(["profile", "create", "--name", "work", "--tunnel", "web", "--tunnel", "ghost"], configURL: configURL)
+    #expect(create.exitCode == 0)
+    #expect(create.stdout.contains("Saved profile 'work'"))
+    #expect(create.stdout.contains("ghost")) // warns about the unknown reference
+
+    let list = try runBurrow(["profile", "list"], configURL: configURL)
+    #expect(list.stdout.contains("work"))
+    #expect(list.stdout.contains("web"))
+
+    let edit = try runBurrow(["profile", "edit", "work", "--tunnel", "web"], configURL: configURL)
+    #expect(edit.exitCode == 0)
+    let jsonList = try runBurrow(["profile", "list", "--json"], configURL: configURL)
+    #expect(jsonList.stdout.contains("\"web\""))
+    #expect(!jsonList.stdout.contains("ghost")) // edit replaced the tunnel list
+
+    let remove = try runBurrow(["profile", "remove", "work"], configURL: configURL)
+    #expect(remove.exitCode == 0)
+    let removeMissing = try runBurrow(["profile", "remove", "work"], configURL: configURL)
+    #expect(removeMissing.exitCode == 1)
+    #expect(removeMissing.stderr.contains("not found"))
+}
+
+@Test func cliReclaimRejectsTunnelWithoutRemoteForward() async throws {
+    let tempDirectory = FileManager.default.temporaryDirectory
+        .appendingPathComponent(UUID().uuidString, isDirectory: true)
+    try FileManager.default.createDirectory(at: tempDirectory, withIntermediateDirectories: true)
+    let configURL = tempDirectory.appendingPathComponent("config.json")
+    _ = try runBurrow(["init"], configURL: configURL)
+    _ = try runBurrow(["add", "--name", "web", "--host", "h1", "--local", "8080:localhost:80"], configURL: configURL)
+
+    let noReverse = try runBurrow(["reclaim", "web"], configURL: configURL)
+    #expect(noReverse.exitCode == 1)
+    #expect(noReverse.stderr.contains("no reverse"))
+
+    let missing = try runBurrow(["reclaim", "nope"], configURL: configURL)
+    #expect(missing.exitCode == 1)
+    #expect(missing.stderr.contains("not found"))
+}
+
+@Test func keepWarmHostsSurviveConfigRoundTrip() async throws {
+    let tempDirectory = FileManager.default.temporaryDirectory
+        .appendingPathComponent(UUID().uuidString, isDirectory: true)
+    try FileManager.default.createDirectory(at: tempDirectory, withIntermediateDirectories: true)
+    let configURL = tempDirectory.appendingPathComponent("config.json")
+    let store = ConfigStore(configURL: configURL)
+    _ = try store.ensureExists()
+
+    try store.mutate { $0.keepWarmHosts = ["randi", "nucleus"] }
+    let reloaded = try store.load()
+    #expect(Set(reloaded.keepWarmHosts) == ["randi", "nucleus"])
+
+    // Older configs without the field decode to an empty list, not a failure.
+    let legacy = #"{"version":1,"tunnels":[]}"#
+    let decoded = try JSONDecoder().decode(AppConfig.self, from: Data(legacy.utf8))
+    #expect(decoded.keepWarmHosts.isEmpty)
+}
+
 // MARK: - Batch-2 fixes: parser wildcards, config errors, symlinks, CLI
 
 @Test func parserFoldsWildcardDefaultsIntoConcreteHosts() async throws {

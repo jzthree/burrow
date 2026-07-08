@@ -167,11 +167,18 @@ final class MenuBarViewModel: ObservableObject {
     private static let hiddenSSHHostsKey = "hiddenSSHHosts"
 
     /// SSH host aliases the user asked Burrow to keep warm (background master,
-    /// re-warmed at launch). Persisted intent.
-    @Published var keepWarmHosts: Set<String> {
+    /// re-warmed at launch). Persisted in config.json so the CLI can toggle it
+    /// too; the guard flag suppresses the write-back while we apply a value
+    /// loaded from config (avoids a config-watcher feedback loop).
+    @Published var keepWarmHosts: Set<String> = [] {
         didSet {
-            UserDefaults.standard.set(Array(keepWarmHosts), forKey: Self.keepWarmHostsKey)
+            guard !isApplyingKeepWarmFromConfig else { return }
+            persistKeepWarmHosts()
         }
+    }
+    private var isApplyingKeepWarmFromConfig = false
+    private func persistKeepWarmHosts() {
+        try? store.mutate { $0.keepWarmHosts = self.keepWarmHosts.sorted() }
     }
     private static let keepWarmHostsKey = "keepWarmHosts"
     /// Aliases whose master connection is currently live (runtime status).
@@ -254,7 +261,7 @@ final class MenuBarViewModel: ObservableObject {
         keepRunningAfterQuit = UserDefaults.standard.bool(forKey: Self.keepRunningKey)
         toggledSections = Set(UserDefaults.standard.stringArray(forKey: Self.toggledSectionsKey) ?? [])
         hiddenSSHHosts = Set(UserDefaults.standard.stringArray(forKey: Self.hiddenSSHHostsKey) ?? [])
-        keepWarmHosts = Set(UserDefaults.standard.stringArray(forKey: Self.keepWarmHostsKey) ?? [])
+        migrateKeepWarmHostsToConfigIfNeeded()
         loadConfig()
         adoptSurvivingGatewaySessions()
         sshConfigHosts = SSHConfigParser.parse()
@@ -546,9 +553,28 @@ final class MenuBarViewModel: ObservableObject {
         tunnels.contains { $0.connectionState == .connected }
     }
 
+    /// Moves any pre-config keep-warm intent (stored in UserDefaults by older
+    /// builds) into config.json exactly once, then leaves config as the source
+    /// of truth shared with the CLI.
+    private func migrateKeepWarmHostsToConfigIfNeeded() {
+        let migratedKey = "keepWarmHostsMigratedToConfig"
+        guard !UserDefaults.standard.bool(forKey: migratedKey) else { return }
+        let legacy = UserDefaults.standard.stringArray(forKey: Self.keepWarmHostsKey) ?? []
+        if !legacy.isEmpty {
+            try? store.mutate { config in
+                config.keepWarmHosts = Set(config.keepWarmHosts).union(legacy).sorted()
+            }
+        }
+        UserDefaults.standard.set(true, forKey: migratedKey)
+    }
+
     func loadConfig() {
         do {
             let config = try store.load()
+            // Apply keep-warm intent from config without triggering a write-back.
+            isApplyingKeepWarmFromConfig = true
+            keepWarmHosts = Set(config.keepWarmHosts)
+            isApplyingKeepWarmFromConfig = false
             let running = Set(tasks.keys)
             let existingStatesByName = Dictionary(uniqueKeysWithValues: tunnels.map { ($0.id, $0) })
             tunnels = config.tunnels.map { tunnel in

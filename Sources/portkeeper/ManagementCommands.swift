@@ -24,11 +24,40 @@ extension CLI {
             try warmSSHHost(rest)
         case "cool":
             try coolSSHHost(rest)
+        case "keepwarm", "keep-warm":
+            try setKeepWarm(rest)
         case "help", "-h", "--help":
             print(Self.hostsHelp)
         default:
-            throw CLIError("unknown hosts command '\(sub)'. Try: list, status, add, remove, warm, cool")
+            throw CLIError("unknown hosts command '\(sub)'. Try: list, status, add, remove, warm, cool, keepwarm")
         }
+    }
+
+    /// Sets (or toggles) the persistent keep-warm intent for a host in
+    /// config.json. The Burrow app re-warms these at launch; the CLI shares the
+    /// same list. This records intent — it does not open a master itself (use
+    /// `burrow hosts warm` for a one-shot master in this terminal).
+    private func setKeepWarm(_ rest: [String]) throws {
+        guard let alias = rest.first(where: { !$0.hasPrefix("-") }) else {
+            throw CLIError("usage: burrow hosts keepwarm <alias> [on|off]")
+        }
+        let stateArg = rest.dropFirst().first(where: { !$0.hasPrefix("-") })?.lowercased()
+        guard SSHConfigParser.parse().contains(where: { $0.matchesAlias(alias) }) else {
+            throw CLIError("host '\(alias)' not found in \(SSHConfigParser.defaultConfigURL().path)")
+        }
+        let desired: Bool
+        switch stateArg {
+        case "on", "yes", "true": desired = true
+        case "off", "no", "false": desired = false
+        case nil: desired = !(try store.load().keepWarmHosts.contains(alias)) // toggle
+        default: throw CLIError("usage: burrow hosts keepwarm <alias> [on|off]")
+        }
+        try store.mutate { config in
+            var set = Set(config.keepWarmHosts)
+            if desired { set.insert(alias) } else { set.remove(alias) }
+            config.keepWarmHosts = set.sorted()
+        }
+        print("\(desired ? "Keeping" : "No longer keeping") '\(alias)' warm. The Burrow app re-warms it at launch.")
     }
 
     private func listSSHHosts(json: Bool) throws {
@@ -58,8 +87,11 @@ extension CLI {
         } else {
             selected = hosts
         }
+        let keepWarm = Set((try? store.load().keepWarmHosts) ?? [])
         if rest.contains("--json") {
-            try printJSON(selected.map { hostRow(for: $0, warm: SSHHostWarmer.isWarm(alias: $0.alias)) })
+            try printJSON(selected.map {
+                hostRow(for: $0, warm: SSHHostWarmer.isWarm(alias: $0.alias), keepWarm: keepWarm.contains($0.alias))
+            })
             return
         }
         guard !selected.isEmpty else {
@@ -68,7 +100,8 @@ extension CLI {
         }
         for host in selected {
             let state = SSHHostWarmer.isWarm(alias: host.alias) ? "warm" : "cold"
-            print("\(host.alias)\t\(state)\t\(sshTarget(host))")
+            let intent = keepWarm.contains(host.alias) ? "\tkeep-warm" : ""
+            print("\(host.alias)\t\(state)\t\(sshTarget(host))\(intent)")
         }
     }
 
@@ -78,10 +111,11 @@ extension CLI {
         let user: String?
         let port: Int?
         let warm: Bool?
+        let keepWarm: Bool?
     }
 
-    private func hostRow(for host: SSHConfigHost, warm: Bool? = nil) -> HostRow {
-        HostRow(alias: host.alias, host: host.effectiveHost, user: host.user, port: host.port, warm: warm)
+    private func hostRow(for host: SSHConfigHost, warm: Bool? = nil, keepWarm: Bool? = nil) -> HostRow {
+        HostRow(alias: host.alias, host: host.effectiveHost, user: host.user, port: host.port, warm: warm, keepWarm: keepWarm)
     }
 
     private func addSSHHost(_ rest: [String]) throws {
@@ -314,7 +348,146 @@ extension CLI {
         }
     }
 
+    // MARK: - profiles
+
+    func profileCommand(_ arguments: [String]) async throws {
+        let sub = arguments.first ?? "list"
+        let rest = Array(arguments.dropFirst())
+        switch sub {
+        case "list", "ls":
+            try listProfiles(json: rest.contains("--json"))
+        case "create", "add":
+            try createProfile(rest)
+        case "edit":
+            try editProfile(rest)
+        case "remove", "rm":
+            try removeProfile(rest)
+        case "run":
+            try await runProfile(rest)
+        case "help", "-h", "--help":
+            print(Self.profileHelp)
+        default:
+            throw CLIError("unknown profile command '\(sub)'. Try: list, create, edit, remove, run")
+        }
+    }
+
+    private func listProfiles(json: Bool) throws {
+        let config = try store.load()
+        if json {
+            struct Row: Encodable {
+                let name: String
+                let tunnels: [String]
+                let gateways: [String]
+            }
+            try printJSON(config.profiles.map { Row(name: $0.name, tunnels: $0.tunnels, gateways: $0.gateways) })
+            return
+        }
+        guard !config.profiles.isEmpty else {
+            print("No profiles yet. Create one with `burrow profile create --name NAME --tunnel T…`.")
+            return
+        }
+        for profile in config.profiles {
+            let tunnels = profile.tunnels.isEmpty ? "—" : profile.tunnels.joined(separator: ", ")
+            let gateways = profile.gateways.isEmpty ? "" : "\tgateways: \(profile.gateways.joined(separator: ", "))"
+            print("\(profile.name)\ttunnels: \(tunnels)\(gateways)")
+        }
+    }
+
+    private func createProfile(_ rest: [String]) throws {
+        let parser = ArgumentParser(arguments: rest)
+        let name = try parser.requiredValue(for: "--name")
+        let tunnels = parser.values(for: "--tunnel")
+        let gateways = parser.values(for: "--gateway")
+        let config = try store.load()
+        warnUnknownReferences(tunnels: tunnels, gateways: gateways, in: config)
+        try store.upsertProfile(Profile(name: name, tunnels: tunnels, gateways: gateways))
+        print("Saved profile '\(name)'.")
+    }
+
+    private func editProfile(_ rest: [String]) throws {
+        guard let name = rest.first(where: { !$0.hasPrefix("--") }) else {
+            throw CLIError("usage: burrow profile edit <name> [--tunnel T]... [--gateway G]...")
+        }
+        let parser = ArgumentParser(arguments: Array(rest.dropFirst()))
+        let tunnels = parser.values(for: "--tunnel")
+        let gateways = parser.values(for: "--gateway")
+        let config = try store.load()
+        warnUnknownReferences(tunnels: tunnels, gateways: gateways, in: config)
+        let found = try store.mutate { config -> Bool in
+            guard let index = config.profiles.firstIndex(where: { $0.name == name }) else {
+                return false
+            }
+            // Passing a flag replaces that list; omitting it leaves it as-is.
+            if !tunnels.isEmpty { config.profiles[index].tunnels = tunnels }
+            if !gateways.isEmpty { config.profiles[index].gateways = gateways }
+            return true
+        }
+        guard found else {
+            throw CLIError("profile '\(name)' was not found")
+        }
+        print("Updated profile '\(name)'.")
+    }
+
+    private func removeProfile(_ rest: [String]) throws {
+        guard let name = rest.first(where: { !$0.hasPrefix("-") }) else {
+            throw CLIError("usage: burrow profile remove <name>")
+        }
+        if try store.removeProfile(name: name) {
+            print("Removed profile '\(name)'.")
+        } else {
+            throw CLIError("profile '\(name)' was not found")
+        }
+    }
+
+    private func runProfile(_ rest: [String]) async throws {
+        guard let name = rest.first(where: { !$0.hasPrefix("-") }) else {
+            throw CLIError("usage: burrow profile run <name>")
+        }
+        let config = try store.load()
+        guard let profile = config.profiles.first(where: { $0.name == name }) else {
+            throw CLIError("profile '\(name)' was not found")
+        }
+        let matched = config.tunnels.filter { profile.tunnels.contains($0.name) }
+        for missing in profile.tunnels where !config.tunnels.contains(where: { $0.name == missing }) {
+            print("warning: profile '\(name)' references unknown tunnel '\(missing)'.")
+        }
+        guard !matched.isEmpty else {
+            throw CLIError("profile '\(name)' has no runnable tunnels.")
+        }
+        let selected = try matched.map {
+            GatewayLinker.applyingGatewayProxy(to: try TunnelLaunchPreparer.prepare($0), gateways: config.gateways)
+        }
+        try await supervise(
+            selected,
+            gateways: config.gateways,
+            failFastOnGatewayDown: false,
+            sshExecutablePath: sshExecutablePath
+        )
+    }
+
+    private func warnUnknownReferences(tunnels: [String], gateways: [String], in config: AppConfig) {
+        for tunnel in tunnels where !config.tunnels.contains(where: { $0.name == tunnel }) {
+            print("warning: no tunnel named '\(tunnel)' (adding anyway).")
+        }
+        for gateway in gateways where !config.gateways.contains(where: { $0.name == gateway }) {
+            print("warning: no gateway named '\(gateway)' (adding anyway).")
+        }
+    }
+
     // MARK: - help text
+
+    static let profileHelp = """
+    burrow profile — named groups of tunnels + gateways
+
+      list [--json]         profiles and their members
+      create --name NAME [--tunnel T]... [--gateway G]...
+      edit NAME [--tunnel T]... [--gateway G]...   (a passed list replaces it)
+      remove NAME
+      run NAME              run the profile's tunnels; Ctrl-C to stop
+
+    Profiles are shared with the Burrow app. `run` supervises the tunnels the
+    same way `burrow run` does; start SAML gateways from the app.
+    """
 
     static let hostsHelp = """
     burrow hosts — plain ~/.ssh/config login hosts
@@ -326,6 +499,8 @@ extension CLI {
       warm ALIAS            open a persistent SSH master; sign in in this
                             terminal so a later `ssh ALIAS` is instant
       cool ALIAS            close the master
+      keepwarm ALIAS [on|off]  persistent intent: the app re-warms it at
+                            launch (no arg toggles). Shared with the app.
 
     Warm masters are shared with the Burrow app and any terminal — they are
     kept alive by the host's own ControlPersist setting.

@@ -64,6 +64,10 @@ struct CLI {
             try setEnabled(arguments: Array(arguments.dropFirst()), enabled: false)
         case "run":
             try await runTunnels(arguments: Array(arguments.dropFirst()))
+        case "reclaim":
+            try reclaimRemotePort(arguments: Array(arguments.dropFirst()))
+        case "profile", "profiles":
+            try await profileCommand(Array(arguments.dropFirst()))
         case "hosts", "host":
             try hostsCommand(Array(arguments.dropFirst()))
         case "gateway", "gateways", "vpn":
@@ -245,10 +249,46 @@ struct CLI {
         print("\(enabled ? "Enabled" : "Disabled") tunnel '\(name)'")
     }
 
+    /// Path to the ssh binary, overridable for tests. Shared by run, reclaim,
+    /// and profile run.
+    var sshExecutablePath: String {
+        environment["BURROW_SSH_EXECUTABLE"] ?? environment["PORTKEEPER_SSH_EXECUTABLE"] ?? "/usr/bin/ssh"
+    }
+
+    /// Frees a stale reverse-forward (`-R`) port on a tunnel's remote host by
+    /// terminating the process holding it, through the tunnel's own route
+    /// (jump host included). The CLI companion to the app's reclaim action.
+    private func reclaimRemotePort(arguments: [String]) throws {
+        guard let name = arguments.first(where: { !$0.hasPrefix("-") }) else {
+            throw CLIError("usage: burrow reclaim <name> [--port N]")
+        }
+        let parser = ArgumentParser(arguments: arguments)
+        let config = try store.load()
+        guard let tunnel = config.tunnels.first(where: { $0.name == name }) else {
+            throw CLIError("tunnel '\(name)' was not found")
+        }
+        guard let port = try parser.intValue(for: "--port") ?? RemoteForwardSupport.reverseForwardPort(of: tunnel) else {
+            throw CLIError("tunnel '\(name)' has no reverse (-R) forward — pass --port N to reclaim a specific remote port.")
+        }
+        let route = tunnel.jumpHost.map { "\($0) → " } ?? ""
+        print("Freeing remote port \(port) on \(route)\(tunnel.host)…")
+        let command = RemoteForwardSupport.freePortCommand(port)
+        let args = SSHCommandBuilder.remoteExecArguments(for: tunnel, command: command)
+        let result = RemoteCommandRunner.run(arguments: args, executablePath: sshExecutablePath)
+        if result.standardOutput.contains("BURROW_PORT_FREE") {
+            print("Freed remote port \(port). Restart the tunnel (`burrow run \(name)` or the app) to bind it.")
+        } else if result.standardOutput.contains("BURROW_PORT_BUSY") {
+            throw CLIError("remote port \(port) on \(tunnel.host) is still held by a process burrow can't signal (no fuser / restricted /proc). Free it on the host, or change the tunnel's reverse-forward port.")
+        } else {
+            let detail = result.standardError.split(whereSeparator: \.isNewline).last.map(String.init) ?? "could not reach the host"
+            throw CLIError("couldn't free remote port \(port): \(detail)")
+        }
+    }
+
     private func runTunnels(arguments: [String]) async throws {
         let config = try store.load()
         let tunnelName = arguments.first(where: { !$0.hasPrefix("-") })
-        let sshExecutablePath = environment["BURROW_SSH_EXECUTABLE"] ?? environment["PORTKEEPER_SSH_EXECUTABLE"] ?? "/usr/bin/ssh"
+        let sshExecutablePath = self.sshExecutablePath
 
         let selected: [TunnelConfig]
         if let tunnelName {
@@ -264,15 +304,32 @@ struct CLI {
             throw CLIError("usage: burrow run [--all|<name>]")
         }
 
+        try await supervise(
+            selected,
+            gateways: config.gateways,
+            failFastOnGatewayDown: tunnelName != nil,
+            sshExecutablePath: sshExecutablePath
+        )
+    }
+
+    /// Runs a set of already-prepared tunnels: warns (or fails) on a down
+    /// gateway, then supervises them until Ctrl-C. Shared by `run` and
+    /// `profile run`.
+    func supervise(
+        _ selected: [TunnelConfig],
+        gateways: [GatewayConfig],
+        failFastOnGatewayDown: Bool,
+        sshExecutablePath: String
+    ) async throws {
         for tunnel in selected {
             if let gatewayName = tunnel.gateway,
-               let gateway = config.gateways.first(where: { $0.name == gatewayName }),
+               let gateway = gateways.first(where: { $0.name == gatewayName }),
                !PortProbe.canConnect(host: "127.0.0.1", port: gateway.socksPort) {
                 let hint = "Start it with `burrow gateway connect \(gatewayName)` or in the Burrow app."
                 // A single named tunnel would just fail confusingly inside its
                 // ProxyCommand — stop here with the fix. With --all, the other
                 // tunnels shouldn't be held hostage; warn and continue.
-                if tunnelName != nil {
+                if failFastOnGatewayDown {
                     throw CLIError("\(tunnel.name) routes via gateway '\(gatewayName)' but nothing is listening on 127.0.0.1:\(gateway.socksPort). \(hint)")
                 }
                 print("warning: \(tunnel.name) uses gateway '\(gatewayName)' but nothing is listening on 127.0.0.1:\(gateway.socksPort). \(hint)")
@@ -426,6 +483,14 @@ struct CLI {
               enable NAME
               disable NAME
               run [--all|NAME]
+              reclaim NAME [--port N]   (free a stale remote -R port on the tunnel's host)
+
+            Profiles (named groups of tunnels + gateways):
+              profile list [--json]
+              profile create --name NAME [--tunnel T]... [--gateway G]...
+              profile edit NAME [--tunnel T]... [--gateway G]...
+              profile remove NAME
+              profile run NAME          (run the profile's tunnels; Ctrl-C to stop)
 
             SSH hosts (~/.ssh/config):
               hosts list [--json]

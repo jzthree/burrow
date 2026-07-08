@@ -12,6 +12,9 @@ public struct AppConfig: Codable, Sendable {
     /// Seconds to keep an unlocked 2FA seed in memory before asking macOS
     /// authentication again. 0 means every use.
     public var twoFactorUnlockCacheSeconds: Int
+    /// SSH host aliases the user asked Burrow to keep warm (persistent master,
+    /// re-warmed at launch). Shared by the app and CLI so either can toggle it.
+    public var keepWarmHosts: [String]
 
     public init(
         version: Int = 1,
@@ -20,7 +23,8 @@ public struct AppConfig: Codable, Sendable {
         profiles: [Profile] = [],
         twoFactorAccounts: [TwoFactorAccount] = [],
         terminalApp: String = "auto",
-        twoFactorUnlockCacheSeconds: Int = 0
+        twoFactorUnlockCacheSeconds: Int = 0,
+        keepWarmHosts: [String] = []
     ) {
         self.version = version
         self.tunnels = tunnels
@@ -29,6 +33,7 @@ public struct AppConfig: Codable, Sendable {
         self.twoFactorAccounts = twoFactorAccounts
         self.terminalApp = terminalApp
         self.twoFactorUnlockCacheSeconds = twoFactorUnlockCacheSeconds
+        self.keepWarmHosts = keepWarmHosts
     }
 
     public init(from decoder: Decoder) throws {
@@ -40,6 +45,7 @@ public struct AppConfig: Codable, Sendable {
         self.twoFactorAccounts = try container.decodeIfPresent([TwoFactorAccount].self, forKey: .twoFactorAccounts) ?? []
         self.terminalApp = try container.decodeIfPresent(String.self, forKey: .terminalApp) ?? "auto"
         self.twoFactorUnlockCacheSeconds = try container.decodeIfPresent(Int.self, forKey: .twoFactorUnlockCacheSeconds) ?? 0
+        self.keepWarmHosts = try container.decodeIfPresent([String].self, forKey: .keepWarmHosts) ?? []
     }
 }
 
