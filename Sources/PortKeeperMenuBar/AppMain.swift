@@ -297,6 +297,10 @@ final class MenuBarViewModel: ObservableObject {
 
     init() {
         keepRunningAfterQuit = UserDefaults.standard.bool(forKey: Self.keepRunningKey)
+        // Daily update check defaults ON; an explicit user "off" sticks.
+        autoCheckForUpdates = UserDefaults.standard.object(forKey: Self.autoCheckUpdatesKey) == nil
+            ? true
+            : UserDefaults.standard.bool(forKey: Self.autoCheckUpdatesKey)
         toggledSections = Set(UserDefaults.standard.stringArray(forKey: Self.toggledSectionsKey) ?? [])
         hiddenSSHHosts = Set(UserDefaults.standard.stringArray(forKey: Self.hiddenSSHHostsKey) ?? [])
         migrateKeepWarmHostsToConfigIfNeeded()
@@ -306,6 +310,9 @@ final class MenuBarViewModel: ObservableObject {
         sshConfigHosts = SSHConfigParser.parse()
         refreshLaunchAtLoginState()
         startConfigWatcher()
+        if autoCheckForUpdates {
+            startUpdateCheckLoop()
+        }
         Task { @MainActor [weak self] in
             try? await Task.sleep(for: .milliseconds(250))
             self?.startEnabledTunnelsIfNeeded()
@@ -1206,25 +1213,82 @@ final class MenuBarViewModel: ObservableObject {
         }
     }
 
+    // MARK: - Updates
+
+    /// A release newer than the running build, found by a manual or daily
+    /// check. Drives the "Update to …" menu item.
+    @Published private(set) var availableUpdate: UpdateChecker.Release?
+
+    /// Daily background update check, on by default and toggleable in
+    /// Settings. Only ever reads the public GitHub releases endpoint.
+    @Published var autoCheckForUpdates: Bool {
+        didSet {
+            UserDefaults.standard.set(autoCheckForUpdates, forKey: Self.autoCheckUpdatesKey)
+            if autoCheckForUpdates {
+                startUpdateCheckLoop()
+            } else {
+                updateCheckTask?.cancel()
+                updateCheckTask = nil
+            }
+        }
+    }
+    static let autoCheckUpdatesKey = "autoCheckForUpdates"
+    private var updateCheckTask: Task<Void, Never>?
+    private static let announcedUpdateKey = "lastAnnouncedUpdateVersion"
+
     func checkForUpdates() {
         globalMessage = "Checking for updates…"
         Task { @MainActor [weak self] in
-            guard let self else { return }
-            do {
-                let release = try await UpdateChecker.latestRelease()
-                let current = BurrowVersion.display()
-                if BurrowVersion.isNewer(release.tagName, than: current) {
-                    self.globalMessage = "Update available: \(release.tagName) (you have \(current))."
-                    if let url = URL(string: release.htmlURL) {
-                        NSWorkspace.shared.open(url)
-                    }
-                } else {
-                    self.globalMessage = "Burrow \(current) is up to date."
-                }
-            } catch {
-                self.globalMessage = "Update check failed: \(error.localizedDescription)"
+            await self?.performUpdateCheck(quiet: false)
+        }
+    }
+
+    /// First check shortly after launch (not during startup contention), then
+    /// daily. Quiet: network failures don't surface anywhere.
+    func startUpdateCheckLoop() {
+        updateCheckTask?.cancel()
+        updateCheckTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(for: .seconds(60))
+            while !Task.isCancelled {
+                await self?.performUpdateCheck(quiet: true)
+                try? await Task.sleep(for: .seconds(24 * 60 * 60))
             }
         }
+    }
+
+    private func performUpdateCheck(quiet: Bool) async {
+        do {
+            let release = try await UpdateChecker.latestRelease()
+            let current = BurrowVersion.display()
+            if BurrowVersion.isNewer(release.tagName, than: current) {
+                availableUpdate = release
+                if quiet {
+                    // Notify once per version, not on every daily re-check.
+                    if UserDefaults.standard.string(forKey: Self.announcedUpdateKey) != release.tagName {
+                        UserDefaults.standard.set(release.tagName, forKey: Self.announcedUpdateKey)
+                        notifier.announceUpdate(version: release.tagName, current: current)
+                    }
+                } else {
+                    globalMessage = "Update available: \(release.tagName) (you have \(current))."
+                    openAvailableUpdate()
+                }
+            } else {
+                availableUpdate = nil
+                if !quiet {
+                    globalMessage = "Burrow \(current) is up to date."
+                }
+            }
+        } catch {
+            if !quiet {
+                globalMessage = "Update check failed: \(error.localizedDescription)"
+            }
+        }
+    }
+
+    /// Opens the release page for the available update.
+    func openAvailableUpdate() {
+        guard let release = availableUpdate, let url = URL(string: release.htmlURL) else { return }
+        NSWorkspace.shared.open(url)
     }
 
     func setTerminalApp(_ value: String) {
@@ -3760,7 +3824,14 @@ struct MenuBarContent: View {
                 Divider()
 
                 Text("Burrow \(BurrowVersion.display())")
+                if let update = viewModel.availableUpdate {
+                    Button("Update to \(update.tagName)…", action: viewModel.openAvailableUpdate)
+                }
                 Button("Check for Updates…", action: viewModel.checkForUpdates)
+                Toggle("Check Daily for Updates", isOn: Binding(
+                    get: { viewModel.autoCheckForUpdates },
+                    set: { viewModel.autoCheckForUpdates = $0 }
+                ))
 
                 Divider()
 

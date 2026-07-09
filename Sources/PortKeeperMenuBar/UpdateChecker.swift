@@ -1,8 +1,9 @@
 import Foundation
 
-/// Asks GitHub for the newest published release. Called only from the
-/// explicit "Check for Updates…" menu action — Burrow never phones home in
-/// the background.
+/// Asks GitHub for the newest published release. Called from the explicit
+/// "Check for Updates…" menu action and from the daily background check
+/// (on by default, toggleable in Settings). Only the public releases
+/// endpoint is read — nothing about the user or their config is sent.
 enum UpdateChecker {
     struct Release: Decodable {
         let tagName: String

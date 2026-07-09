@@ -101,6 +101,11 @@ final class BurrowNotifier {
         }
     }
 
+    /// One notification per newly-seen release version.
+    func announceUpdate(version: String, current: String) {
+        send(title: "Burrow \(version) is available", body: "You have \(current). Open the menu to update.")
+    }
+
     private func send(title: String, body: String) {
         guard authorized else { return }
         let content = UNMutableNotificationContent()
