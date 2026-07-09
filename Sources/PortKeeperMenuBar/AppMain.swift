@@ -59,6 +59,9 @@ final class MenuBarViewModel: ObservableObject {
         var retryAttempt: Int = 0
         var nextRetryAt: Date? = nil
         var failedAt: Date? = nil
+        /// Start of the current reconnect loop — "down since", shown in place
+        /// of unbounded retry counts.
+        var downSince: Date? = nil
         var serviceReachable: ForwardProbe.Result = .unknown
     }
 
@@ -682,6 +685,7 @@ final class MenuBarViewModel: ObservableObject {
                     retryAttempt: isRunning ? (existingState?.retryAttempt ?? 0) : 0,
                     nextRetryAt: isRunning ? existingState?.nextRetryAt : nil,
                     failedAt: isRunning ? nil : existingState?.failedAt,
+                    downSince: isRunning ? existingState?.downSince : nil,
                     serviceReachable: isRunning ? (existingState?.serviceReachable ?? .unknown) : .unknown
                 )
             }
@@ -2577,6 +2581,11 @@ final class MenuBarViewModel: ObservableObject {
             return
         }
         tunnels[index].retryAttempt += 1
+        // Remember when this outage began: the row shows "down 2h", which
+        // reads better (and carries more information) than "retry 7412".
+        if tunnels[index].downSince == nil {
+            tunnels[index].downSince = Date()
+        }
         let delay = max(tunnels[index].tunnel.reconnectDelaySeconds, 0)
         tunnels[index].nextRetryAt = Date().addingTimeInterval(TimeInterval(delay))
     }
@@ -2588,6 +2597,7 @@ final class MenuBarViewModel: ObservableObject {
         tunnels[index].nextRetryAt = nil
         if resetAttempt {
             tunnels[index].retryAttempt = 0
+            tunnels[index].downSince = nil
         }
     }
 
@@ -5212,7 +5222,16 @@ struct TunnelRow: View {
 
         if tunnel.isRunning, let nextRetryAt = tunnel.nextRetryAt {
             let remaining = max(0, Int(nextRetryAt.timeIntervalSince(date).rounded(.up)))
-            let attemptText = tunnel.retryAttempt > 1 ? "retry \(tunnel.retryAttempt)" : "retry"
+            // A handful of attempts is a useful signal; "retry 7412" is just
+            // noise — from there, how long it's been down is what matters.
+            let attemptText: String
+            if let downSince = tunnel.downSince, tunnel.retryAttempt >= 10 {
+                attemptText = "down \(Self.compactDuration(since: downSince, at: date)) · retry"
+            } else if tunnel.retryAttempt > 1 {
+                attemptText = "retry \(tunnel.retryAttempt)"
+            } else {
+                attemptText = "retry"
+            }
             return remaining > 0 ? "\(category) · \(attemptText) in \(remaining)s" : "\(category) · retrying now"
         }
         if tunnel.isRunning {
@@ -5221,6 +5240,17 @@ struct TunnelRow: View {
 
         let detail = failurePresentation?.codeLine ?? "connection failed"
         return detail.lowercased() == category.lowercased() ? category : detail
+    }
+
+    /// "45s", "12m", "3h", "2d" — the single most significant unit.
+    private static func compactDuration(since start: Date, at now: Date) -> String {
+        let seconds = max(0, Int(now.timeIntervalSince(start)))
+        switch seconds {
+        case ..<60: return "\(seconds)s"
+        case ..<3600: return "\(seconds / 60)m"
+        case ..<86400: return "\(seconds / 3600)h"
+        default: return "\(seconds / 86400)d"
+        }
     }
 
     private func localAddress(for forward: ForwardSpec) -> String {

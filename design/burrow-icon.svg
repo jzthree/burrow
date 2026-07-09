@@ -1,0 +1,109 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Burrow app icon — source of truth for XcodeSupport/Burrow.icns.
+     Identity: a creature's eyes glowing from a tunnel entrance (the burrow),
+     signal arcs above (kept-warm connectivity). Big Sur squircle language:
+     vibrant vertical gradient, soft rim light, minimal geometry that stays
+     readable at 16px. Rebuild: scripts/make-icon.sh -->
+<svg width="1024" height="1024" viewBox="0 0 1024 1024" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <!-- Sky: fresh mint dawn fading into deep teal at the horizon. -->
+    <linearGradient id="sky" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#8CEBCB"/>
+      <stop offset="0.45" stop-color="#3FBFA8"/>
+      <stop offset="1" stop-color="#1B8B80"/>
+    </linearGradient>
+    <!-- Soft sun glow, upper left. -->
+    <radialGradient id="glow" cx="0.30" cy="0.16" r="0.72">
+      <stop offset="0" stop-color="#FFFFFF" stop-opacity="0.38"/>
+      <stop offset="0.35" stop-color="#FFFFFF" stop-opacity="0.10"/>
+      <stop offset="1" stop-color="#FFFFFF" stop-opacity="0"/>
+    </radialGradient>
+    <!-- Ground: pine green, darker toward the bottom edge. -->
+    <linearGradient id="ground" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#2C7A52"/>
+      <stop offset="0.30" stop-color="#1F5C41"/>
+      <stop offset="1" stop-color="#153E2F"/>
+    </linearGradient>
+    <!-- Mound: deep ink with a hint of teal, lighter at the crown. -->
+    <linearGradient id="mound" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#22384A"/>
+      <stop offset="0.55" stop-color="#152634"/>
+      <stop offset="1" stop-color="#0E1B26"/>
+    </linearGradient>
+    <!-- Tunnel mouth: near-black with faint blue depth. -->
+    <radialGradient id="mouth" cx="0.5" cy="0.85" r="0.9">
+      <stop offset="0" stop-color="#050B10"/>
+      <stop offset="0.75" stop-color="#081119"/>
+      <stop offset="1" stop-color="#0C1822"/>
+    </radialGradient>
+    <radialGradient id="eyeGlow" cx="0.5" cy="0.5" r="0.5">
+      <stop offset="0" stop-color="#FFCF66" stop-opacity="0.55"/>
+      <stop offset="1" stop-color="#FFCF66" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="eye" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#FFE29A"/>
+      <stop offset="1" stop-color="#FFB937"/>
+    </linearGradient>
+    <clipPath id="squircle">
+      <rect x="64" y="64" width="896" height="896" rx="204"/>
+    </clipPath>
+  </defs>
+
+  <g clip-path="url(#squircle)">
+    <!-- Sky + glow -->
+    <rect x="64" y="64" width="896" height="896" fill="url(#sky)"/>
+    <rect x="64" y="64" width="896" height="896" fill="url(#glow)"/>
+
+    <!-- Rolling ground with a soft crest -->
+    <path d="M64 690
+             C 230 650, 400 648, 512 660
+             C 660 676, 820 664, 960 636
+             L 960 960 L 64 960 Z" fill="url(#ground)"/>
+    <!-- Grass rim light along the crest -->
+    <path d="M64 690
+             C 230 650, 400 648, 512 660
+             C 660 676, 820 664, 960 636"
+          fill="none" stroke="#5FD9A8" stroke-opacity="0.55" stroke-width="10" stroke-linecap="round"/>
+
+    <!-- Signal arcs: quietly "connected", replacing the old wire -->
+    <g stroke="#F4FBF4" fill="none" stroke-linecap="round">
+      <path d="M 444 314 A 96 96 0 0 1 580 314" stroke-width="34" stroke-opacity="0.95"/>
+      <path d="M 388 254 A 176 176 0 0 1 636 254" stroke-width="34" stroke-opacity="0.55"/>
+    </g>
+
+    <!-- Ground shadow seating the mound (behind it, tucked under) -->
+    <ellipse cx="512" cy="722" rx="236" ry="22" fill="#0C2119" opacity="0.4"/>
+
+    <!-- Burrow mound -->
+    <path d="M 262 700
+             C 262 512, 372 380, 512 380
+             C 652 380, 762 512, 762 700
+             L 762 726 L 262 726 Z" fill="url(#mound)"/>
+    <!-- Rim light on the mound's crown -->
+    <path d="M 292 640 C 300 500, 396 404, 512 404 C 628 404, 724 500, 732 640"
+          fill="none" stroke="#4CC7AE" stroke-opacity="0.5" stroke-width="9" stroke-linecap="round"/>
+
+    <!-- Tunnel mouth -->
+    <path d="M 350 726
+             C 350 580, 420 480, 512 480
+             C 604 480, 674 580, 674 726 Z" fill="url(#mouth)"/>
+
+    <!-- Eyes glowing from the dark -->
+    <circle cx="452" cy="620" r="64" fill="url(#eyeGlow)"/>
+    <circle cx="572" cy="620" r="64" fill="url(#eyeGlow)"/>
+    <rect x="426" y="596" width="52" height="52" rx="24" fill="url(#eye)"/>
+    <rect x="546" y="596" width="52" height="52" rx="24" fill="url(#eye)"/>
+
+    <!-- Tiny grass tufts -->
+    <g stroke="#7BE3B4" stroke-width="9" stroke-linecap="round" fill="none" stroke-opacity="0.75">
+      <path d="M 200 764 q 2 -26 -12 -40 M 200 764 q 6 -24 24 -32"/>
+      <path d="M 812 780 q 2 -26 -12 -40 M 812 780 q 6 -24 24 -32"/>
+      <path d="M 700 856 q 2 -22 -10 -34 M 700 856 q 6 -20 20 -28"/>
+      <path d="M 300 860 q 2 -22 -10 -34 M 300 860 q 6 -20 20 -28"/>
+    </g>
+
+    <!-- Big Sur gloss: faint inner highlight at the top edge -->
+    <rect x="76" y="76" width="872" height="872" rx="192" fill="none"
+          stroke="#FFFFFF" stroke-opacity="0.28" stroke-width="6"/>
+  </g>
+</svg>
