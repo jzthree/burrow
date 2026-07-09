@@ -45,6 +45,30 @@ public enum PortKeeperRuntimeRegistry {
         try reclaimOwnedForwardProcesses(for: tunnel, executablePath: executablePath, logger: logger)
     }
 
+    /// The recorded ssh process for this tunnel, if it is still alive and its
+    /// command still matches the tunnel's launch shape. Non-destructive — the
+    /// adoption counterpart to reclaim: a healthy survivor from a previous run
+    /// (quit with "keep running", an update relaunch) can be adopted instead of
+    /// killed and restarted, which would needlessly drop the session and, for
+    /// reverse forwards, risk the remote port lingering bound.
+    public static func recordedOwnedProcess(
+        for tunnel: TunnelConfig,
+        executablePath: String = "/usr/bin/ssh",
+        fileManager: FileManager = .default,
+        runtimeDirectory: URL? = nil
+    ) -> pid_t? {
+        guard let pidFileURL = try? pidFileURL(for: tunnel.name, fileManager: fileManager, runtimeDirectory: runtimeDirectory),
+              fileManager.fileExists(atPath: pidFileURL.path),
+              let pid = try? readPID(from: pidFileURL),
+              pid > 0, pid != getpid(),
+              processExists(pid),
+              let command = processCommand(for: pid),
+              commandLooksOwned(command, tunnel: tunnel, executablePath: executablePath) else {
+            return nil
+        }
+        return pid
+    }
+
     public static func recordProcess(
         _ pid: pid_t,
         for tunnelName: String,

@@ -725,3 +725,57 @@ private func runBurrow(_ arguments: [String], configURL: URL) throws -> CLIResul
     let diagnostic = recorder.firstExitDiagnostic() ?? ""
     #expect(diagnostic.lowercased().contains("remote port forwarding failed"))
 }
+
+@Test func runtimeRegistryFindsAdoptableProcessNonDestructively() async throws {
+    let tempDirectory = FileManager.default.temporaryDirectory
+        .appendingPathComponent(UUID().uuidString, isDirectory: true)
+    try FileManager.default.createDirectory(at: tempDirectory, withIntermediateDirectories: true)
+
+    let fakeSSHURL = tempDirectory.appendingPathComponent("fake-ssh.sh")
+    try "#!/bin/sh\nsleep 30\n".write(to: fakeSSHURL, atomically: true, encoding: .utf8)
+    try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: fakeSSHURL.path)
+
+    let tunnel = try TunnelLaunchPreparer.prepare(
+        TunnelConfig(name: "adoptable", host: "example.com", user: "alice", sshPort: 2222, forwards: []),
+        fileManager: .default
+    )
+
+    let process = Process()
+    process.executableURL = fakeSSHURL
+    process.arguments = SSHCommandBuilder.buildArguments(for: tunnel)
+    try process.run()
+    defer { process.terminate() }
+
+    let runtimeDirectory = tempDirectory.appendingPathComponent("runtime", isDirectory: true)
+
+    // No pid file yet -> nothing to adopt.
+    #expect(PortKeeperRuntimeRegistry.recordedOwnedProcess(
+        for: tunnel, executablePath: fakeSSHURL.path, runtimeDirectory: runtimeDirectory
+    ) == nil)
+
+    try PortKeeperRuntimeRegistry.recordProcess(
+        process.processIdentifier, for: tunnel.name, runtimeDirectory: runtimeDirectory
+    )
+
+    // Alive + command matches -> adoptable, and the lookup must not kill it.
+    #expect(PortKeeperRuntimeRegistry.recordedOwnedProcess(
+        for: tunnel, executablePath: fakeSSHURL.path, runtimeDirectory: runtimeDirectory
+    ) == process.processIdentifier)
+    #expect(process.isRunning)
+
+    // A different tunnel shape must not adopt someone else's process.
+    let otherTunnel = try TunnelLaunchPreparer.prepare(
+        TunnelConfig(name: "adoptable", host: "other.example.com", user: "bob", sshPort: 22, forwards: []),
+        fileManager: .default
+    )
+    #expect(PortKeeperRuntimeRegistry.recordedOwnedProcess(
+        for: otherTunnel, executablePath: fakeSSHURL.path, runtimeDirectory: runtimeDirectory
+    ) == nil)
+
+    // Once the process ends, the survivor is gone -> nil again.
+    process.terminate()
+    process.waitUntilExit()
+    #expect(PortKeeperRuntimeRegistry.recordedOwnedProcess(
+        for: tunnel, executablePath: fakeSSHURL.path, runtimeDirectory: runtimeDirectory
+    ) == nil)
+}

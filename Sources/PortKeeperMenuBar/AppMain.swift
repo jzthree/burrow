@@ -238,6 +238,10 @@ final class MenuBarViewModel: ObservableObject {
     /// the processes are alive but no supervisor task owns them, so stop and
     /// health checks go through process/port matching instead.
     private var adoptedGateways: Set<String> = []
+    /// Tunnels running under an adopted ssh process from a previous app run
+    /// (name → pid). Adopted tunnels have no supervisor task; the service
+    /// probe loop watches the pid and restarts under supervision when it ends.
+    private var adoptedTunnels: [String: pid_t] = [:]
     /// Consecutive through-tunnel health-probe failures per gateway; a session
     /// is only declared dead after a couple in a row so a transient blip
     /// doesn't tear down a working VPN.
@@ -264,6 +268,7 @@ final class MenuBarViewModel: ObservableObject {
         migrateKeepWarmHostsToConfigIfNeeded()
         loadConfig()
         adoptSurvivingGatewaySessions()
+        adoptSurvivingTunnelProcesses()
         sshConfigHosts = SSHConfigParser.parse()
         refreshLaunchAtLoginState()
         startConfigWatcher()
@@ -379,6 +384,23 @@ final class MenuBarViewModel: ObservableObject {
         }
     }
 
+    /// A previous run's tunnel ssh can outlive the app (quit with "keep
+    /// running", or an update relaunch). Adopt a healthy survivor instead of
+    /// killing and restarting it: restarting drops the session for nothing
+    /// and, for reverse forwards, races the remote against freeing the old
+    /// listen port — the classic "remote port forwarding failed" loop.
+    private func adoptSurvivingTunnelProcesses() {
+        for state in tunnels where tasks[state.id] == nil && !state.isRunning {
+            guard let prepared = try? preparedTunnelForLaunch(state.tunnel),
+                  let pid = PortKeeperRuntimeRegistry.recordedOwnedProcess(for: prepared) else {
+                continue
+            }
+            adoptedTunnels[state.id] = pid
+            appendLog(for: state.id, message: "Adopted surviving ssh process \(pid) from the previous run.")
+            updateState(for: state.id, isRunning: true, state: .connected, message: "Adopted running ssh session")
+        }
+    }
+
     /// A previous run's openconnect + ocproxy can outlive the app (quit with
     /// "keep running", or an update relaunch). Adopt such sessions at startup
     /// so a working VPN shows as connected instead of orphaned.
@@ -415,6 +437,32 @@ final class MenuBarViewModel: ObservableObject {
                     GatewayPortReclaimer.reclaimStaleListeners(port: config.socksPort)
                 }
                 updateGatewayState(for: name, isRunning: false, state: .disconnected, message: "VPN session ended — reconnect")
+            }
+        }
+
+        // Adopted tunnels also have no supervisor; when the adopted ssh ends,
+        // hand the tunnel back to normal supervision instead of showing a
+        // dead forward as connected. Ownership is re-verified through the
+        // registry (pid + command match) so a recycled pid can't fool us.
+        let adoptedTunnelChecks = adoptedTunnels.compactMap { name, pid in
+            tunnels.first(where: { $0.id == name }).map { (name: name, pid: pid, tunnel: $0.tunnel) }
+        }
+        if !adoptedTunnelChecks.isEmpty {
+            let endedTunnels = await Task.detached { () -> [(name: String, pid: pid_t)] in
+                adoptedTunnelChecks.compactMap { check in
+                    guard let prepared = try? TunnelLaunchPreparer.prepare(check.tunnel),
+                          PortKeeperRuntimeRegistry.recordedOwnedProcess(for: prepared) == check.pid else {
+                        return (check.name, check.pid)
+                    }
+                    return nil
+                }
+            }.value
+            for ended in endedTunnels {
+                adoptedTunnels[ended.name] = nil
+                try? PortKeeperRuntimeRegistry.clearRecordedProcess(for: ended.name, matching: ended.pid)
+                appendLog(for: ended.name, message: "Adopted ssh (pid \(ended.pid)) ended — restarting under supervision.")
+                updateState(for: ended.name, isRunning: false, state: .connecting, message: "Adopted ssh ended — restarting")
+                startTunnel(named: ended.name, allowPasswordPrompt: false)
             }
         }
 
@@ -575,7 +623,7 @@ final class MenuBarViewModel: ObservableObject {
             isApplyingKeepWarmFromConfig = true
             keepWarmHosts = Set(config.keepWarmHosts)
             isApplyingKeepWarmFromConfig = false
-            let running = Set(tasks.keys)
+            let running = Set(tasks.keys).union(adoptedTunnels.keys)
             let existingStatesByName = Dictionary(uniqueKeysWithValues: tunnels.map { ($0.id, $0) })
             tunnels = config.tunnels.map { tunnel in
                 let existingState = existingStatesByName[tunnel.name]
@@ -670,12 +718,27 @@ final class MenuBarViewModel: ObservableObject {
 
     private func handleConfigFileChange() {
         let previousMessage = globalMessage
+        // Snapshot configs before reload so tunnels added or edited outside the
+        // app (the burrow CLI) can be auto-started below.
+        let previousConfigs = Dictionary(uniqueKeysWithValues: tunnels.map { ($0.id, $0.tunnel) })
         stopMissingTunnels()
         stopMissingGateways()
         loadConfig()
         // Keep action feedback (e.g. "Saved x.") instead of the generic load summary
         // when the watcher fires for our own writes.
         globalMessage = previousMessage
+
+        // External edits previously reloaded tunnel DEFINITIONS but never
+        // started newly-eligible tunnels — a tunnel added or fixed via the CLI
+        // stayed disconnected until the app restarted. Start enabled,
+        // not-running tunnels whose config is new or changed in this reload;
+        // tunnels the user stopped and the edit didn't touch stay stopped.
+        let newlyEligible = tunnels.filter { state in
+            state.isConfiguredEnabled && !state.isRunning && previousConfigs[state.id] != state.tunnel
+        }
+        if !newlyEligible.isEmpty {
+            startTunnels(newlyEligible, allowPasswordPrompt: false, preloadCredentials: true)
+        }
     }
 
     func startEnabledTunnels() {
@@ -766,6 +829,18 @@ final class MenuBarViewModel: ObservableObject {
             updateState(for: name, isRunning: true, message: "Already running")
             return
         }
+        // A live adopted process IS this tunnel running — don't launch a
+        // second ssh over it (Restart goes through stopTunnel, which ends
+        // the adoption first).
+        if let adoptedPID = adoptedTunnels[name] {
+            if let tunnel = tunnels.first(where: { $0.id == name })?.tunnel,
+               let prepared = try? preparedTunnelForLaunch(tunnel),
+               PortKeeperRuntimeRegistry.recordedOwnedProcess(for: prepared) == adoptedPID {
+                updateState(for: name, isRunning: true, state: .connected, message: "Already running (adopted)")
+                return
+            }
+            adoptedTunnels[name] = nil
+        }
         guard let tunnel = tunnels.first(where: { $0.id == name })?.tunnel else {
             globalMessage = "Tunnel '\(name)' not found."
             return
@@ -788,7 +863,7 @@ final class MenuBarViewModel: ObservableObject {
         var launchCandidates: [TunnelState] = []
 
         for tunnel in selectedTunnels {
-            if tasks[tunnel.id] == nil {
+            if tasks[tunnel.id] == nil && adoptedTunnels[tunnel.id] == nil {
                 launchCandidates.append(tunnel)
             } else {
                 updateState(for: tunnel.id, isRunning: true, message: "Already running")
@@ -900,6 +975,9 @@ final class MenuBarViewModel: ObservableObject {
     func stopTunnel(named name: String) {
         // Manual stop is intentional — don't let its teardown raise a problem.
         notifier.forget(name: name)
+        // An adopted tunnel has no task; ending the adoption here lets the
+        // task-less path below reclaim (kill) the adopted ssh via the registry.
+        adoptedTunnels[name] = nil
         let task = tasks[name]
         if task == nil,
            let tunnel = tunnels.first(where: { $0.id == name })?.tunnel {
@@ -2964,7 +3042,7 @@ final class MenuBarViewModel: ObservableObject {
 
     private func stopMissingTunnels() {
         let configuredNames = Set((try? store.load().tunnels.map(\.name)) ?? [])
-        for name in tasks.keys where !configuredNames.contains(name) {
+        for name in Set(tasks.keys).union(adoptedTunnels.keys) where !configuredNames.contains(name) {
             stopTunnel(named: name)
         }
     }
