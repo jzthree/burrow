@@ -220,7 +220,7 @@ public struct GatewayConfig: Codable, Sendable, Identifiable, Equatable {
     }
 }
 
-public struct TunnelConfig: Codable, Sendable, Identifiable {
+public struct TunnelConfig: Codable, Sendable, Identifiable, Equatable {
     public var id: String { name }
     public var name: String
     public var host: String
