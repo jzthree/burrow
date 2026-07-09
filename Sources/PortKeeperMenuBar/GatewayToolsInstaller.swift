@@ -43,7 +43,7 @@ enum GatewayToolsInstaller {
         }
 
         alert.messageText = "Install VPN tools?"
-        alert.informativeText = "VPN gateways use \(toolList) (open-source). Burrow will run the install in a Terminal window so you can watch it, and connect the gateway automatically once it finishes.\n\nCommand: brew install openconnect ocproxy"
+        alert.informativeText = "VPN gateways use \(toolList) (open-source). Burrow will run the install in a Terminal window so you can watch it, and connect the gateway automatically once it finishes.\n\nCommand: brew install \(missing.joined(separator: " "))"
         alert.addButton(withTitle: "Install in Terminal")
         alert.addButton(withTitle: "Cancel")
         guard alert.runModal() == .alertFirstButtonReturn else {
@@ -51,12 +51,12 @@ enum GatewayToolsInstaller {
         }
 
         do {
-            try openInstallTerminal(brewPath: brew)
+            try openInstallTerminal(brewPath: brew, missing: missing)
             return true
         } catch {
             // Last resort: hand the user the command.
             NSPasteboard.general.clearContents()
-            NSPasteboard.general.setString("brew install openconnect ocproxy", forType: .string)
+            NSPasteboard.general.setString("brew install \(missing.joined(separator: " "))", forType: .string)
             let fallback = NSAlert()
             fallback.messageText = "Couldn't open Terminal automatically"
             fallback.informativeText = "The install command was copied to the clipboard — paste it into a terminal. Burrow will still connect automatically once the tools appear."
@@ -68,20 +68,20 @@ enum GatewayToolsInstaller {
 
     /// A self-deleting .command file opened in Terminal shows live progress
     /// without needing Apple Events automation permission.
-    private static func openInstallTerminal(brewPath: String) throws {
+    private static func openInstallTerminal(brewPath: String, missing: [String]) throws {
         let scriptURL = FileManager.default.temporaryDirectory
             .appendingPathComponent("burrow-install-vpn-tools.command")
         let script = """
         #!/bin/zsh
-        echo "Burrow: installing VPN gateway tools (openconnect + ocproxy)..."
+        echo "Burrow: installing VPN gateway tools (\(missing.joined(separator: " + ")))..."
         echo
-        "\(brewPath)" install openconnect ocproxy
+        "\(brewPath)" install \(missing.joined(separator: " "))
         STATUS=$?
         echo
         if [ $STATUS -eq 0 ]; then
           echo "Done. Burrow will connect the gateway automatically — you can close this window."
         else
-          echo "Install failed (exit $STATUS). Fix the error above and run: brew install openconnect ocproxy"
+          echo "Install failed (exit $STATUS). Fix the error above and run: brew install \(missing.joined(separator: " "))"
         fi
         rm -f "$0"
         exit $STATUS

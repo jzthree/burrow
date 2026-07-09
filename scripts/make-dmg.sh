@@ -45,7 +45,17 @@ done
 BREW="$(command -v brew)" || fail "Homebrew is required to source openconnect/ocproxy."
 
 OPENCONNECT_SRC="$(command -v openconnect)" || fail "openconnect not installed (brew install openconnect)."
-OCPROXY_SRC="$(command -v ocproxy)" || fail "ocproxy not installed (brew install ocproxy)."
+# Prefer the vendored backpressure-patched ocproxy: stock/brew ocproxy drops
+# upstream packets on socketpair overflow and collapses VPN uploads to
+# ~60KB/s on macOS (see vendor/ocproxy/README.md; fix: jzthree/ocproxy).
+VENDORED_OCPROXY="$ROOT_DIR/vendor/ocproxy/ocproxy-macos-$(uname -m)"
+if [ -x "$VENDORED_OCPROXY" ]; then
+  OCPROXY_SRC="$VENDORED_OCPROXY"
+  note "Using vendored patched ocproxy ($VENDORED_OCPROXY)"
+else
+  OCPROXY_SRC="$(command -v ocproxy)" || fail "ocproxy not installed (brew install ocproxy)."
+  note "WARNING: vendored patched ocproxy not found for $(uname -m) — bundling brew's, which has the ~60KB/s upload bug"
+fi
 HIPREPORT_SRC="$("$BREW" --prefix openconnect 2>/dev/null)/libexec/openconnect/hipreport.sh"
 
 # --- choose signing identity ------------------------------------------------
