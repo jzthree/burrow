@@ -339,69 +339,155 @@ enum WarmSignInPrompt {
         let sendDuoPush: Bool
     }
 
-    /// Asks for the current 2FA code (and, optionally, an SSH password), or lets
-    /// the user send a Duo push, so Burrow can warm a host that needs
-    /// interactive auth. The values answer the SSH prompts for this one
-    /// connection via askpass and are never stored. `retry`/`reason` re-ask after
-    /// a rejected attempt.
-    /// Retains a closure as an NSButton target for the life of the modal (the
-    /// button's `target` is weak, so a local reference must keep it alive).
-    private final class ClosureTarget: NSObject {
-        let action: () -> Void
-        init(_ action: @escaping () -> Void) { self.action = action }
-        @objc func fire() { action() }
+
+    /// The last few prompt lines, clipped for the dialog's prompt box. A Duo
+    /// device menu arrives as several lines; the tail is the current state.
+    fileprivate static func renderedPrompts(_ prompts: [String]) -> String? {
+        let lines = prompts.suffix(6).map { prompt -> String in
+            prompt.count > 160 ? "\(prompt.prefix(160))…" : prompt
+        }
+        return lines.isEmpty ? nil : lines.joined(separator: "\n")
     }
 
-    @MainActor
-    static func request(
+    fileprivate static func looksLikeCodePrompt(_ prompt: String) -> Bool {
+        let lowered = prompt.lowercased()
+        return ["verification code", "one-time", "one time", "token", "passcode", "otp", "authenticator", "2fa"]
+            .contains { lowered.contains($0) }
+    }
+
+    fileprivate static func looksLikeDuoMenu(_ prompt: String) -> Bool {
+        let lowered = prompt.lowercased()
+        return lowered.contains("duo") || (lowered.contains("option") && lowered.contains("1."))
+    }
+}
+
+private final class ClosureTarget: NSObject {
+    let action: () -> Void
+    init(_ action: @escaping () -> Void) { self.action = action }
+    @objc func fire() { action() }
+}
+
+/// A non-modal sign-in window for warming a host. Unlike the old app-modal
+/// `NSAlert.runModal()`, this floats without blocking the app, so the menu
+/// stays usable and the host row can bring the window back to the front while
+/// a sign-in is pending. One controller per in-flight sign-in; it resolves its
+/// completion exactly once (a typed answer, a Duo push, or cancel/close).
+@MainActor
+final class WarmSignInWindowController: NSObject, NSWindowDelegate {
+    private var window: NSWindow?
+    private var completion: ((WarmSignInPrompt.Result?) -> Void)?
+    private var codeField: NSTextField?
+    private var passwordField: NSSecureTextField?
+    private var buttonTargets: [ClosureTarget] = []
+    private var resolved = false
+
+    func present(
         alias: String,
         host: String,
-        retry: Bool = false,
-        reason: String? = nil,
-        serverPrompts: [String] = [],
-        linkedAccountName: String? = nil,
-        availableCode: String? = nil
-    ) -> Result? {
-        let alert = NSAlert()
-        // The copy stays agnostic about what the host wants — password, 2FA
-        // code, or Duo push are all equally possible. The host's own words,
-        // shown prominently below, are what tells the user which to answer.
+        retry: Bool,
+        reason: String?,
+        serverPrompts: [String],
+        linkedAccountName: String?,
+        availableCode: String?,
+        completion: @escaping (WarmSignInPrompt.Result?) -> Void
+    ) {
+        self.completion = completion
+        let content = makeContentView(
+            alias: alias, host: host, retry: retry, reason: reason,
+            serverPrompts: serverPrompts, linkedAccountName: linkedAccountName,
+            availableCode: availableCode
+        )
+        let hosting = NSViewController()
+        hosting.view = content
+        let window = NSWindow(contentViewController: hosting)
+        window.styleMask = [.titled, .closable]
+        window.title = retry ? "Try \(alias) again" : "Sign in to keep \(alias) warm"
+        window.isReleasedWhenClosed = false
+        window.level = .floating
+        window.delegate = self
+        window.setContentSize(content.fittingSize)
+        window.center()
+        self.window = window
+        focus()
+        // Land the cursor in the field the host's prompt points at.
+        let asksCode = serverPrompts.contains(where: WarmSignInPrompt.looksLikeCodePrompt)
+        let asksDuoMenu = serverPrompts.contains(where: WarmSignInPrompt.looksLikeDuoMenu)
+        let asksPassword = serverPrompts.contains {
+            let lowered = $0.lowercased()
+            return lowered.contains("password") || lowered.contains("passphrase")
+        }
+        window.initialFirstResponder = (asksPassword && !asksCode && !asksDuoMenu) ? passwordField : codeField
+    }
+
+    /// Bring the pending sign-in window back to the front — the action behind
+    /// clicking a host row that is mid-sign-in.
+    func focus() {
+        guard let window else { return }
+        NSApp.activate(ignoringOtherApps: true)
+        window.makeKeyAndOrderFront(nil)
+    }
+
+    private func resolve(_ result: WarmSignInPrompt.Result?) {
+        guard !resolved else { return }
+        resolved = true
+        let completion = self.completion
+        self.completion = nil
+        window?.delegate = nil
+        window?.close()
+        window = nil
+        completion?(result)
+    }
+
+    func windowWillClose(_ notification: Notification) {
+        // A close with no button press is a cancel.
+        resolve(nil)
+    }
+
+    private func makeContentView(
+        alias: String, host: String, retry: Bool, reason: String?,
+        serverPrompts: [String], linkedAccountName: String?, availableCode: String?
+    ) -> NSView {
+        let width: CGFloat = 340
+        let root = NSStackView()
+        root.orientation = .vertical
+        root.alignment = .leading
+        root.spacing = 10
+        root.edgeInsets = NSEdgeInsets(top: 18, left: 20, bottom: 16, right: 20)
+        root.translatesAutoresizingMaskIntoConstraints = false
+
+        let title = NSTextField(labelWithString: retry ? "That didn’t work — try \(alias) again" : "Sign in to keep \(alias) warm")
+        title.font = .systemFont(ofSize: 14, weight: .semibold)
+        root.addArrangedSubview(title)
+
+        let informativeText: String
         if retry {
-            alert.messageText = "That didn’t work — try \(alias) again"
-            alert.alertStyle = .warning
             let detail = reason.map { "\($0.prefix(1).capitalized)\($0.dropFirst())." } ?? "The previous attempt was rejected."
-            alert.informativeText = "\(detail)\n\nAnswer the host's prompt below with fresh values — codes expire quickly. Entries are used once and not stored."
+            informativeText = "\(detail)\n\nAnswer the host's prompt below with fresh values — codes expire quickly. Entries are used once and not stored."
         } else {
-            alert.messageText = "Sign in to keep \(alias) warm"
-            alert.informativeText = serverPrompts.isEmpty
+            informativeText = serverPrompts.isEmpty
                 ? "Burrow is opening a persistent SSH connection to \(host). Depending on the host, it may ask for a password, a 2FA code, or a Duo push. Entries are used once and not stored."
                 : "Burrow is opening a persistent SSH connection to \(host). Answer what it asked below. Entries are used once and not stored."
         }
+        let informative = NSTextField(wrappingLabelWithString: informativeText)
+        informative.font = .systemFont(ofSize: 11.5)
+        informative.textColor = .secondaryLabelColor
+        informative.translatesAutoresizingMaskIntoConstraints = false
+        informative.widthAnchor.constraint(equalToConstant: width).isActive = true
+        root.addArrangedSubview(informative)
 
-        let width: CGFloat = 340
-        let container = NSStackView()
-        container.orientation = .vertical
-        container.alignment = .leading
-        container.spacing = 8
-        container.translatesAutoresizingMaskIntoConstraints = false
-        container.widthAnchor.constraint(equalToConstant: width).isActive = true
-
-        // The server's prompt is the headline of this dialog: a caption plus
-        // the host's literal words in a bordered, terminal-style box.
-        if let promptText = renderedPrompts(serverPrompts) {
+        // The server's prompt is the headline: a caption plus the host's literal
+        // words in a bordered, terminal-style box.
+        if let promptText = WarmSignInPrompt.renderedPrompts(serverPrompts) {
             let caption = NSTextField(labelWithString: "\(host) asked:")
             caption.font = .systemFont(ofSize: 11, weight: .semibold)
             caption.textColor = .secondaryLabelColor
-            container.addArrangedSubview(caption)
+            root.addArrangedSubview(caption)
 
             let promptLabel = NSTextField(wrappingLabelWithString: promptText)
             promptLabel.font = .monospacedSystemFont(ofSize: 11.5, weight: .regular)
             promptLabel.isSelectable = true
             promptLabel.translatesAutoresizingMaskIntoConstraints = false
 
-            // A layer-backed panel whose height is driven by the wrapping
-            // label's constraints (NSBox.contentView doesn't do that, so it
-            // clips to one line). This is the visual centerpiece of the dialog.
             let box = NSView()
             box.wantsLayer = true
             box.layer?.cornerRadius = 6
@@ -417,14 +503,11 @@ enum WarmSignInPrompt {
                 promptLabel.topAnchor.constraint(equalTo: box.topAnchor, constant: 8),
                 promptLabel.bottomAnchor.constraint(equalTo: box.bottomAnchor, constant: -8),
             ])
-            container.addArrangedSubview(box)
+            root.addArrangedSubview(box)
         }
 
-        // Transparency: say plainly how Burrow read the host's prompt, so the
-        // "smart detection" isn't a black box. Derived from the same keyword
-        // match the askpass uses, surfaced here for the user to sanity-check.
-        let asksCodeEarly = serverPrompts.contains(where: looksLikeCodePrompt)
-        let asksDuoEarly = serverPrompts.contains(where: looksLikeDuoMenu)
+        let asksCodeEarly = serverPrompts.contains(where: WarmSignInPrompt.looksLikeCodePrompt)
+        let asksDuoEarly = serverPrompts.contains(where: WarmSignInPrompt.looksLikeDuoMenu)
         if !serverPrompts.isEmpty {
             let readAs: String
             if asksDuoEarly {
@@ -439,101 +522,84 @@ enum WarmSignInPrompt {
             detectLabel.textColor = .secondaryLabelColor
             detectLabel.translatesAutoresizingMaskIntoConstraints = false
             detectLabel.widthAnchor.constraint(equalToConstant: width).isActive = true
-            container.addArrangedSubview(detectLabel)
+            root.addArrangedSubview(detectLabel)
         }
 
         let codeField = NSTextField()
         codeField.placeholderString = "2FA code / passcode (if asked)"
         let passwordField = NSSecureTextField()
         passwordField.placeholderString = "Password (if asked)"
-
         for field in [codeField, passwordField] as [NSTextField] {
             field.translatesAutoresizingMaskIntoConstraints = false
             field.widthAnchor.constraint(equalToConstant: width).isActive = true
             field.heightAnchor.constraint(equalToConstant: 24).isActive = true
-            container.addArrangedSubview(field)
+            root.addArrangedSubview(field)
         }
+        self.codeField = codeField
+        self.passwordField = passwordField
 
-        // Reach the authenticator from inside the dialog: one click drops the
-        // linked code into the field so the user isn't stranded hunting for it.
-        // `availableCode` was already generated (behind Touch ID) for the silent
-        // attempt, so inserting it needs no second prompt.
-        let insertTarget: ClosureTarget?
         if let availableCode, let linkedAccountName {
-            let target = ClosureTarget { [weak codeField] in
-                codeField?.stringValue = availableCode
-            }
+            let target = ClosureTarget { [weak codeField] in codeField?.stringValue = availableCode }
             let insertButton = NSButton(title: "Insert \(linkedAccountName) code", target: target, action: #selector(ClosureTarget.fire))
             insertButton.bezelStyle = .rounded
             insertButton.controlSize = .small
             insertButton.translatesAutoresizingMaskIntoConstraints = false
-            container.addArrangedSubview(insertButton)
-            insertTarget = target
+            root.addArrangedSubview(insertButton)
+            buttonTargets.append(target)
         } else if let linkedAccountName {
             let hint = NSTextField(wrappingLabelWithString: "Leave the code blank to use your linked \(linkedAccountName) code automatically (Touch ID).")
             hint.font = .systemFont(ofSize: 10.5)
             hint.textColor = .secondaryLabelColor
             hint.translatesAutoresizingMaskIntoConstraints = false
             hint.widthAnchor.constraint(equalToConstant: width).isActive = true
-            container.addArrangedSubview(hint)
-            insertTarget = nil
-        } else {
-            insertTarget = nil
+            root.addArrangedSubview(hint)
         }
-        _ = insertTarget // retained for the modal's lifetime
 
-        container.layoutSubtreeIfNeeded()
-        container.setFrameSize(container.fittingSize)
-        alert.accessoryView = container
-        // Focus whichever field the host's own prompts point at; a
-        // password-only host shouldn't land the cursor in the code field.
-        let asksCode = serverPrompts.contains(where: looksLikeCodePrompt)
-        let asksDuoMenu = serverPrompts.contains(where: looksLikeDuoMenu)
-        let asksPassword = serverPrompts.contains {
-            let lowered = $0.lowercased()
-            return lowered.contains("password") || lowered.contains("passphrase")
+        // Buttons: Cancel · Send Duo Push · Warm (default).
+        let buttonRow = NSStackView()
+        buttonRow.orientation = .horizontal
+        buttonRow.spacing = 8
+        buttonRow.translatesAutoresizingMaskIntoConstraints = false
+        buttonRow.widthAnchor.constraint(equalToConstant: width).isActive = true
+
+        let cancelTarget = ClosureTarget { [weak self] in self?.resolve(nil) }
+        let cancelButton = NSButton(title: "Cancel", target: cancelTarget, action: #selector(ClosureTarget.fire))
+        cancelButton.bezelStyle = .rounded
+        cancelButton.keyEquivalent = "\u{1b}" // Esc
+        buttonTargets.append(cancelTarget)
+
+        let duoTarget = ClosureTarget { [weak self] in
+            let password = self?.passwordField?.stringValue.trimmingCharacters(in: .newlines) ?? ""
+            self?.resolve(WarmSignInPrompt.Result(code: nil, password: password.isEmpty ? nil : password, sendDuoPush: true))
         }
-        alert.window.initialFirstResponder =
-            (asksPassword && !asksCode && !asksDuoMenu) ? passwordField : codeField
+        let duoButton = NSButton(title: "Send Duo Push", target: duoTarget, action: #selector(ClosureTarget.fire))
+        duoButton.bezelStyle = .rounded
+        buttonTargets.append(duoTarget)
 
-        alert.addButton(withTitle: "Warm")          // .alertFirstButtonReturn
-        alert.addButton(withTitle: "Send Duo Push") // .alertSecondButtonReturn
-        alert.addButton(withTitle: "Cancel")        // .alertThirdButtonReturn
-
-        let response = alert.runModal()
-        if response == .alertThirdButtonReturn {
-            return nil
+        let warmTarget = ClosureTarget { [weak self] in
+            guard let self else { return }
+            let code = self.codeField?.stringValue.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            let password = self.passwordField?.stringValue.trimmingCharacters(in: .newlines) ?? ""
+            self.resolve(WarmSignInPrompt.Result(
+                code: code.isEmpty ? nil : code,
+                password: password.isEmpty ? nil : password,
+                sendDuoPush: false
+            ))
         }
-        let password = passwordField.stringValue.trimmingCharacters(in: .newlines)
-        if response == .alertSecondButtonReturn {
-            return Result(code: nil, password: password.isEmpty ? nil : password, sendDuoPush: true)
-        }
-        let code = codeField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
-        return Result(
-            code: code.isEmpty ? nil : code,
-            password: password.isEmpty ? nil : password,
-            sendDuoPush: false
-        )
-    }
+        let warmButton = NSButton(title: "Warm", target: warmTarget, action: #selector(ClosureTarget.fire))
+        warmButton.bezelStyle = .rounded
+        warmButton.keyEquivalent = "\r" // Return
+        buttonTargets.append(warmTarget)
 
-    /// The last few prompt lines, clipped for the dialog's prompt box. A Duo
-    /// device menu arrives as several lines; the tail is the current state.
-    private static func renderedPrompts(_ prompts: [String]) -> String? {
-        let lines = prompts.suffix(6).map { prompt -> String in
-            prompt.count > 160 ? "\(prompt.prefix(160))…" : prompt
-        }
-        return lines.isEmpty ? nil : lines.joined(separator: "\n")
-    }
+        buttonRow.addArrangedSubview(cancelButton)
+        buttonRow.addArrangedSubview(NSView()) // spacer
+        buttonRow.addArrangedSubview(duoButton)
+        buttonRow.addArrangedSubview(warmButton)
+        root.addArrangedSubview(buttonRow)
 
-    private static func looksLikeCodePrompt(_ prompt: String) -> Bool {
-        let lowered = prompt.lowercased()
-        return ["verification code", "one-time", "one time", "token", "passcode", "otp", "authenticator", "2fa"]
-            .contains { lowered.contains($0) }
-    }
-
-    private static func looksLikeDuoMenu(_ prompt: String) -> Bool {
-        let lowered = prompt.lowercased()
-        return lowered.contains("duo") || (lowered.contains("option") && lowered.contains("1."))
+        root.layoutSubtreeIfNeeded()
+        root.setFrameSize(root.fittingSize)
+        return root
     }
 }
 

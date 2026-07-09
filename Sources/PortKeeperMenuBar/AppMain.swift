@@ -189,6 +189,40 @@ final class MenuBarViewModel: ObservableObject {
     @Published private(set) var warmingHosts: Set<String> = []
     func isHostWarming(_ alias: String) -> Bool { warmingHosts.contains(alias) }
 
+    /// Hosts with a non-modal sign-in window currently open, and the controller
+    /// for each so a host row can bring its window back to the front.
+    @Published private(set) var hostsAwaitingSignIn: Set<String> = []
+    private var signInControllers: [String: WarmSignInWindowController] = [:]
+    func isAwaitingSignIn(_ alias: String) -> Bool { hostsAwaitingSignIn.contains(alias) }
+    /// Bring a pending sign-in window forward — the action behind clicking a
+    /// host row that is mid-sign-in.
+    func focusSignIn(alias: String) { signInControllers[alias]?.focus() }
+
+    /// Presents the non-modal sign-in window and awaits the user's answer,
+    /// tracking the controller so `focusSignIn` can re-surface it.
+    @MainActor
+    private func presentWarmSignIn(
+        alias: String, host: String, retry: Bool, reason: String?,
+        serverPrompts: [String], linkedAccountName: String?, availableCode: String?
+    ) async -> WarmSignInPrompt.Result? {
+        let controller = WarmSignInWindowController()
+        signInControllers[alias] = controller
+        hostsAwaitingSignIn.insert(alias)
+        defer {
+            signInControllers[alias] = nil
+            hostsAwaitingSignIn.remove(alias)
+        }
+        return await withCheckedContinuation { continuation in
+            controller.present(
+                alias: alias, host: host, retry: retry, reason: reason,
+                serverPrompts: serverPrompts, linkedAccountName: linkedAccountName,
+                availableCode: availableCode
+            ) { result in
+                continuation.resume(returning: result)
+            }
+        }
+    }
+
     /// What the last failed silent warm probe learned about a host: the
     /// credentials it was tried with and the prompts the host sent. Lets the
     /// next interactive warm skip the multi-second doomed ssh attempt and
@@ -1366,7 +1400,7 @@ final class MenuBarViewModel: ObservableObject {
 
             var lastReason: String?
             for attempt in 0..<3 {
-                guard let entered = WarmSignInPrompt.request(
+                guard let entered = await self.presentWarmSignIn(
                     alias: alias,
                     host: tunnel.host,
                     retry: attempt > 0,
@@ -3866,7 +3900,9 @@ struct MenuBarContent: View {
                             isWarm: viewModel.isHostWarm(host.alias),
                             isKeptWarm: viewModel.isHostKeptWarm(host.alias),
                             isWarming: viewModel.isHostWarming(host.alias),
+                            isAwaitingSignIn: viewModel.isAwaitingSignIn(host.alias),
                             status: viewModel.warmStatus[host.alias],
+                            onFocusSignIn: { viewModel.focusSignIn(alias: host.alias) },
                             onOpen: { viewModel.openSSHHost(alias: host.alias) },
                             onCopy: { viewModel.copySSHHostCommand(alias: host.alias) },
                             onToggleKeepWarm: { viewModel.toggleKeepWarm(alias: host.alias) },
@@ -3986,7 +4022,9 @@ private struct SSHHostRow: View {
     let isWarm: Bool
     let isKeptWarm: Bool
     var isWarming: Bool = false
+    var isAwaitingSignIn: Bool = false
     var status: MenuBarViewModel.WarmHostStatus? = nil
+    var onFocusSignIn: () -> Void = {}
     let onOpen: () -> Void
     let onCopy: () -> Void
     let onToggleKeepWarm: () -> Void
@@ -4029,53 +4067,78 @@ private struct SSHHostRow: View {
             : "Kept warm (cold now). Click to stop, or use ⋯ ▸ Finish Sign-In."
     }
 
+    /// The identity block (icon + alias + subtitle). Inert by default; while a
+    /// sign-in window is pending it becomes a button that brings it forward.
+    @ViewBuilder private var identity: some View {
+        HStack(spacing: 11) {
+            Image(systemName: isAwaitingSignIn ? "lock.badge.clock" : "terminal")
+                .font(.system(size: 12.5))
+                .foregroundStyle(isAwaitingSignIn ? Color.burrowAccent : .secondary.opacity(0.8))
+                .frame(width: 24, height: 24)
+                .background(
+                    RoundedRectangle(cornerRadius: 7, style: .continuous)
+                        .fill((isAwaitingSignIn ? Color.burrowAccent : .secondary).opacity(0.07))
+                )
+            VStack(alignment: .leading, spacing: 1) {
+                Text(host.alias)
+                    .font(.system(size: 13, weight: .semibold))
+                    .lineLimit(1)
+                // The subtitle reflects state: an open sign-in to return to, an
+                // in-flight attempt, the last error, else the address.
+                if isAwaitingSignIn {
+                    Text("waiting for sign-in — click to show")
+                        .font(.system(size: 10, weight: .medium, design: .monospaced))
+                        .foregroundStyle(Color.burrowAccent.opacity(0.9))
+                        .lineLimit(1)
+                } else if isWarming {
+                    HStack(spacing: 5) {
+                        Circle()
+                            .fill(Color.orange)
+                            .frame(width: 6, height: 6)
+                            .opacity(breathing ? 1 : 0.25)
+                        Text("signing in…")
+                            .font(.system(size: 10, weight: .medium, design: .monospaced))
+                            .foregroundStyle(.secondary)
+                    }
+                } else if let status, status.isError {
+                    Text(status.message)
+                        .font(.system(size: 10, weight: .medium, design: .monospaced))
+                        .foregroundStyle(Color.burrowFailure.opacity(0.9))
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                } else {
+                    Text(subtitle)
+                        .font(.system(size: 10, design: .monospaced))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                }
+            }
+            Spacer(minLength: 6)
+        }
+        .contentShape(Rectangle())
+    }
+
     var body: some View {
         HStack(spacing: 8) {
-            // Identity + primary action: open an interactive ssh session.
+            // Identity is inert unless a sign-in is pending, in which case one
+            // click brings the sign-in window back to the front.
+            if isAwaitingSignIn {
+                Button(action: onFocusSignIn) { identity }
+                    .buttonStyle(.plain)
+                    .help("Show the sign-in window for \(host.alias)")
+            } else {
+                identity
+            }
+
+            // Dedicated Terminal button — opening a session is now explicit,
+            // not a side effect of clicking the row.
             Button(action: onOpen) {
-                HStack(spacing: 11) {
-                    Image(systemName: "terminal")
-                        .font(.system(size: 12.5))
-                        .foregroundStyle(.secondary.opacity(0.8))
-                        .frame(width: 24, height: 24)
-                        .background(
-                            RoundedRectangle(cornerRadius: 7, style: .continuous)
-                                .fill(Color.secondary.opacity(0.07))
-                        )
-                    VStack(alignment: .leading, spacing: 1) {
-                        Text(host.alias)
-                            .font(.system(size: 13, weight: .semibold))
-                            .lineLimit(1)
-                        // When the last warm attempt failed, the row shows the
-                        // reason itself instead of the address — no need to
-                        // open anything to see what went wrong.
-                        if isWarming {
-                            HStack(spacing: 5) {
-                                Circle()
-                                    .fill(Color.orange)
-                                    .frame(width: 6, height: 6)
-                                    .opacity(breathing ? 1 : 0.25)
-                                Text("signing in…")
-                                    .font(.system(size: 10, weight: .medium, design: .monospaced))
-                                    .foregroundStyle(.secondary)
-                            }
-                        } else if let status, status.isError {
-                            Text(status.message)
-                                .font(.system(size: 10, weight: .medium, design: .monospaced))
-                                .foregroundStyle(Color.burrowFailure.opacity(0.9))
-                                .lineLimit(1)
-                                .truncationMode(.tail)
-                        } else {
-                            Text(subtitle)
-                                .font(.system(size: 10, design: .monospaced))
-                                .foregroundStyle(.secondary)
-                                .lineLimit(1)
-                                .truncationMode(.middle)
-                        }
-                    }
-                    Spacer(minLength: 6)
-                }
-                .contentShape(Rectangle())
+                Image(systemName: "terminal")
+                    .font(.system(size: 12))
+                    .foregroundStyle(.secondary.opacity(0.8))
+                    .frame(width: 24, height: 26)
+                    .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
             .help("Open ssh \(host.alias) in a terminal")
