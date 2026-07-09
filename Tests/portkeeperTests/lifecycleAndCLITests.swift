@@ -779,3 +779,64 @@ private func runBurrow(_ arguments: [String], configURL: URL) throws -> CLIResul
         for: tunnel, executablePath: fakeSSHURL.path, runtimeDirectory: runtimeDirectory
     ) == nil)
 }
+
+// MARK: - Reordering
+
+@Test func orderingSupportSortsByStoredOrderAndKeepsUnknownsStable() async throws {
+    struct Item { let id: String }
+    let items = [Item(id: "a"), Item(id: "b"), Item(id: "c"), Item(id: "d")]
+
+    // Full order reverses.
+    let reversed = OrderingSupport.ordered(items, by: ["d", "c", "b", "a"], key: \.id)
+    #expect(reversed.map(\.id) == ["d", "c", "b", "a"])
+
+    // Partial order: listed keys first (in order), unknowns keep original order.
+    let partial = OrderingSupport.ordered(items, by: ["c", "a"], key: \.id)
+    #expect(partial.map(\.id) == ["c", "a", "b", "d"])
+
+    // Stale keys in the order (no matching item) are ignored, nothing dropped.
+    let stale = OrderingSupport.ordered(items, by: ["z", "b"], key: \.id)
+    #expect(stale.map(\.id) == ["b", "a", "c", "d"])
+
+    // Empty order is identity.
+    #expect(OrderingSupport.ordered(items, by: [], key: \.id).map(\.id) == ["a", "b", "c", "d"])
+}
+
+@Test func sshHostOrderSurvivesConfigRoundTrip() async throws {
+    let tempDirectory = FileManager.default.temporaryDirectory
+        .appendingPathComponent(UUID().uuidString, isDirectory: true)
+    try FileManager.default.createDirectory(at: tempDirectory, withIntermediateDirectories: true)
+    let configURL = tempDirectory.appendingPathComponent("config.json")
+    let store = ConfigStore(configURL: configURL)
+    _ = try store.ensureExists()
+
+    try store.mutate { $0.sshHostOrder = ["randi", "nucleus", "vista"] }
+    #expect(try store.load().sshHostOrder == ["randi", "nucleus", "vista"])
+
+    // Legacy config without the field decodes to empty, not a failure.
+    let legacy = #"{"version":1}"#
+    #expect(try JSONDecoder().decode(AppConfig.self, from: Data(legacy.utf8)).sshHostOrder.isEmpty)
+}
+
+@Test func gatewayReorderPersistsToConfig() async throws {
+    let tempDirectory = FileManager.default.temporaryDirectory
+        .appendingPathComponent(UUID().uuidString, isDirectory: true)
+    try FileManager.default.createDirectory(at: tempDirectory, withIntermediateDirectories: true)
+    let configURL = tempDirectory.appendingPathComponent("config.json")
+    let store = ConfigStore(configURL: configURL)
+    _ = try store.ensureExists()
+    try store.mutate {
+        $0.gateways = [
+            GatewayConfig(name: "A", vpnProtocol: "anyconnect", server: "a.example", socksPort: 11001),
+            GatewayConfig(name: "B", vpnProtocol: "anyconnect", server: "b.example", socksPort: 11002),
+            GatewayConfig(name: "C", vpnProtocol: "anyconnect", server: "c.example", socksPort: 11003),
+        ]
+    }
+
+    // Move "C" up one (swap with B), mirroring the view model's array swap.
+    try store.mutate { config in
+        guard let i = config.gateways.firstIndex(where: { $0.name == "C" }) else { return }
+        config.gateways.swapAt(i, i - 1)
+    }
+    #expect(try store.load().gateways.map(\.name) == ["A", "C", "B"])
+}

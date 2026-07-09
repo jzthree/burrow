@@ -15,6 +15,9 @@ public struct AppConfig: Codable, Sendable {
     /// SSH host aliases the user asked Burrow to keep warm (persistent master,
     /// re-warmed at launch). Shared by the app and CLI so either can toggle it.
     public var keepWarmHosts: [String]
+    /// User's preferred display order for ~/.ssh/config hosts (aliases). Hosts
+    /// not listed fall back to file order after the listed ones.
+    public var sshHostOrder: [String]
 
     public init(
         version: Int = 1,
@@ -24,7 +27,8 @@ public struct AppConfig: Codable, Sendable {
         twoFactorAccounts: [TwoFactorAccount] = [],
         terminalApp: String = "auto",
         twoFactorUnlockCacheSeconds: Int = 0,
-        keepWarmHosts: [String] = []
+        keepWarmHosts: [String] = [],
+        sshHostOrder: [String] = []
     ) {
         self.version = version
         self.tunnels = tunnels
@@ -34,6 +38,7 @@ public struct AppConfig: Codable, Sendable {
         self.terminalApp = terminalApp
         self.twoFactorUnlockCacheSeconds = twoFactorUnlockCacheSeconds
         self.keepWarmHosts = keepWarmHosts
+        self.sshHostOrder = sshHostOrder
     }
 
     public init(from decoder: Decoder) throws {
@@ -46,6 +51,7 @@ public struct AppConfig: Codable, Sendable {
         self.terminalApp = try container.decodeIfPresent(String.self, forKey: .terminalApp) ?? "auto"
         self.twoFactorUnlockCacheSeconds = try container.decodeIfPresent(Int.self, forKey: .twoFactorUnlockCacheSeconds) ?? 0
         self.keepWarmHosts = try container.decodeIfPresent([String].self, forKey: .keepWarmHosts) ?? []
+        self.sshHostOrder = try container.decodeIfPresent([String].self, forKey: .sshHostOrder) ?? []
     }
 }
 

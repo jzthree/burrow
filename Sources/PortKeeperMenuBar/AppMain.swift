@@ -657,6 +657,7 @@ final class MenuBarViewModel: ObservableObject {
             isApplyingKeepWarmFromConfig = true
             keepWarmHosts = Set(config.keepWarmHosts)
             isApplyingKeepWarmFromConfig = false
+            sshHostOrder = config.sshHostOrder
             let running = Set(tasks.keys).union(adoptedTunnels.keys)
             let existingStatesByName = Dictionary(uniqueKeysWithValues: tunnels.map { ($0.id, $0) })
             tunnels = config.tunnels.map { tunnel in
@@ -800,6 +801,90 @@ final class MenuBarViewModel: ObservableObject {
     func restartTunnel(named name: String) {
         stopTunnel(named: name)
         startTunnel(named: name)
+    }
+
+    // MARK: - Reordering
+
+    /// The endpoint a tunnel is grouped under in the list (mirrors endpointGroups).
+    private func tunnelGroupKey(_ tunnel: TunnelConfig) -> String {
+        let display = tunnel.displayGroup?.trimmingCharacters(in: .whitespacesAndNewlines)
+        return (display?.isEmpty == false ? display! : tunnel.host)
+    }
+
+    /// Whether a tunnel can move within its endpoint group in the given direction.
+    func canMoveTunnel(named name: String, up: Bool) -> Bool {
+        let peers = tunnels.map(\.tunnel).enumerated().filter { tunnelGroupKey($0.element) == groupKeyOfTunnel(named: name) }.map(\.offset)
+        guard let idx = tunnels.firstIndex(where: { $0.id == name }),
+              let pos = peers.firstIndex(of: idx) else { return false }
+        return up ? pos > 0 : pos < peers.count - 1
+    }
+
+    private func groupKeyOfTunnel(named name: String) -> String? {
+        tunnels.first(where: { $0.id == name }).map { tunnelGroupKey($0.tunnel) }
+    }
+
+    /// Move a tunnel up/down among its endpoint-group peers, persisting the new
+    /// config.tunnels order.
+    func moveTunnel(named name: String, up: Bool) {
+        try? store.mutate { config in
+            guard let idx = config.tunnels.firstIndex(where: { $0.name == name }) else { return }
+            let key = self.tunnelGroupKey(config.tunnels[idx])
+            let peers = config.tunnels.indices.filter { self.tunnelGroupKey(config.tunnels[$0]) == key }
+            guard let pos = peers.firstIndex(of: idx) else { return }
+            let neighbor = up ? pos - 1 : pos + 1
+            guard peers.indices.contains(neighbor) else { return }
+            config.tunnels.swapAt(idx, peers[neighbor])
+        }
+        loadConfig()
+    }
+
+    func canMoveGateway(named name: String, up: Bool) -> Bool {
+        guard let i = gateways.firstIndex(where: { $0.id == name }) else { return false }
+        return up ? i > 0 : i < gateways.count - 1
+    }
+
+    func moveGateway(named name: String, up: Bool) {
+        try? store.mutate { config in
+            guard let i = config.gateways.firstIndex(where: { $0.name == name }) else { return }
+            let j = up ? i - 1 : i + 1
+            guard config.gateways.indices.contains(j) else { return }
+            config.gateways.swapAt(i, j)
+        }
+        loadConfig()
+    }
+
+    func canMoveProfile(named name: String, up: Bool) -> Bool {
+        guard let i = profiles.firstIndex(where: { $0.name == name }) else { return false }
+        return up ? i > 0 : i < profiles.count - 1
+    }
+
+    func moveProfile(named name: String, up: Bool) {
+        try? store.mutate { config in
+            guard let i = config.profiles.firstIndex(where: { $0.name == name }) else { return }
+            let j = up ? i - 1 : i + 1
+            guard config.profiles.indices.contains(j) else { return }
+            config.profiles.swapAt(i, j)
+        }
+        loadConfig()
+    }
+
+    func canMoveSSHHost(alias: String, up: Bool) -> Bool {
+        let order = sshHostEntries.map(\.alias)
+        guard let i = order.firstIndex(of: alias) else { return false }
+        return up ? i > 0 : i < order.count - 1
+    }
+
+    /// Move a host up/down in the display order. The order is materialized from
+    /// the current (sorted) list so a first move captures today's arrangement,
+    /// then persisted as config.sshHostOrder.
+    func moveSSHHost(alias: String, up: Bool) {
+        var order = sshHostEntries.map(\.alias)
+        guard let i = order.firstIndex(of: alias) else { return }
+        let j = up ? i - 1 : i + 1
+        guard order.indices.contains(j) else { return }
+        order.swapAt(i, j)
+        sshHostOrder = order
+        try? store.mutate { $0.sshHostOrder = order }
     }
 
     /// Whether this tunnel's latest failure is a remote reverse-forward port
@@ -1221,10 +1306,14 @@ final class MenuBarViewModel: ObservableObject {
 
     // MARK: - SSH hosts (~/.ssh/config login targets)
 
+    /// User's preferred SSH-host display order (aliases), from config.json.
+    @Published private(set) var sshHostOrder: [String] = []
+
     /// Concrete login hosts from ~/.ssh/config (wildcards already excluded by
-    /// the parser), minus any the user has hidden.
+    /// the parser), minus any the user has hidden, in the user's saved order.
     var sshHostEntries: [SSHConfigHost] {
-        sshConfigHosts.filter { !hiddenSSHHosts.contains($0.alias) }
+        let visible = sshConfigHosts.filter { !hiddenSSHHosts.contains($0.alias) }
+        return OrderingSupport.ordered(visible, by: sshHostOrder, key: \.alias)
     }
 
     /// Hidden hosts that still exist in the config, for the "unhide" menu.
@@ -3479,7 +3568,11 @@ struct MenuBarContent: View {
                                                 onOpenSSH: { viewModel.openSSHTerminal(for: tunnel.id) },
                                                 onCopySSH: { viewModel.copySSHCommand(for: tunnel.id) },
                                                 remoteForwardConflictPort: viewModel.remoteForwardConflictPort(forTunnel: tunnel.id),
-                                                onFreeRemotePort: { viewModel.freeRemoteForwardPortAndRetry(forTunnel: tunnel.id) }
+                                                onFreeRemotePort: { viewModel.freeRemoteForwardPortAndRetry(forTunnel: tunnel.id) },
+                                                canMoveUp: viewModel.canMoveTunnel(named: tunnel.id, up: true),
+                                                canMoveDown: viewModel.canMoveTunnel(named: tunnel.id, up: false),
+                                                onMoveUp: { viewModel.moveTunnel(named: tunnel.id, up: true) },
+                                                onMoveDown: { viewModel.moveTunnel(named: tunnel.id, up: false) }
                                             )
                                         }
                                     }
@@ -3743,7 +3836,11 @@ struct MenuBarContent: View {
                         onStop: { viewModel.stopProfile(named: profile.name) },
                         onToggle: { viewModel.toggleProfile(named: profile.name) },
                         onEdit: { viewModel.openProfileEditor(for: profile.name) },
-                        onDelete: { viewModel.deleteProfile(named: profile.name) }
+                        onDelete: { viewModel.deleteProfile(named: profile.name) },
+                        canMoveUp: viewModel.canMoveProfile(named: profile.name, up: true),
+                        canMoveDown: viewModel.canMoveProfile(named: profile.name, up: false),
+                        onMoveUp: { viewModel.moveProfile(named: profile.name, up: true) },
+                        onMoveDown: { viewModel.moveProfile(named: profile.name, up: false) }
                     )
                 }
                 // Ghost chip: quick path to another profile.
@@ -3812,7 +3909,11 @@ struct MenuBarContent: View {
                         onStop: { viewModel.stopGateway(named: gateway.id) },
                         onEdit: { viewModel.openGatewayEditor(for: gateway.id) },
                         onDelete: { viewModel.deleteGateway(named: gateway.id) },
-                        onOpenBrowser: { viewModel.openBrowser($0, viaGateway: gateway.id) }
+                        onOpenBrowser: { viewModel.openBrowser($0, viaGateway: gateway.id) },
+                        canMoveUp: viewModel.canMoveGateway(named: gateway.id, up: true),
+                        canMoveDown: viewModel.canMoveGateway(named: gateway.id, up: false),
+                        onMoveUp: { viewModel.moveGateway(named: gateway.id, up: true) },
+                        onMoveDown: { viewModel.moveGateway(named: gateway.id, up: false) }
                     )
                 }
             }
@@ -3914,7 +4015,11 @@ struct MenuBarContent: View {
                             onEnrollTwoFactor: { viewModel.enrollAndLinkTwoFactor(forHostAlias: host.alias) },
                             onEdit: { viewModel.editSSHHost(alias: host.alias) },
                             onHide: { viewModel.hideSSHHost(alias: host.alias) },
-                            onRemove: { viewModel.removeSSHHost(alias: host.alias) }
+                            onRemove: { viewModel.removeSSHHost(alias: host.alias) },
+                            canMoveUp: viewModel.canMoveSSHHost(alias: host.alias, up: true),
+                            canMoveDown: viewModel.canMoveSSHHost(alias: host.alias, up: false),
+                            onMoveUp: { viewModel.moveSSHHost(alias: host.alias, up: true) },
+                            onMoveDown: { viewModel.moveSSHHost(alias: host.alias, up: false) }
                         )
                     }
                 }
@@ -4037,6 +4142,10 @@ private struct SSHHostRow: View {
     let onEdit: () -> Void
     let onHide: () -> Void
     let onRemove: () -> Void
+    var canMoveUp: Bool = false
+    var canMoveDown: Bool = false
+    var onMoveUp: () -> Void = {}
+    var onMoveDown: () -> Void = {}
 
     @State private var hovering = false
     @State private var breathing = false
@@ -4221,6 +4330,11 @@ private struct SSHHostRow: View {
                 }
                 if linkedTwoFactorName == nil {
                     Button("Enroll 2FA for This Host…", action: onEnrollTwoFactor)
+                }
+                if canMoveUp || canMoveDown {
+                    Divider()
+                    if canMoveUp { Button("Move Up", action: onMoveUp) }
+                    if canMoveDown { Button("Move Down", action: onMoveDown) }
                 }
                 Divider()
                 Button("Edit…", action: onEdit)
@@ -4512,6 +4626,10 @@ private struct ProfileChip: View {
     let onToggle: () -> Void
     let onEdit: () -> Void
     let onDelete: () -> Void
+    var canMoveUp: Bool = false
+    var canMoveDown: Bool = false
+    var onMoveUp: () -> Void = {}
+    var onMoveDown: () -> Void = {}
     @State private var isHovered = false
 
     var body: some View {
@@ -4546,6 +4664,11 @@ private struct ProfileChip: View {
         .contextMenu {
             Button("Start", action: onStart)
             Button("Stop", action: onStop)
+            if canMoveUp || canMoveDown {
+                Divider()
+                if canMoveUp { Button("Move Up", action: onMoveUp) }
+                if canMoveDown { Button("Move Down", action: onMoveDown) }
+            }
             Divider()
             Button("Edit…", action: onEdit)
             Divider()
@@ -4577,6 +4700,10 @@ private struct GatewayRow: View {
     let onEdit: () -> Void
     let onDelete: () -> Void
     var onOpenBrowser: (ChromiumBrowser) -> Void = { _ in }
+    var canMoveUp: Bool = false
+    var canMoveDown: Bool = false
+    var onMoveUp: () -> Void = {}
+    var onMoveDown: () -> Void = {}
     @State private var isPrimaryHovered = false
     @State private var isDetailsPresented = false
 
@@ -4724,6 +4851,11 @@ private struct GatewayRow: View {
             Button("Copy OpenConnect Command") {
                 copy(GatewayCommandBuilder.render(gateway.config))
             }
+            if canMoveUp || canMoveDown {
+                Divider()
+                if canMoveUp { Button("Move Up", action: onMoveUp) }
+                if canMoveDown { Button("Move Down", action: onMoveDown) }
+            }
             Divider()
             Button("Delete", role: .destructive, action: onDelete)
         } label: {
@@ -4771,6 +4903,10 @@ struct TunnelRow: View {
     var onCopySSH: () -> Void = {}
     var remoteForwardConflictPort: Int? = nil
     var onFreeRemotePort: () -> Void = {}
+    var canMoveUp: Bool = false
+    var canMoveDown: Bool = false
+    var onMoveUp: () -> Void = {}
+    var onMoveDown: () -> Void = {}
     @State private var isIdentityTooltipVisible = false
     @State private var isDetailsPresented = false
     @State private var isDetailsHovered = false
@@ -5120,6 +5256,11 @@ struct TunnelRow: View {
             Divider()
             Button("Open SSH in Terminal", action: onOpenSSH)
             Button("Copy SSH Command", action: onCopySSH)
+            if canMoveUp || canMoveDown {
+                Divider()
+                if canMoveUp { Button("Move Up", action: onMoveUp) }
+                if canMoveDown { Button("Move Down", action: onMoveDown) }
+            }
             Divider()
             Button("Restart", action: onRestart)
             Button("Edit…", action: onEdit)

@@ -1,5 +1,26 @@
 import Foundation
 
+/// Ordering helpers shared by the app and its tests.
+public enum OrderingSupport {
+    /// Sort `items` (keyed by `key`) by a stored order of keys. Items whose key
+    /// appears in `order` come first, in that order; the rest keep their
+    /// original relative position after them. Unknown keys in `order` are
+    /// ignored. Stable and total, so a partial or stale order never drops items.
+    public static func ordered<T>(_ items: [T], by order: [String], key: (T) -> String) -> [T] {
+        let rank = Dictionary(order.enumerated().map { ($0.element, $0.offset) }, uniquingKeysWith: { first, _ in first })
+        return items.enumerated().sorted { lhs, rhs in
+            let l = rank[key(lhs.element)]
+            let r = rank[key(rhs.element)]
+            switch (l, r) {
+            case let (l?, r?): return l < r
+            case (_?, nil): return true       // known before unknown
+            case (nil, _?): return false
+            case (nil, nil): return lhs.offset < rhs.offset // both unknown: stable
+            }
+        }.map(\.element)
+    }
+}
+
 /// Handling for `-R` (reverse) forwards whose port the remote refuses to bind
 /// — the remote mirror of Burrow's local stale-listener reclaim. Almost always
 /// a leftover reverse-forward listener from an earlier session (an
