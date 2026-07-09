@@ -160,8 +160,17 @@ public enum SSHHostWarmer {
     }
 
     /// Runs ssh capturing stderr for diagnosis. stdout goes to /dev/null (ssh
-    /// writes banners/errors to stderr); stderr is drained before waiting so a
-    /// large banner can't deadlock the pipe.
+    /// writes banners/errors to stderr).
+    ///
+    /// stderr is captured to a temp file, NOT a pipe: `ssh -f` backgrounds a
+    /// child (the pinned master, or — when multiplexing over an existing
+    /// ControlMaster — a mux client running `sleep <keepAlive>`) that inherits
+    /// the stderr fd and holds it open for the whole keep-alive window. Reading
+    /// a pipe to EOF would then block for days, so `warm()` would never return
+    /// and the caller's "signing in…" state would stick even though the master
+    /// is already up. A file has no such dependency: we read it once after the
+    /// short-lived parent exits; the detached child's later writes land in an
+    /// already-unlinked inode and are harmlessly discarded.
     private static func runCapturing(
         _ arguments: [String],
         environment: [String: String]?,
@@ -171,18 +180,24 @@ public enum SSHHostWarmer {
         process.executableURL = URL(fileURLWithPath: executablePath)
         process.arguments = arguments
         process.standardOutput = FileHandle.nullDevice
-        let errorPipe = Pipe()
-        process.standardError = errorPipe
+
+        let logURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("burrow-warm-\(UUID().uuidString).log")
+        FileManager.default.createFile(atPath: logURL.path, contents: nil)
+        let errorHandle = try? FileHandle(forWritingTo: logURL)
+        process.standardError = errorHandle ?? FileHandle.nullDevice
         applyEnvironment(environment, to: process)
         do {
             try process.run()
         } catch {
+            try? errorHandle?.close()
+            try? FileManager.default.removeItem(at: logURL)
             return (-1, "failed to launch ssh: \(error.localizedDescription)")
         }
-        // -f closes ssh's fds when it backgrounds, so this reaches EOF.
-        let data = errorPipe.fileHandleForReading.readDataToEndOfFile()
         process.waitUntilExit()
-        let output = String(data: data, encoding: .utf8) ?? ""
+        try? errorHandle?.close()
+        let output = (try? String(contentsOf: logURL, encoding: .utf8)) ?? ""
+        try? FileManager.default.removeItem(at: logURL)
         return (process.terminationStatus, output.trimmingCharacters(in: .whitespacesAndNewlines))
     }
 

@@ -840,3 +840,32 @@ private func runBurrow(_ arguments: [String], configURL: URL) throws -> CLIResul
     }
     #expect(try store.load().gateways.map(\.name) == ["A", "C", "B"])
 }
+
+@Test func warmDoesNotBlockOnBackgroundedChildHoldingStderr() async throws {
+    // Reproduces the "signing in… forever" hang: `ssh -f` (especially when
+    // multiplexing over an existing master) leaves a long-lived child that
+    // inherits stderr and holds it open for the whole keep-alive. A pipe read
+    // to EOF would block until that child dies; the temp-file capture must not.
+    let tempDirectory = FileManager.default.temporaryDirectory
+        .appendingPathComponent(UUID().uuidString, isDirectory: true)
+    try FileManager.default.createDirectory(at: tempDirectory, withIntermediateDirectories: true)
+    let scriptURL = tempDirectory.appendingPathComponent("fake-ssh.sh")
+    let script = """
+    #!/bin/sh
+    # A detached child keeps fd 2 (stderr) open long after the parent exits.
+    sleep 30 &
+    echo "master pinned" 1>&2
+    exit 0
+    """
+    try script.write(to: scriptURL, atomically: true, encoding: .utf8)
+    try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: scriptURL.path)
+
+    let start = Date()
+    let outcome = SSHHostWarmer.warm(alias: "devbox", environment: nil, executablePath: scriptURL.path)
+    let elapsed = Date().timeIntervalSince(start)
+
+    #expect(outcome.succeeded)
+    #expect(outcome.output.contains("master pinned"))
+    // Returns when the parent exits (~instant), NOT after the 30s child.
+    #expect(elapsed < 5)
+}
