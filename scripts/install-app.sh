@@ -58,6 +58,19 @@ cp "$SOURCE_BINARY" "$APP_DIR/Contents/MacOS/${EXECUTABLE_NAME}"
 chmod 755 "$APP_DIR/Contents/MacOS/${EXECUTABLE_NAME}"
 cp "$ROOT_DIR/XcodeSupport/Burrow.icns" "$APP_DIR/Contents/Resources/Burrow.icns"
 
+# Patched ocproxy (upstream-packet backpressure — see vendor/ocproxy/README.md):
+# bundling it into Contents/Helpers makes GatewaySupport.ocproxyPath() prefer it
+# over any Homebrew install. Stock ocproxy drops upstream packets when the
+# openconnect socketpair fills (~2 datagrams on macOS), collapsing VPN uploads
+# to ~60KB/s; the patched build queues + flushes instead (measured 31-60x).
+VENDORED_OCPROXY="$ROOT_DIR/vendor/ocproxy/ocproxy-macos-$(uname -m)"
+if [ -x "$VENDORED_OCPROXY" ]; then
+  mkdir -p "$APP_DIR/Contents/Helpers"
+  cp "$VENDORED_OCPROXY" "$APP_DIR/Contents/Helpers/ocproxy"
+  chmod 755 "$APP_DIR/Contents/Helpers/ocproxy"
+  echo "Bundled patched ocproxy into Contents/Helpers"
+fi
+
 cat > "$APP_DIR/Contents/Info.plist" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "https://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -93,8 +106,15 @@ cat > "$APP_DIR/Contents/Info.plist" <<EOF
 </plist>
 EOF
 
-# No --deep: it is deprecated, and this bundle has a single flat executable —
-# nothing nested to sign. (make-dmg.sh signs its nested helpers inside-out.)
+# Sign inside-out (no deprecated --deep): nested helpers first, then the app,
+# matching make-dmg.sh.
+if [ -x "$APP_DIR/Contents/Helpers/ocproxy" ]; then
+  /usr/bin/codesign \
+    --force \
+    --sign "$SIGNING_IDENTITY" \
+    --timestamp=none \
+    "$APP_DIR/Contents/Helpers/ocproxy"
+fi
 /usr/bin/codesign \
   --force \
   --sign "$SIGNING_IDENTITY" \
