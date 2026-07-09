@@ -107,6 +107,10 @@ CLI_INSTALL_DIR="${BURROW_BIN_DIR:-$HOME/.local/bin}"
 echo "Building burrow CLI..."
 swift build --package-path "$ROOT_DIR" -c "$BUILD_CONFIGURATION" --product burrow
 mkdir -p "$CLI_INSTALL_DIR"
+# Remove before copying: overwriting a signed Mach-O in place leaves the
+# kernel's stale signature verdict on the inode, and macOS then SIGKILLs
+# the binary on launch (exit 137) with no error message.
+rm -f "$CLI_INSTALL_DIR/burrow"
 cp "${BIN_DIR}/burrow" "$CLI_INSTALL_DIR/burrow"
 chmod 755 "$CLI_INSTALL_DIR/burrow"
 echo "Installed burrow CLI to ${CLI_INSTALL_DIR}/burrow"
