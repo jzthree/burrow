@@ -49,6 +49,13 @@ jobs:
           sudo xcode-select -s "$(ls -d /Applications/Xcode*.app | sort -V | tail -1)/Contents/Developer"
           swift --version
 
+      # A release ships to every user who updates — never build the DMG from a
+      # commit whose tests don't pass on a clean checkout. (This also catches
+      # the works-locally-only class of failure: files present in a working
+      # tree but never committed.)
+      - name: Test
+        run: swift test
+
       - name: Install DMG build tools
         run: brew install dylibbundler create-dmg openconnect ocproxy
 

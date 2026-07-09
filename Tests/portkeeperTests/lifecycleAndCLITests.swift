@@ -869,3 +869,33 @@ private func runBurrow(_ arguments: [String], configURL: URL) throws -> CLIResul
     // Returns when the parent exits (~instant), NOT after the 30s child.
     #expect(elapsed < 5)
 }
+
+// MARK: - Version comparison (update checks depend on this)
+
+@Test func versionComparisonOrdersNumericComponents() async throws {
+    // Numeric ordering, not lexicographic: 1.10.0 > 1.9.1.
+    #expect(BurrowVersion.isNewer("1.10.0", than: "1.9.1"))
+    #expect(!BurrowVersion.isNewer("1.9.1", than: "1.10.0"))
+
+    // v-prefix is accepted on either side.
+    #expect(BurrowVersion.isNewer("v1.1.0", than: "1.0.0"))
+    #expect(BurrowVersion.isNewer("1.1.0", than: "v1.0.0"))
+
+    // Missing components count as zero: 1.2 == 1.2.0.
+    #expect(!BurrowVersion.isNewer("1.2", than: "1.2.0"))
+    #expect(!BurrowVersion.isNewer("1.2.0", than: "1.2"))
+    #expect(BurrowVersion.isNewer("1.2.1", than: "1.2"))
+
+    // Equal is not newer.
+    #expect(!BurrowVersion.isNewer("2.0.0", than: "2.0.0"))
+}
+
+@Test func versionComparisonNeverPromotesNonNumericBuilds() async throws {
+    // git-describe stamps ("v1.0.0-3-gabc1234", bare hashes) are dev builds;
+    // they must never be considered newer, and a release must never be
+    // offered "over" one either way — both directions return false.
+    #expect(!BurrowVersion.isNewer("4edf8db", than: "1.0.0"))
+    #expect(!BurrowVersion.isNewer("v1.0.0-3-gabc1234", than: "1.0.0"))
+    #expect(!BurrowVersion.isNewer("1.1.0", than: "v1.0.0-3-gabc1234"))
+    #expect(!BurrowVersion.isNewer("", than: "1.0.0"))
+}
