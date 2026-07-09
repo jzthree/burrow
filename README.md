@@ -47,9 +47,9 @@ git clone https://github.com/jzthree/Burrow.git && cd Burrow
 - **Tunnels need nothing extra.** Burrow supervises the system `/usr/bin/ssh`; there are no runtime dependencies for the core app.
 - **VPN gateways are optional** and use two open-source tools:
   - [`openconnect`](https://www.infradead.org/openconnect/) (LGPL-2.1) — speaks the AnyConnect, GlobalProtect, Pulse, and Fortinet protocols.
-  - [`ocproxy`](https://github.com/cernekee/ocproxy) — turns the VPN session into a local SOCKS5 listener, so no tun device or root is needed.
+  - [`ocproxy`](https://github.com/jzthree/ocproxy) — turns the VPN session into a local SOCKS5 listener, so no tun device or root is needed. **Burrow bundles a patched build** (upstream drops upload packets under load on macOS, capping uploads at ~60 KB/s; the bundled build fixes it — 31–60× faster, see `vendor/ocproxy/README.md`), so there is nothing to install for ocproxy.
 
-  You don't have to install them up front: the first time you connect a gateway, Burrow offers to run `brew install openconnect ocproxy` in a Terminal window and connects automatically when it finishes. Burrow looks for the tools in `/opt/homebrew/bin`, `/usr/local/bin`, `/opt/local/bin`, and `/usr/bin`, or at paths set via `BURROW_OPENCONNECT` / `BURROW_OCPROXY`. Tunnels are unaffected either way.
+  You don't have to install openconnect up front either: the first time you connect a gateway, Burrow offers to brew-install whatever is actually missing in a Terminal window and connects automatically when it finishes. Burrow prefers binaries bundled in the app, then `/opt/homebrew/bin`, `/usr/local/bin`, `/opt/local/bin`, and `/usr/bin`, or paths set via `BURROW_OPENCONNECT` / `BURROW_OCPROXY`. Tunnels are unaffected either way.
 
 ## Quick Start
 
@@ -194,7 +194,7 @@ Forward syntax:
 Burrow can supervise userspace VPNs the same way it supervises tunnels. A gateway runs `openconnect` (AnyConnect, GlobalProtect, Pulse, Fortinet, …) with `ocproxy`, exposing the VPN as a local SOCKS5 port — no tun device, no root, no routing-table changes, so multiple gateways coexist with each other and with system VPNs like Tailscale.
 
 ```bash
-brew install openconnect ocproxy
+brew install openconnect   # ocproxy ships inside Burrow (patched build — see vendor/ocproxy)
 ```
 
 Create gateways from the menu-bar app (the `+` button in the VPN Gateways section, or Settings → New VPN Gateway…) or define them in the config:
