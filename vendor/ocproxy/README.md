@@ -16,9 +16,13 @@ a stock bug).
 Measured on the UChicago AnyConnect VPN: uploads 61 KB/s → 1.9-3.8 MB/s
 (31-60x); downloads unchanged.
 
+Public home of the fix (patch applied, README explains the pathology):
+https://github.com/jzthree/ocproxy (branch macos-upload-backpressure —
+upstream cernekee/ocproxy has been dormant since 2017).
+
 ## Rebuild
-    git clone https://github.com/cernekee/ocproxy && cd ocproxy
-    git apply ../backpressure.patch
+    git clone -b macos-upload-backpressure https://github.com/jzthree/ocproxy && cd ocproxy
+    # (equivalently: clone upstream and `git apply ../backpressure.patch`)
     autoreconf -fi && ./configure \
       CPPFLAGS="-I$(brew --prefix libevent)/include" \
       LDFLAGS="-L$(brew --prefix libevent)/lib" && make
