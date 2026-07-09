@@ -71,6 +71,14 @@ if [ -x "$VENDORED_OCPROXY" ]; then
   echo "Bundled patched ocproxy into Contents/Helpers"
 fi
 
+# Sparkle (self-update): the SPM build links @rpath/Sparkle.framework with an
+# @executable_path/../Frameworks rpath, so embed the framework there.
+if [ -d "$BIN_DIR/Sparkle.framework" ]; then
+  mkdir -p "$APP_DIR/Contents/Frameworks"
+  cp -R "$BIN_DIR/Sparkle.framework" "$APP_DIR/Contents/Frameworks/"
+  echo "Embedded Sparkle.framework"
+fi
+
 cat > "$APP_DIR/Contents/Info.plist" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "https://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -102,6 +110,12 @@ cat > "$APP_DIR/Contents/Info.plist" <<EOF
   <true/>
   <key>NSHighResolutionCapable</key>
   <true/>
+  <key>SUFeedURL</key>
+  <string>https://github.com/jzthree/burrow/releases/latest/download/appcast.xml</string>
+  <key>SUPublicEDKey</key>
+  <string>34aCKFNC6t9pyTYtlT07ABZ8sWt89lTzZcm8UcPvf64=</string>
+  <key>SUEnableAutomaticChecks</key>
+  <true/>
 </dict>
 </plist>
 EOF
@@ -114,6 +128,19 @@ if [ -x "$APP_DIR/Contents/Helpers/ocproxy" ]; then
     --sign "$SIGNING_IDENTITY" \
     --timestamp=none \
     "$APP_DIR/Contents/Helpers/ocproxy"
+fi
+# Sparkle's nested executables (XPC services, Autoupdate, Updater.app) must be
+# signed before the framework, and the framework before the app.
+SPARKLE_FW="$APP_DIR/Contents/Frameworks/Sparkle.framework"
+if [ -d "$SPARKLE_FW" ]; then
+  for nested in \
+    "$SPARKLE_FW/Versions/B/XPCServices/Installer.xpc" \
+    "$SPARKLE_FW/Versions/B/XPCServices/Downloader.xpc" \
+    "$SPARKLE_FW/Versions/B/Autoupdate" \
+    "$SPARKLE_FW/Versions/B/Updater.app"; do
+    [ -e "$nested" ] && /usr/bin/codesign --force --sign "$SIGNING_IDENTITY" --timestamp=none "$nested"
+  done
+  /usr/bin/codesign --force --sign "$SIGNING_IDENTITY" --timestamp=none "$SPARKLE_FW"
 fi
 /usr/bin/codesign \
   --force \

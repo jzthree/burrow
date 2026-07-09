@@ -310,7 +310,8 @@ final class MenuBarViewModel: ObservableObject {
         sshConfigHosts = SSHConfigParser.parse()
         refreshLaunchAtLoginState()
         startConfigWatcher()
-        if autoCheckForUpdates {
+        sparkleUpdater.setAutomaticChecks(autoCheckForUpdates)
+        if autoCheckForUpdates, !sparkleUpdater.isActive {
             startUpdateCheckLoop()
         }
         Task { @MainActor [weak self] in
@@ -1215,16 +1216,22 @@ final class MenuBarViewModel: ObservableObject {
 
     // MARK: - Updates
 
-    /// A release newer than the running build, found by a manual or daily
-    /// check. Drives the "Update to …" menu item.
+    /// Sparkle self-updater — download, verify, install, relaunch. Active only
+    /// in a bundled install; dev runs fall back to the release-page check.
+    private let sparkleUpdater = BurrowUpdater()
+
+    /// A release newer than the running build, found by the fallback manual or
+    /// daily check (dev builds only — Sparkle shows its own UI when active).
     @Published private(set) var availableUpdate: UpdateChecker.Release?
 
     /// Daily background update check, on by default and toggleable in
-    /// Settings. Only ever reads the public GitHub releases endpoint.
+    /// Settings. Sparkle schedules it when active; the fallback loop only
+    /// reads the public GitHub releases endpoint.
     @Published var autoCheckForUpdates: Bool {
         didSet {
             UserDefaults.standard.set(autoCheckForUpdates, forKey: Self.autoCheckUpdatesKey)
-            if autoCheckForUpdates {
+            sparkleUpdater.setAutomaticChecks(autoCheckForUpdates)
+            if autoCheckForUpdates, !sparkleUpdater.isActive {
                 startUpdateCheckLoop()
             } else {
                 updateCheckTask?.cancel()
@@ -1237,6 +1244,10 @@ final class MenuBarViewModel: ObservableObject {
     private static let announcedUpdateKey = "lastAnnouncedUpdateVersion"
 
     func checkForUpdates() {
+        if sparkleUpdater.isActive {
+            sparkleUpdater.checkForUpdates()
+            return
+        }
         globalMessage = "Checking for updates…"
         Task { @MainActor [weak self] in
             await self?.performUpdateCheck(quiet: false)

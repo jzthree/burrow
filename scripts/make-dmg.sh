@@ -107,9 +107,22 @@ cat > "$APP_DIR/Contents/Info.plist" <<EOF
   <key>LSMinimumSystemVersion</key><string>13.0</string>
   <key>LSUIElement</key><true/>
   <key>NSHighResolutionCapable</key><true/>
+  <key>SUFeedURL</key><string>https://github.com/jzthree/burrow/releases/latest/download/appcast.xml</string>
+  <key>SUPublicEDKey</key><string>34aCKFNC6t9pyTYtlT07ABZ8sWt89lTzZcm8UcPvf64=</string>
+  <key>SUEnableAutomaticChecks</key><true/>
 </dict>
 </plist>
 EOF
+
+# --- Sparkle (self-update) ---------------------------------------------------
+# The SPM build links @rpath/Sparkle.framework with an
+# @executable_path/../Frameworks rpath; embed the framework there.
+if [ -d "$BIN_DIR/Sparkle.framework" ]; then
+  note "Embedding Sparkle.framework"
+  cp -R "$BIN_DIR/Sparkle.framework" "$APP_DIR/Contents/Frameworks/"
+else
+  fail "Sparkle.framework not found in $BIN_DIR — did the SPM dependency resolve?"
+fi
 
 # --- bundle the VPN helpers + their dylib closure ---------------------------
 note "Bundling openconnect + ocproxy and dependencies"
@@ -160,6 +173,18 @@ for helper in openconnect ocproxy; do
     --entitlements "$HELPER_ENTITLEMENTS" --sign "$DEVELOPER_ID" \
     "$APP_DIR/Contents/Helpers/$helper"
 done
+
+note "Signing Sparkle (nested executables, then the framework)"
+SPARKLE_FW="$APP_DIR/Contents/Frameworks/Sparkle.framework"
+for nested in \
+  "$SPARKLE_FW/Versions/B/XPCServices/Installer.xpc" \
+  "$SPARKLE_FW/Versions/B/XPCServices/Downloader.xpc" \
+  "$SPARKLE_FW/Versions/B/Autoupdate" \
+  "$SPARKLE_FW/Versions/B/Updater.app"; do
+  [ -e "$nested" ] && codesign --force --options runtime "${TS_FLAG[@]}" \
+    --preserve-metadata=entitlements --sign "$DEVELOPER_ID" "$nested"
+done
+codesign --force --options runtime "${TS_FLAG[@]}" --sign "$DEVELOPER_ID" "$SPARKLE_FW"
 
 note "Signing app"
 codesign --force --options runtime "${TS_FLAG[@]}" --sign "$DEVELOPER_ID" "$APP_DIR"

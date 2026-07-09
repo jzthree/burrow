@@ -22,6 +22,10 @@ let package = Package(
             targets: ["PortKeeperMenuBar"]
         ),
     ],
+    dependencies: [
+        // Self-update: signed appcast, download, verify, swap-and-relaunch.
+        .package(url: "https://github.com/sparkle-project/Sparkle", from: "2.6.0"),
+    ],
     targets: [
         .target(
             name: "PortKeeperCore"
@@ -32,7 +36,15 @@ let package = Package(
         ),
         .executableTarget(
             name: "PortKeeperMenuBar",
-            dependencies: ["PortKeeperCore"]
+            dependencies: [
+                "PortKeeperCore",
+                .product(name: "Sparkle", package: "Sparkle"),
+            ],
+            linkerSettings: [
+                // Find the embedded Sparkle.framework in Contents/Frameworks
+                // when running from the installed .app bundle.
+                .unsafeFlags(["-Xlinker", "-rpath", "-Xlinker", "@executable_path/../Frameworks"]),
+            ]
         ),
         .testTarget(
             name: "portkeeperTests",
