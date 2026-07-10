@@ -603,60 +603,6 @@ final class WarmSignInWindowController: NSObject, NSWindowDelegate {
     }
 }
 
-enum FolderPrompt {
-    /// Collects a new mounted-folder definition. Kept deliberately small: the
-    /// host field takes an ~/.ssh/config alias (jump/user/port come from ssh
-    /// config then), with explicit jump for bare hostnames.
-    @MainActor
-    static func request(knownHosts: [String]) -> FolderConfig? {
-        let alert = NSAlert()
-        alert.messageText = "New Mounted Folder"
-        alert.informativeText = "Mounts a remote directory in the Finder over SSH (FUSE-T). Mounting is non-interactive — keep the host warm and mounts are instant with no prompts.\(knownHosts.isEmpty ? "" : "\n\nHosts in your ssh config: \(knownHosts.prefix(6).joined(separator: ", "))")"
-
-        let width: CGFloat = 360
-        let container = NSStackView(frame: NSRect(x: 0, y: 0, width: width, height: 116))
-        container.orientation = .vertical
-        container.alignment = .leading
-        container.spacing = 6
-
-        let nameField = NSTextField(frame: .zero)
-        nameField.placeholderString = "Name (e.g. vista-projects)"
-        let hostField = NSTextField(frame: .zero)
-        hostField.placeholderString = "SSH host or alias (e.g. vista)"
-        let remoteField = NSTextField(frame: .zero)
-        remoteField.placeholderString = "Remote path (optional — home when empty)"
-        let jumpField = NSTextField(frame: .zero)
-        jumpField.placeholderString = "Jump host (optional, e.g. randi)"
-
-        for field in [nameField, hostField, remoteField, jumpField] {
-            field.translatesAutoresizingMaskIntoConstraints = false
-            field.widthAnchor.constraint(equalToConstant: width).isActive = true
-            container.addArrangedSubview(field)
-        }
-        alert.accessoryView = container
-        alert.window.initialFirstResponder = nameField
-
-        alert.addButton(withTitle: "Add Folder")
-        alert.addButton(withTitle: "Cancel")
-        guard alert.runModal() == .alertFirstButtonReturn else {
-            return nil
-        }
-        let name = nameField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
-        let host = hostField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
-        let remote = remoteField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
-        let jump = jumpField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !name.isEmpty, !host.isEmpty else {
-            return nil
-        }
-        return FolderConfig(
-            name: name,
-            host: host,
-            remotePath: remote,
-            jumpHost: jump.isEmpty ? nil : jump
-        )
-    }
-}
-
 enum SSHHostPrompt {
     @MainActor
     static func request() -> SSHConfigWriter.HostEntry? {

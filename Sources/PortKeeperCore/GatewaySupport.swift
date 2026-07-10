@@ -367,6 +367,22 @@ public enum GatewayLinker {
     ///   Include "<path to the generated file>"
     ///
     /// The Match only applies while something listens on the gateway's SOCKS
+    /// The gateway whose sshHostPatterns match this host name (a resolved
+    /// HostName or a bare host, glob semantics via fnmatch). Mirrors the
+    /// generated ssh_include Match rules, so app-side gating and display
+    /// agree with what ssh will actually do.
+    public static func gatewayName(matchingHost host: String, gateways: [GatewayConfig]) -> String? {
+        let trimmed = host.trimmingCharacters(in: .whitespaces)
+        guard !trimmed.isEmpty else { return nil }
+        for gateway in gateways {
+            for pattern in gateway.sshHostPatterns
+            where fnmatch(pattern, trimmed, FNM_CASEFOLD) == 0 {
+                return gateway.name
+            }
+        }
+        return nil
+    }
+
     /// port, so with the gateway down (or the official VPN client / campus
     /// network in use) ssh falls through to a direct connection. `final`
     /// matches the post-HostName hostname, so user aliases work unlisted.

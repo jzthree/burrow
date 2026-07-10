@@ -963,3 +963,19 @@ private func runBurrow(_ arguments: [String], configURL: URL) throws -> CLIResul
     #expect(missing.exitCode == 1)
     #expect(missing.stderr.contains("not found"))
 }
+
+@Test func gatewayResolvesFromHostPatterns() async throws {
+    let gateways = [
+        GatewayConfig(name: "UTSW VPN", vpnProtocol: "gp", server: "vpn.swmed.edu", socksPort: 11080,
+                      sshHostPatterns: ["*.swmed.edu"]),
+        GatewayConfig(name: "UChicago VPN", vpnProtocol: "anyconnect", server: "cvpn.uchicago.edu", socksPort: 11082,
+                      sshHostPatterns: ["*.cri.uchicago.edu", "*.uchicago.edu", "randi.cri.uchicago.edu"]),
+    ]
+
+    // Wildcards match, case-insensitively; the same rules the ssh include uses.
+    #expect(GatewayLinker.gatewayName(matchingHost: "randi.cri.uchicago.edu", gateways: gateways) == "UChicago VPN")
+    #expect(GatewayLinker.gatewayName(matchingHost: "Nucleus.BioHPC.swmed.edu", gateways: gateways) == "UTSW VPN")
+    // No pattern -> direct.
+    #expect(GatewayLinker.gatewayName(matchingHost: "github.com", gateways: gateways) == nil)
+    #expect(GatewayLinker.gatewayName(matchingHost: "", gateways: gateways) == nil)
+}

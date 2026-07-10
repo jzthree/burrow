@@ -42,6 +42,7 @@ final class EditorWindowController: NSObject, NSWindowDelegate {
         viewModel?.editorDraft = nil
         viewModel?.gatewayDraft = nil
         viewModel?.profileDraft = nil
+        viewModel?.folderDraft = nil
         isSyncing = false
     }
 
@@ -66,7 +67,18 @@ private struct EditorWindowContent: View {
 
     var body: some View {
         Group {
-            if let profileDraft = viewModel.profileDraft {
+            if let folderDraft = viewModel.folderDraft {
+                FolderEditorSheet(
+                    draft: folderBinding(for: folderDraft),
+                    knownHosts: viewModel.sshConfigHosts.map(\.alias),
+                    tunnels: viewModel.tunnels.map(\.tunnel),
+                    existingFolderNames: viewModel.folders.map(\.id),
+                    onCancel: { viewModel.closeFolderEditor() },
+                    onSave: { mountNow in viewModel.saveFolderEditor(mountNow: mountNow) },
+                    onDelete: { viewModel.deleteFolderEditorTarget() }
+                )
+                .padding(14)
+            } else if let profileDraft = viewModel.profileDraft {
                 ProfileEditorSheet(
                     draft: profileBinding(for: profileDraft),
                     tunnels: viewModel.tunnels.map(\.tunnel),
@@ -107,7 +119,7 @@ private struct EditorWindowContent: View {
                 Color.clear
             }
         }
-        .frame(width: 500, height: 660)
+        .frame(width: 500, height: viewModel.folderDraft != nil ? 430 : 660)
     }
 
     private func binding(for draft: TunnelDraft) -> Binding<TunnelDraft> {
@@ -128,6 +140,13 @@ private struct EditorWindowContent: View {
         Binding(
             get: { viewModel.profileDraft ?? draft },
             set: { viewModel.profileDraft = $0 }
+        )
+    }
+
+    private func folderBinding(for draft: FolderDraft) -> Binding<FolderDraft> {
+        Binding(
+            get: { viewModel.folderDraft ?? draft },
+            set: { viewModel.folderDraft = $0 }
         )
     }
 }

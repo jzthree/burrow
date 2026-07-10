@@ -114,6 +114,14 @@ final class MenuBarViewModel: ObservableObject {
             }
         }
     }
+    @Published var folderDraft: FolderDraft? {
+        didSet {
+            let draftChanged = oldValue?.id != folderDraft?.id
+            if draftChanged || (oldValue != nil) != (folderDraft != nil) {
+                syncEditorWindow()
+            }
+        }
+    }
     @Published var importCandidates: [SSHConfigImportCandidate]?
     @Published private(set) var launchAtLoginEnabled = false
     @Published private(set) var terminalApp = "auto"
@@ -1434,6 +1442,19 @@ final class MenuBarViewModel: ObservableObject {
             return
         }
         let folder = folders[index].config
+        // The mount rides ssh, so it inherits the host-level VPN routing from
+        // the generated include. Gate on that gateway being up: failing here
+        // in 1ms with the fix beats sshfs timing out for 20s.
+        let firstHop = folder.jumpHost?.isEmpty == false ? folder.jumpHost! : folder.host
+        let hopHost = sshConfigHosts.first(where: { $0.matchesAlias(firstHop) })?.effectiveHost ?? firstHop
+        if let routedVia = GatewayLinker.gatewayName(matchingHost: hopHost, gateways: gateways.map(\.config)),
+           let gateway = gateways.first(where: { $0.id == routedVia }),
+           !PortProbe.canConnect(host: "127.0.0.1", port: gateway.config.socksPort) {
+            folders[index].lastMessage = "Connect \(routedVia) first — this host routes through it."
+            folders[index].lastMessageIsError = true
+            globalMessage = "\(name) needs \(routedVia) — connect the VPN, then mount."
+            return
+        }
         folders[index].isBusy = true
         folders[index].lastMessage = "Mounting…"
         folders[index].lastMessageIsError = false
@@ -1504,17 +1525,53 @@ final class MenuBarViewModel: ObservableObject {
     }
 
     func createFolder() {
-        guard let entry = FolderPrompt.request(knownHosts: sshConfigHosts.map(\.alias)) else { return }
+        folderDraft = FolderDraft.newFolder()
+    }
+
+    func editFolder(named name: String) {
+        guard let folder = folders.first(where: { $0.id == name }) else { return }
+        folderDraft = FolderDraft(folder: folder.config, originalName: name)
+    }
+
+    func closeFolderEditor() {
+        folderDraft = nil
+    }
+
+    func saveFolderEditor(mountNow: Bool) {
+        guard let draft = folderDraft else { return }
         do {
-            try store.mutate { config in
-                config.folders.removeAll { $0.name == entry.name }
-                config.folders.append(entry)
+            let folder = try draft.toFolder()
+            // Renames unmount the old entry first so its mountpoint isn't
+            // stranded under the previous name.
+            if let original = draft.originalName, original != folder.name,
+               let old = folders.first(where: { $0.id == original }) {
+                FolderSupport.unmount(old.config)
             }
+            try store.mutate { config in
+                config.folders.removeAll { $0.name == draft.originalName || $0.name == folder.name }
+                config.folders.append(folder)
+            }
+            folderDraft = nil
             loadConfig()
-            globalMessage = "Saved folder \(entry.name) — mount it from the Folders section."
+            if mountNow {
+                mountFolder(named: folder.name)
+            } else {
+                globalMessage = "Saved folder \(folder.name)."
+            }
+        } catch let error as DraftError {
+            globalMessage = error.message
         } catch {
             globalMessage = "Couldn't save folder: \(error.localizedDescription)"
         }
+    }
+
+    func deleteFolderEditorTarget() {
+        guard let original = folderDraft?.originalName else {
+            folderDraft = nil
+            return
+        }
+        folderDraft = nil
+        removeFolder(named: original)
     }
 
     /// Refreshes mount states from the kernel mount table; flags mounts that
@@ -1527,6 +1584,48 @@ final class MenuBarViewModel: ObservableObject {
                 folders[index].lastMessageIsError = true
             }
             folders[index].isMounted = observed
+        }
+    }
+
+    /// The VPN gateway this host routes through, resolved from the gateways'
+    /// host patterns — the same rules the generated ssh_include applies, so
+    /// tunnels, folders, and terminals to this host all inherit it.
+    func gatewayName(forHostAlias alias: String) -> String? {
+        guard let host = sshConfigHosts.first(where: { $0.matchesAlias(alias) }) else { return nil }
+        return GatewayLinker.gatewayName(matchingHost: host.effectiveHost, gateways: gateways.map(\.config))
+    }
+
+    /// Routes (or unroutes) a host through a gateway by managing its exact
+    /// host pattern in the gateway's sshHostPatterns. loadConfig regenerates
+    /// the ssh include, so ssh (and with it tunnels, folders, and terminals)
+    /// picks the change up immediately.
+    func setGateway(_ gatewayName: String?, forHostAlias alias: String) {
+        guard let host = sshConfigHosts.first(where: { $0.matchesAlias(alias) }) else { return }
+        let target = host.effectiveHost
+        do {
+            try store.mutate { config in
+                for index in config.gateways.indices {
+                    config.gateways[index].sshHostPatterns.removeAll {
+                        $0.caseInsensitiveCompare(target) == .orderedSame
+                    }
+                }
+                if let gatewayName,
+                   let index = config.gateways.firstIndex(where: { $0.name == gatewayName }) {
+                    config.gateways[index].sshHostPatterns.append(target)
+                }
+            }
+            loadConfig()
+            if let stillRouted = self.gatewayName(forHostAlias: alias), gatewayName == nil {
+                // An exact pattern was removed but a wildcard still covers the
+                // host — be honest about where the routing now comes from.
+                globalMessage = "\(alias) is still covered by a \(stillRouted) host pattern — edit that gateway to change it."
+            } else if let gatewayName {
+                globalMessage = "\(alias) now routes via \(gatewayName)."
+            } else {
+                globalMessage = "\(alias) now connects directly."
+            }
+        } catch {
+            globalMessage = "Couldn't update routing: \(error.localizedDescription)"
         }
     }
 
@@ -2534,7 +2633,9 @@ final class MenuBarViewModel: ObservableObject {
 
     private func syncEditorWindow() {
         let title: String?
-        if let draft = profileDraft {
+        if let draft = folderDraft {
+            title = draft.originalName.map { "Edit Folder \($0)" } ?? "New Mounted Folder"
+        } else if let draft = profileDraft {
             title = draft.originalName.map { "Edit Profile \($0)" } ?? "New Profile"
         } else if let draft = gatewayDraft {
             title = draft.originalName.map { "Edit Gateway \($0)" } ?? "New VPN Gateway"
@@ -4252,6 +4353,9 @@ struct MenuBarContent: View {
                             twoFactorAccountNames: viewModel.twoFactorAccountNames,
                             onSetTwoFactor: { viewModel.setTwoFactorLink(accountName: $0, forHostAlias: host.alias) },
                             onEnrollTwoFactor: { viewModel.enrollAndLinkTwoFactor(forHostAlias: host.alias) },
+                            linkedGateway: viewModel.gatewayName(forHostAlias: host.alias),
+                            gatewayNames: viewModel.gateways.map(\.id),
+                            onSetGateway: { viewModel.setGateway($0, forHostAlias: host.alias) },
                             onEdit: { viewModel.editSSHHost(alias: host.alias) },
                             onHide: { viewModel.hideSSHHost(alias: host.alias) },
                             onRemove: { viewModel.removeSSHHost(alias: host.alias) },
@@ -4330,6 +4434,7 @@ struct MenuBarContent: View {
                             folder: folder,
                             onToggleMount: { viewModel.toggleFolder(named: folder.id) },
                             onReveal: { viewModel.revealFolder(named: folder.id) },
+                            onEdit: { viewModel.editFolder(named: folder.id) },
                             onRemove: { viewModel.removeFolder(named: folder.id) }
                         )
                     }
@@ -4437,6 +4542,7 @@ private struct FolderRow: View {
     let folder: MenuBarViewModel.FolderState
     let onToggleMount: () -> Void
     let onReveal: () -> Void
+    let onEdit: () -> Void
     let onRemove: () -> Void
     @State private var hovering = false
     @State private var breathing = false
@@ -4516,6 +4622,7 @@ private struct FolderRow: View {
                     Button("Reveal in Finder", action: onReveal)
                 }
                 Divider()
+                Button("Edit…", action: onEdit)
                 Button("Remove Folder", role: .destructive, action: onRemove)
             } label: {
                 Image(systemName: "ellipsis")
@@ -4557,6 +4664,9 @@ private struct SSHHostRow: View {
     let twoFactorAccountNames: [String]
     let onSetTwoFactor: (String?) -> Void
     let onEnrollTwoFactor: () -> Void
+    var linkedGateway: String? = nil
+    var gatewayNames: [String] = []
+    var onSetGateway: (String?) -> Void = { _ in }
     let onEdit: () -> Void
     let onHide: () -> Void
     let onRemove: () -> Void
@@ -4684,6 +4794,15 @@ private struct SSHHostRow: View {
                     .help("2FA: \(linkedTwoFactorName) — entered automatically when warming")
             }
 
+            // Host-level VPN routing: tunnels, folders, and terminals to this
+            // host all inherit it (via the generated ssh include).
+            if let linkedGateway {
+                Image(systemName: "network.badge.shield.half.filled")
+                    .font(.system(size: 11))
+                    .foregroundStyle(Color.burrowAccent.opacity(0.75))
+                    .help("Routes via \(linkedGateway) when the VPN is connected")
+            }
+
             // Visible inline actions (no right-click required).
             Button(action: onToggleKeepWarm) {
                 Image(systemName: isWarming ? "flame.fill" : flameIcon)
@@ -4743,6 +4862,17 @@ private struct SSHHostRow: View {
                         Text("None").tag(String?.none)
                         ForEach(twoFactorAccountNames, id: \.self) { name in
                             Text(name).tag(Optional(name))
+                        }
+                    }
+                }
+                if !gatewayNames.isEmpty {
+                    Picker("VPN Route", selection: Binding(
+                        get: { linkedGateway },
+                        set: { onSetGateway($0) }
+                    )) {
+                        Text("Direct (No VPN)").tag(String?.none)
+                        ForEach(gatewayNames, id: \.self) { name in
+                            Text("Via \(name)").tag(Optional(name))
                         }
                     }
                 }
