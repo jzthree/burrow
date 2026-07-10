@@ -316,8 +316,6 @@ final class MenuBarViewModel: ObservableObject {
         hiddenSSHHosts = Set(UserDefaults.standard.stringArray(forKey: Self.hiddenSSHHostsKey) ?? [])
         migrateKeepWarmHostsToConfigIfNeeded()
         loadConfig()
-        adoptSurvivingGatewaySessions()
-        adoptSurvivingTunnelProcesses()
         sshConfigHosts = SSHConfigParser.parse()
         refreshLaunchAtLoginState()
         startConfigWatcher()
@@ -326,8 +324,14 @@ final class MenuBarViewModel: ObservableObject {
             startUpdateCheckLoop()
         }
         Task { @MainActor [weak self] in
-            try? await Task.sleep(for: .milliseconds(250))
-            self?.startEnabledTunnelsIfNeeded()
+            // Adoption scans (ps/pgrep per item) must finish before auto-start
+            // so a surviving process is adopted rather than raced by a fresh
+            // one — but they run off the launch path, so the menu paints
+            // immediately.
+            guard let self else { return }
+            await self.adoptSurvivingGatewaySessions()
+            await self.adoptSurvivingTunnelProcesses()
+            self.startEnabledTunnelsIfNeeded()
         }
         // Re-warm kept-warm hosts shortly after launch (2FA hosts surface
         // Touch ID then, per the chosen "prompt at launch" behavior).
@@ -442,29 +446,46 @@ final class MenuBarViewModel: ObservableObject {
     /// killing and restarting it: restarting drops the session for nothing
     /// and, for reverse forwards, races the remote against freeing the old
     /// listen port — the classic "remote port forwarding failed" loop.
-    private func adoptSurvivingTunnelProcesses() {
-        for state in tunnels where tasks[state.id] == nil && !state.isRunning {
-            guard let prepared = try? preparedTunnelForLaunch(state.tunnel),
-                  let pid = PortKeeperRuntimeRegistry.recordedOwnedProcess(for: prepared) else {
-                continue
+    /// The registry scan spawns ps per tunnel, so it runs detached.
+    private func adoptSurvivingTunnelProcesses() async {
+        let candidates = tunnels
+            .filter { tasks[$0.id] == nil && !$0.isRunning }
+            .map { (name: $0.id, tunnel: $0.tunnel) }
+        guard !candidates.isEmpty else { return }
+        let survivors = await Task.detached { () -> [(name: String, pid: pid_t)] in
+            candidates.compactMap { candidate in
+                guard let prepared = try? TunnelLaunchPreparer.prepare(candidate.tunnel),
+                      let pid = PortKeeperRuntimeRegistry.recordedOwnedProcess(for: prepared) else {
+                    return nil
+                }
+                return (candidate.name, pid)
             }
-            adoptedTunnels[state.id] = pid
-            appendLog(for: state.id, message: "Adopted surviving ssh process \(pid) from the previous run.")
-            updateState(for: state.id, isRunning: true, state: .connected, message: "Adopted running ssh session")
+        }.value
+        for survivor in survivors where tasks[survivor.name] == nil && adoptedTunnels[survivor.name] == nil {
+            adoptedTunnels[survivor.name] = survivor.pid
+            appendLog(for: survivor.name, message: "Adopted surviving ssh process \(survivor.pid) from the previous run.")
+            updateState(for: survivor.name, isRunning: true, state: .connected, message: "Adopted running ssh session")
         }
     }
 
     /// A previous run's openconnect + ocproxy can outlive the app (quit with
     /// "keep running", or an update relaunch). Adopt such sessions at startup
-    /// so a working VPN shows as connected instead of orphaned.
-    private func adoptSurvivingGatewaySessions() {
-        for state in gateways where gatewayTasks[state.id] == nil && !state.isRunning {
-            guard GatewayPortReclaimer.hasLiveSession(socksPort: state.config.socksPort, server: state.config.server) else {
-                continue
-            }
-            adoptedGateways.insert(state.id)
-            updateGatewayState(for: state.id, isRunning: true, state: .connected, message: "Adopted running VPN session")
-            markGatewayConnected(named: state.id)
+    /// so a working VPN shows as connected instead of orphaned. The liveness
+    /// scan spawns pgrep per gateway, so it runs detached.
+    private func adoptSurvivingGatewaySessions() async {
+        let candidates = gateways
+            .filter { gatewayTasks[$0.id] == nil && !$0.isRunning }
+            .map { (name: $0.id, config: $0.config) }
+        guard !candidates.isEmpty else { return }
+        let alive = await Task.detached {
+            candidates
+                .filter { GatewayPortReclaimer.hasLiveSession(socksPort: $0.config.socksPort, server: $0.config.server) }
+                .map(\.name)
+        }.value
+        for name in alive where gatewayTasks[name] == nil && !adoptedGateways.contains(name) {
+            adoptedGateways.insert(name)
+            updateGatewayState(for: name, isRunning: true, state: .connected, message: "Adopted running VPN session")
+            markGatewayConnected(named: name)
         }
     }
 
@@ -1138,13 +1159,29 @@ final class MenuBarViewModel: ObservableObject {
         let task = tasks[name]
         if task == nil,
            let tunnel = tunnels.first(where: { $0.id == name })?.tunnel {
-            do {
-                try PortKeeperRuntimeRegistry.reclaimOwnedProcess(for: preparedTunnelForLaunch(tunnel))
-            } catch {
-                // A failed reclaim can leave an orphaned ssh holding the local
-                // port; that is exactly what this stop was meant to clear.
-                globalMessage = "Could not clean up \(name)'s ssh process: \(error.localizedDescription)"
+            // Reclaim waits through SIGTERM (2s) and SIGKILL (1s) grace
+            // periods — off the main thread so a stop click can't stall the UI.
+            updateState(for: name, isRunning: false, state: .disconnected, message: "Stopping")
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                let prepared = try? self.preparedTunnelForLaunch(tunnel)
+                let failure = await Task.detached { () -> String? in
+                    guard let prepared else { return nil }
+                    do {
+                        try PortKeeperRuntimeRegistry.reclaimOwnedProcess(for: prepared)
+                        return nil
+                    } catch {
+                        return error.localizedDescription
+                    }
+                }.value
+                if let failure {
+                    // A failed reclaim can leave an orphaned ssh holding the
+                    // port; that is exactly what this stop was meant to clear.
+                    self.globalMessage = "Could not clean up \(name)'s ssh process: \(failure)"
+                }
+                self.updateState(for: name, isRunning: false, state: .disconnected, message: "Not running")
             }
+            return
         }
 
         guard let task else {
@@ -1449,23 +1486,31 @@ final class MenuBarViewModel: ObservableObject {
         }
         let folder = folders[index].config
         // The mount rides ssh, so it inherits the host-level VPN routing from
-        // the generated include. Gate on that gateway being up: failing here
-        // in 1ms with the fix beats sshfs timing out for 20s.
+        // the generated include. Gate on that gateway being up: failing fast
+        // with the fix beats sshfs timing out for 20s.
         let firstHop = folder.jumpHost?.isEmpty == false ? folder.jumpHost! : folder.host
         let hopHost = sshConfigHosts.first(where: { $0.matchesAlias(firstHop) })?.effectiveHost ?? firstHop
-        if let routedVia = GatewayLinker.gatewayName(matchingHost: hopHost, gateways: gateways.map(\.config)),
-           let gateway = gateways.first(where: { $0.id == routedVia }),
-           !PortProbe.canConnect(host: "127.0.0.1", port: gateway.config.socksPort) {
-            folders[index].lastMessage = "Connect \(routedVia) first — this host routes through it."
-            folders[index].lastMessageIsError = true
-            globalMessage = "\(name) needs \(routedVia) — connect the VPN, then mount."
-            return
-        }
+        let routedVia = GatewayLinker.gatewayName(matchingHost: hopHost, gateways: gateways.map(\.config))
+        let gatewaySocksPort = routedVia.flatMap { name in gateways.first(where: { $0.id == name })?.config.socksPort }
         folders[index].isBusy = true
         folders[index].lastMessage = "Mounting…"
         folders[index].lastMessageIsError = false
         globalMessage = "Mounting \(name)…"
         Task { @MainActor [weak self] in
+            // Even a loopback probe is I/O — keep it (and the mount) off main.
+            if let routedVia, let gatewaySocksPort {
+                let gatewayUp = await Task.detached {
+                    PortProbe.canConnect(host: "127.0.0.1", port: gatewaySocksPort, timeout: 2)
+                }.value
+                if !gatewayUp {
+                    guard let self, let idx = self.folders.firstIndex(where: { $0.id == name }) else { return }
+                    self.folders[idx].isBusy = false
+                    self.folders[idx].lastMessage = "Connect \(routedVia) first — this host routes through it."
+                    self.folders[idx].lastMessageIsError = true
+                    self.globalMessage = "\(name) needs \(routedVia) — connect the VPN, then mount."
+                    return
+                }
+            }
             let result = await Task.detached { FolderSupport.mount(folder, executablePath: sshfs) }.value
             guard let self, let idx = self.folders.firstIndex(where: { $0.id == name }) else { return }
             self.folders[idx].isBusy = false
@@ -1548,21 +1593,28 @@ final class MenuBarViewModel: ObservableObject {
         do {
             let folder = try draft.toFolder()
             // Renames unmount the old entry first so its mountpoint isn't
-            // stranded under the previous name.
-            if let original = draft.originalName, original != folder.name,
-               let old = folders.first(where: { $0.id == original }) {
-                FolderSupport.unmount(old.config)
-            }
+            // stranded under the previous name — off main (umount can block
+            // for seconds on a busy NFS mount).
+            let oldConfig: FolderConfig? = {
+                guard let original = draft.originalName, original != folder.name else { return nil }
+                return folders.first(where: { $0.id == original })?.config
+            }()
             try store.mutate { config in
                 config.folders.removeAll { $0.name == draft.originalName || $0.name == folder.name }
                 config.folders.append(folder)
             }
             folderDraft = nil
             loadConfig()
-            if mountNow {
-                mountFolder(named: folder.name)
-            } else {
-                globalMessage = "Saved folder \(folder.name)."
+            Task { @MainActor [weak self] in
+                if let oldConfig {
+                    _ = await Task.detached { FolderSupport.unmount(oldConfig) }.value
+                }
+                guard let self else { return }
+                if mountNow {
+                    self.mountFolder(named: folder.name)
+                } else {
+                    self.globalMessage = "Saved folder \(folder.name)."
+                }
             }
         } catch let error as DraftError {
             globalMessage = error.message
@@ -3057,10 +3109,16 @@ final class MenuBarViewModel: ObservableObject {
             if adoptedGateways.remove(name) != nil,
                let config = gateways.first(where: { $0.id == name })?.config {
                 // Adopted sessions have no supervisor task; tear down their
-                // processes directly.
-                GatewayPortReclaimer.killGatewayProcesses(socksPort: config.socksPort, server: config.server)
-                updateGatewayState(for: name, isRunning: false, state: .disconnected, message: "Stopped")
-                globalMessage = "Stopped gateway \(name)."
+                // processes directly — off main, the verified kill waits for
+                // process exits.
+                updateGatewayState(for: name, isRunning: false, state: .disconnected, message: "Stopping")
+                Task { @MainActor [weak self] in
+                    await Task.detached {
+                        GatewayPortReclaimer.killGatewayProcesses(socksPort: config.socksPort, server: config.server)
+                    }.value
+                    self?.updateGatewayState(for: name, isRunning: false, state: .disconnected, message: "Stopped")
+                    self?.globalMessage = "Stopped gateway \(name)."
+                }
             } else {
                 updateGatewayState(for: name, isRunning: false, state: .disconnected, message: "Not running")
             }
@@ -5675,13 +5733,26 @@ struct TunnelRow: View {
                 Text(verbatim: failureStatusText(at: context.date))
                     .font(.system(size: 11.2, weight: .medium, design: .monospaced))
                     .monospacedDigit()
-                    .foregroundStyle(Color.burrowFailure.opacity(0.9))
+                    .foregroundStyle(failureStatusColor)
                     .lineLimit(1)
                     .truncationMode(.tail)
             } else {
                 routeWithSSHSuffix
             }
         }
+    }
+
+    /// A settled reconnect loop is expected behavior (VPN off, host asleep) —
+    /// the row states it calmly. Red is reserved for a tunnel that STOPPED
+    /// (gave up / was stopped while failed); early attempts get orange as a
+    /// "something just changed" cue.
+    private var failureStatusColor: Color {
+        guard tunnel.isRunning else {
+            return Color.burrowFailure.opacity(0.9)
+        }
+        return tunnel.retryAttempt >= 3
+            ? Color.secondary.opacity(0.85)
+            : Color.orange.opacity(0.9)
     }
 
     private func shouldShowFailureStatus(at date: Date) -> Bool {
@@ -5697,18 +5768,17 @@ struct TunnelRow: View {
     private func failureStatusText(at date: Date) -> String {
         let category = failurePresentation?.category ?? "failed"
 
+        // Settled loop: a calm, STATIC line — no per-second countdown, no
+        // attempt counter. The text changes at most once a minute (the
+        // duration unit), so the row stops flickering and shifting width.
+        if tunnel.isRunning, tunnel.retryAttempt >= 3 {
+            let down = tunnel.downSince.map { " · down \(Self.coarseDuration(since: $0, at: date))" } ?? ""
+            return "\(category)\(down) · retrying"
+        }
+
         if tunnel.isRunning, let nextRetryAt = tunnel.nextRetryAt {
             let remaining = max(0, Int(nextRetryAt.timeIntervalSince(date).rounded(.up)))
-            // A handful of attempts is a useful signal; "retry 7412" is just
-            // noise — from there, how long it's been down is what matters.
-            let attemptText: String
-            if let downSince = tunnel.downSince, tunnel.retryAttempt >= 10 {
-                attemptText = "down \(Self.compactDuration(since: downSince, at: date)) · retry"
-            } else if tunnel.retryAttempt > 1 {
-                attemptText = "retry \(tunnel.retryAttempt)"
-            } else {
-                attemptText = "retry"
-            }
+            let attemptText = tunnel.retryAttempt > 1 ? "retry \(tunnel.retryAttempt)" : "retry"
             return remaining > 0 ? "\(category) · \(attemptText) in \(remaining)s" : "\(category) · retrying now"
         }
         if tunnel.isRunning {
@@ -5719,11 +5789,12 @@ struct TunnelRow: View {
         return detail.lowercased() == category.lowercased() ? category : detail
     }
 
-    /// "45s", "12m", "3h", "2d" — the single most significant unit.
-    private static func compactDuration(since start: Date, at now: Date) -> String {
+    /// "<1m", "12m", "3h", "2d" — the single most significant unit, minutes at
+    /// finest so a settled row's text stays put instead of ticking.
+    private static func coarseDuration(since start: Date, at now: Date) -> String {
         let seconds = max(0, Int(now.timeIntervalSince(start)))
         switch seconds {
-        case ..<60: return "\(seconds)s"
+        case ..<60: return "<1m"
         case ..<3600: return "\(seconds / 60)m"
         case ..<86400: return "\(seconds / 3600)h"
         default: return "\(seconds / 86400)d"
