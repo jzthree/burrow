@@ -287,6 +287,10 @@ final class MenuBarViewModel: ObservableObject {
     /// (name → pid). Adopted tunnels have no supervisor task; the service
     /// probe loop watches the pid and restarts under supervision when it ends.
     private var adoptedTunnels: [String: pid_t] = [:]
+    /// Tunnels whose launch is in flight (gateway probes awaiting) — they have
+    /// no supervisor task yet, so this is the only thing standing between them
+    /// and a duplicate relaunch.
+    private var launchingTunnels: Set<String> = []
     /// Consecutive through-tunnel health-probe failures per gateway; a session
     /// is only declared dead after a couple in a row so a transient blip
     /// doesn't tear down a working VPN.
@@ -1003,7 +1007,7 @@ final class MenuBarViewModel: ObservableObject {
     }
 
     func startTunnel(named name: String, allowPasswordPrompt: Bool = true) {
-        guard tasks[name] == nil else {
+        guard tasks[name] == nil, !launchingTunnels.contains(name) else {
             updateState(for: name, isRunning: true, message: "Already running")
             return
         }
@@ -1041,7 +1045,7 @@ final class MenuBarViewModel: ObservableObject {
         var launchCandidates: [TunnelState] = []
 
         for tunnel in selectedTunnels {
-            if tasks[tunnel.id] == nil && adoptedTunnels[tunnel.id] == nil {
+            if tasks[tunnel.id] == nil && adoptedTunnels[tunnel.id] == nil && !launchingTunnels.contains(tunnel.id) {
                 launchCandidates.append(tunnel)
             } else {
                 updateState(for: tunnel.id, isRunning: true, message: "Already running")
@@ -3162,6 +3166,16 @@ final class MenuBarViewModel: ObservableObject {
             updateState(for: prepared.name, isRunning: false, state: .failed, message: "Gateway '\(gatewayName)' is not defined in the config")
             return
         }
+        // Re-entrancy guard: the probes below await, and during that window
+        // tasks[name] is still nil, so the tunnel reads as "not running".
+        // markGatewayConnected (fired when a sibling's launch adopts the
+        // gateway) would then relaunch it — two dependents can ping-pong
+        // restart each other forever, each new launch's reclaim killing the
+        // other's half-started ssh.
+        guard !launchingTunnels.contains(prepared.name) else {
+            return
+        }
+        launchingTunnels.insert(prepared.name)
 
         let socksPort = gatewayConfig.socksPort
         // For a jump tunnel the gateway only ever dials the FIRST HOP — the
@@ -3175,6 +3189,9 @@ final class MenuBarViewModel: ObservableObject {
         updateState(for: prepared.name, isRunning: false, state: .connecting, message: "Waiting for gateway \(gatewayName)")
         Task { @MainActor [weak self] in
             guard let self else { return }
+            // Once the supervisor task is registered (launchPreparedTunnel) or
+            // the launch is abandoned, tasks[name]/state guards take over.
+            defer { self.launchingTunnels.remove(prepared.name) }
             // A live warm master for the jump alias means ssh will reuse its
             // socket and never dial at all — no point holding the launch for
             // gateway readiness (the master may predate the VPN going down).
@@ -3307,6 +3324,7 @@ final class MenuBarViewModel: ObservableObject {
             $0.tunnel.gateway == name
                 && $0.isConfiguredEnabled
                 && !$0.isRunning
+                && !launchingTunnels.contains($0.id)
                 && $0.connectionState != .disconnected
         }
         for dependent in dependents {
