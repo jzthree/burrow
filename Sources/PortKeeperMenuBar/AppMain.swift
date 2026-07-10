@@ -62,6 +62,11 @@ final class MenuBarViewModel: ObservableObject {
         /// Start of the current reconnect loop — "down since", shown in place
         /// of unbounded retry counts.
         var downSince: Date? = nil
+        /// Classifier signature of the last exit, and how many consecutive
+        /// exits shared it. At 3+ the outage is "settled": the row holds a
+        /// steady red "down X" instead of narrating every attempt.
+        var lastFailureSignature: String? = nil
+        var sameFailureStreak: Int = 0
         var serviceReachable: ForwardProbe.Result = .unknown
     }
 
@@ -737,6 +742,8 @@ final class MenuBarViewModel: ObservableObject {
                     nextRetryAt: isRunning ? existingState?.nextRetryAt : nil,
                     failedAt: isRunning ? nil : existingState?.failedAt,
                     downSince: isRunning ? existingState?.downSince : nil,
+                    lastFailureSignature: isRunning ? (existingState?.lastFailureSignature) : nil,
+                    sameFailureStreak: isRunning ? (existingState?.sameFailureStreak ?? 0) : 0,
                     serviceReachable: isRunning ? (existingState?.serviceReachable ?? .unknown) : .unknown
                 )
             }
@@ -2881,6 +2888,27 @@ final class MenuBarViewModel: ObservableObject {
         return "\(base)-\(suffix)"
     }
 
+    /// Records a retry failure and reports whether the outage is "settled":
+    /// three or more consecutive exits with the same failure class. A settled
+    /// outage keeps retrying in the background but stops narrating — steady
+    /// red row, no per-attempt state flips, no footer messages — until it
+    /// succeeds (green) or starts failing for a NEW reason (worth attention).
+    fileprivate func registerRetryFailure(for name: String, message: String) -> Bool {
+        guard let index = tunnels.firstIndex(where: { $0.id == name }) else { return false }
+        let signature = TunnelFailureClassifier.signature(forMessage: message)
+        if tunnels[index].lastFailureSignature == signature {
+            tunnels[index].sameFailureStreak += 1
+        } else {
+            tunnels[index].lastFailureSignature = signature
+            tunnels[index].sameFailureStreak = 1
+        }
+        return tunnels[index].sameFailureStreak >= 3
+    }
+
+    fileprivate func isInSettledOutage(_ name: String) -> Bool {
+        tunnels.first(where: { $0.id == name }).map { $0.sameFailureStreak >= 3 } ?? false
+    }
+
     fileprivate func scheduleRetryIndicator(for name: String) {
         guard let index = tunnels.firstIndex(where: { $0.id == name }) else {
             return
@@ -2903,6 +2931,8 @@ final class MenuBarViewModel: ObservableObject {
         if resetAttempt {
             tunnels[index].retryAttempt = 0
             tunnels[index].downSince = nil
+            tunnels[index].lastFailureSignature = nil
+            tunnels[index].sameFailureStreak = 0
         }
     }
 
@@ -3805,7 +3835,12 @@ final class TunnelEventBridge: @unchecked Sendable {
             switch event {
             case .starting:
                 self.owner?.clearRetryIndicator(for: self.tunnelName, resetAttempt: false)
-                self.owner?.updateState(for: self.tunnelName, isRunning: true, state: .connecting, message: "Connecting")
+                // In a settled outage the row holds steady red — flipping to
+                // orange "Connecting" every 5s is the yellow/red flicker the
+                // menu doesn't need. Success below still turns it green.
+                if self.owner?.isInSettledOutage(self.tunnelName) != true {
+                    self.owner?.updateState(for: self.tunnelName, isRunning: true, state: .connecting, message: "Connecting")
+                }
             case .connected:
                 self.owner?.persistPasswordIfNeeded(for: self.tunnelName)
                 self.owner?.resetAuthRePromptCount(for: self.tunnelName)
@@ -3817,13 +3852,19 @@ final class TunnelEventBridge: @unchecked Sendable {
                 self.owner?.globalMessage = "\(self.tunnelName): authentication failed. \(message)"
             case .exited(let code, let diagnostic):
                 let message = diagnostic.map { "ssh exited \(code): \($0); retrying" } ?? "ssh exited \(code); retrying"
+                let settled = self.owner?.registerRetryFailure(for: self.tunnelName, message: message) ?? false
                 self.owner?.scheduleRetryIndicator(for: self.tunnelName)
                 self.owner?.updateState(for: self.tunnelName, isRunning: true, state: .failed, message: message)
-                self.owner?.globalMessage = diagnostic.map { "\(self.tunnelName): \($0). Retrying." } ?? "\(self.tunnelName): ssh exited with code \(code). Retrying."
+                if !settled {
+                    self.owner?.globalMessage = diagnostic.map { "\(self.tunnelName): \($0). Retrying." } ?? "\(self.tunnelName): ssh exited with code \(code). Retrying."
+                }
             case .failedToStart(let message):
+                let settled = self.owner?.registerRetryFailure(for: self.tunnelName, message: message) ?? false
                 self.owner?.scheduleRetryIndicator(for: self.tunnelName)
                 self.owner?.updateState(for: self.tunnelName, isRunning: true, state: .failed, message: "Connect failed; retrying: \(message)")
-                self.owner?.globalMessage = "\(self.tunnelName): \(message). Retrying."
+                if !settled {
+                    self.owner?.globalMessage = "\(self.tunnelName): \(message). Retrying."
+                }
             case .log:
                 break
             }
@@ -5770,16 +5811,16 @@ struct TunnelRow: View {
         }
     }
 
-    /// A settled reconnect loop is expected behavior (VPN off, host asleep) —
-    /// the row states it calmly. Red is reserved for a tunnel that STOPPED
-    /// (gave up / was stopped while failed); early attempts get orange as a
-    /// "something just changed" cue.
+    /// Early attempts get orange as a "something just changed" cue; a settled
+    /// outage (same failure class 3+ times) holds steady red — one calm,
+    /// unblinking "it's down, since X, still trying" — and a stopped tunnel
+    /// is red too.
     private var failureStatusColor: Color {
         guard tunnel.isRunning else {
             return Color.burrowFailure.opacity(0.9)
         }
-        return tunnel.retryAttempt >= 3
-            ? Color.secondary.opacity(0.85)
+        return tunnel.sameFailureStreak >= 3
+            ? Color.burrowFailure.opacity(0.85)
             : Color.orange.opacity(0.9)
     }
 
@@ -5796,10 +5837,10 @@ struct TunnelRow: View {
     private func failureStatusText(at date: Date) -> String {
         let category = failurePresentation?.category ?? "failed"
 
-        // Settled loop: a calm, STATIC line — no per-second countdown, no
-        // attempt counter. The text changes at most once a minute (the
-        // duration unit), so the row stops flickering and shifting width.
-        if tunnel.isRunning, tunnel.retryAttempt >= 3 {
+        // Settled outage: a STATIC line — no per-second countdown, no attempt
+        // counter. The text changes at most once a minute (the duration
+        // unit), so the row stops flickering and shifting width.
+        if tunnel.isRunning, tunnel.sameFailureStreak >= 3 {
             let down = tunnel.downSince.map { " · down \(Self.coarseDuration(since: $0, at: date))" } ?? ""
             return "\(category)\(down) · retrying"
         }
@@ -6388,6 +6429,23 @@ private struct TunnelFailurePresentation {
 }
 
 private enum TunnelFailureClassifier {
+    /// Coarse failure class for "is it still failing for the SAME reason?" —
+    /// drives the settled-outage hold. Deliberately coarser than
+    /// presentation(for:): two timeouts with different wording are the same
+    /// outage; an auth failure after network failures is news.
+    static func signature(forMessage message: String) -> String {
+        let lowered = message.lowercased()
+        let classes: [(key: String, patterns: [String])] = [
+            ("auth", ["authentication failed", "permission denied", "incorrect password", "invalid password", "access denied"]),
+            ("remote-port", ["remote port forwarding failed"]),
+            ("local-port", ["address already in use", "cannot listen to port", "could not request local forwarding"]),
+            ("dns", ["could not resolve hostname", "nodename nor servname", "temporary failure in name resolution"]),
+            ("network", ["operation timed out", "connection timed out", "network is unreachable", "no route to host", "connection refused", "connection closed", "connection reset", "broken pipe"]),
+            ("hostkey", ["host key verification failed", "remote host identification has changed"]),
+        ]
+        return classes.first { containsAny(lowered, $0.patterns) }?.key ?? "other"
+    }
+
     static func presentation(for tunnel: MenuBarViewModel.TunnelState) -> TunnelFailurePresentation? {
         guard case .failed = tunnel.connectionState else {
             return nil
