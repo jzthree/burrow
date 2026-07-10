@@ -5798,7 +5798,11 @@ struct TunnelRow: View {
 
     private var failureStatusView: some View {
         TimelineView(.periodic(from: .now, by: 1)) { context in
-            if shouldShowFailureStatus(at: context.date) {
+            // A settled outage reads like a normal row: the route line stays,
+            // and the red dot + red (!) carry the "down" signal — the message
+            // and down-duration live in the (!) popover for whoever wants
+            // them. Only fresh/changing failures narrate inline.
+            if shouldShowFailureStatus(at: context.date), !(tunnel.isRunning && tunnel.sameFailureStreak >= 3) {
                 Text(verbatim: failureStatusText(at: context.date))
                     .font(.system(size: 11.2, weight: .medium, design: .monospaced))
                     .monospacedDigit()
@@ -6314,6 +6318,17 @@ private struct TunnelDetailsPopover: View {
                     Text(failurePresentation.codeLine)
                         .font(.system(size: 10.5, weight: .semibold, design: .monospaced))
                         .foregroundStyle(failurePresentation.color)
+                    if let downSince = tunnel.downSince {
+                        // The row shows a plain route during a settled outage;
+                        // this is where the outage details live.
+                        (Text(verbatim: "Down since ")
+                            + Text(downSince, style: .time)
+                            + Text(verbatim: " (")
+                            + Text(downSince, style: .relative)
+                            + Text(verbatim: ") — still retrying."))
+                            .font(.system(size: 10.5, weight: .medium))
+                            .foregroundStyle(failurePresentation.color)
+                    }
                     Text(failurePresentation.hintLine)
                         .font(.system(size: 10.5))
                         .foregroundStyle(.secondary)
