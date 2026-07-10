@@ -899,3 +899,67 @@ private func runBurrow(_ arguments: [String], configURL: URL) throws -> CLIResul
     #expect(!BurrowVersion.isNewer("1.1.0", than: "v1.0.0-3-gabc1234"))
     #expect(!BurrowVersion.isNewer("", than: "1.0.0"))
 }
+
+// MARK: - Folders (FUSE-T sshfs)
+
+@Test func folderConfigDefaultsAndArguments() async throws {
+    let folder = FolderConfig(name: "vista-home", host: "vista")
+    #expect(folder.effectiveLocalPath.hasSuffix("/mnt/vista-home"))
+
+    let args = FolderSupport.buildArguments(for: folder)
+    #expect(args.first == "vista:")
+    #expect(args.contains("volname=vista-home"))
+    #expect(args.contains("BatchMode=yes"))         // mounts never hang on a prompt
+    #expect(args.contains("reconnect"))
+    #expect(!args.joined().contains("ssh_command")) // no jump -> no override
+
+    // Jump host rides ssh_command (FUSE-T sshfs rejects -o ProxyJump).
+    let jumped = FolderConfig(name: "cri", host: "cri22in001", user: "jianzhou", remotePath: "/gpfs/data", jumpHost: "randi")
+    let jumpArgs = FolderSupport.buildArguments(for: jumped)
+    #expect(jumpArgs.first == "jianzhou@cri22in001:/gpfs/data")
+    #expect(jumpArgs.contains("ssh_command=ssh -J randi"))
+}
+
+@Test func folderConfigSurvivesConfigRoundTrip() async throws {
+    let tempDirectory = FileManager.default.temporaryDirectory
+        .appendingPathComponent(UUID().uuidString, isDirectory: true)
+    try FileManager.default.createDirectory(at: tempDirectory, withIntermediateDirectories: true)
+    let store = ConfigStore(configURL: tempDirectory.appendingPathComponent("config.json"))
+    _ = try store.ensureExists()
+
+    try store.mutate {
+        $0.folders = [FolderConfig(name: "data", host: "cri22in001", remotePath: "/gpfs/data", jumpHost: "randi")]
+    }
+    let reloaded = try store.load().folders
+    #expect(reloaded.count == 1)
+    #expect(reloaded[0].jumpHost == "randi")
+    #expect(reloaded[0].remotePath == "/gpfs/data")
+
+    // Legacy config without the field decodes to empty.
+    #expect(try JSONDecoder().decode(AppConfig.self, from: Data(#"{"version":1}"#.utf8)).folders.isEmpty)
+}
+
+@Test func cliFoldersLifecycleSmokeTest() async throws {
+    let tempDirectory = FileManager.default.temporaryDirectory
+        .appendingPathComponent(UUID().uuidString, isDirectory: true)
+    try FileManager.default.createDirectory(at: tempDirectory, withIntermediateDirectories: true)
+    let configURL = tempDirectory.appendingPathComponent("config.json")
+    _ = try runBurrow(["init"], configURL: configURL)
+
+    let add = try runBurrow(["folders", "add", "--name", "data", "--host", "h1", "--remote", "/srv/data", "--jump", "hop"], configURL: configURL)
+    #expect(add.exitCode == 0)
+
+    let list = try runBurrow(["folders", "list"], configURL: configURL)
+    #expect(list.stdout.contains("data"))
+    #expect(list.stdout.contains("h1:/srv/data"))
+
+    let json = try runBurrow(["folders", "list", "--json"], configURL: configURL)
+    #expect(json.stdout.contains("\"jump\" : \"hop\""))
+    #expect(json.stdout.contains("\"mounted\" : false"))
+
+    let remove = try runBurrow(["folders", "remove", "data"], configURL: configURL)
+    #expect(remove.exitCode == 0)
+    let missing = try runBurrow(["folders", "mount", "data"], configURL: configURL)
+    #expect(missing.exitCode == 1)
+    #expect(missing.stderr.contains("not found"))
+}

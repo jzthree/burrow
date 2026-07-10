@@ -511,6 +511,8 @@ final class MenuBarViewModel: ObservableObject {
             }
         }
 
+        refreshFolderMounts()
+
         await probeGatewayHealth()
         await refreshWarmStatus()
 
@@ -669,6 +671,16 @@ final class MenuBarViewModel: ObservableObject {
             keepWarmHosts = Set(config.keepWarmHosts)
             isApplyingKeepWarmFromConfig = false
             sshHostOrder = config.sshHostOrder
+            let existingFolders = Dictionary(uniqueKeysWithValues: folders.map { ($0.id, $0) })
+            folders = config.folders.map { folderConfig in
+                var state = existingFolders[folderConfig.name] ?? FolderState(
+                    id: folderConfig.name,
+                    config: folderConfig,
+                    isMounted: FolderSupport.isMounted(folderConfig)
+                )
+                state.config = folderConfig
+                return state
+            }
             let running = Set(tasks.keys).union(adoptedTunnels.keys)
             let existingStatesByName = Dictionary(uniqueKeysWithValues: tunnels.map { ($0.id, $0) })
             tunnels = config.tunnels.map { tunnel in
@@ -1398,6 +1410,124 @@ final class MenuBarViewModel: ObservableObject {
     /// Hidden hosts that still exist in the config, for the "unhide" menu.
     var hiddenSSHHostEntries: [SSHConfigHost] {
         sshConfigHosts.filter { hiddenSSHHosts.contains($0.alias) }
+    }
+
+    // MARK: - Folders (FUSE-T sshfs mounts)
+
+    struct FolderState: Identifiable, Equatable {
+        let id: String
+        var config: FolderConfig
+        var isMounted: Bool
+        var isBusy: Bool = false
+        var lastMessage: String = ""
+        var lastMessageIsError: Bool = false
+    }
+
+    @Published private(set) var folders: [FolderState] = []
+
+    func mountFolder(named name: String) {
+        guard let index = folders.firstIndex(where: { $0.id == name }) else { return }
+        guard let sshfs = FolderSupport.sshfsPath() else {
+            folders[index].lastMessage = "FUSE-T sshfs not installed"
+            folders[index].lastMessageIsError = true
+            globalMessage = "Folders need FUSE-T (no restart): brew install --cask macos-fuse-t/homebrew-cask/fuse-t macos-fuse-t/homebrew-cask/fuse-t-sshfs"
+            return
+        }
+        let folder = folders[index].config
+        folders[index].isBusy = true
+        folders[index].lastMessage = "Mounting…"
+        folders[index].lastMessageIsError = false
+        globalMessage = "Mounting \(name)…"
+        Task { @MainActor [weak self] in
+            let result = await Task.detached { FolderSupport.mount(folder, executablePath: sshfs) }.value
+            guard let self, let idx = self.folders.firstIndex(where: { $0.id == name }) else { return }
+            self.folders[idx].isBusy = false
+            self.folders[idx].isMounted = result.succeeded
+            if result.succeeded {
+                self.folders[idx].lastMessage = "Mounted at \(folder.effectiveLocalPath)."
+                self.globalMessage = "Mounted \(name)."
+            } else {
+                var message = result.output.split(whereSeparator: \.isNewline).last.map(String.init) ?? "sshfs failed"
+                if message.lowercased().contains("permission denied") {
+                    // Mounts are deliberately non-interactive (BatchMode): the
+                    // fix is a warm master, which also makes them instant.
+                    message = "Sign in first: warm \(folder.host) (🔥), then mount."
+                }
+                self.folders[idx].lastMessage = message
+                self.folders[idx].lastMessageIsError = true
+                self.globalMessage = "Couldn't mount \(name)."
+            }
+        }
+    }
+
+    func unmountFolder(named name: String) {
+        guard let index = folders.firstIndex(where: { $0.id == name }) else { return }
+        let folder = folders[index].config
+        folders[index].isBusy = true
+        Task { @MainActor [weak self] in
+            let unmounted = await Task.detached { FolderSupport.unmount(folder) }.value
+            guard let self, let idx = self.folders.firstIndex(where: { $0.id == name }) else { return }
+            self.folders[idx].isBusy = false
+            self.folders[idx].isMounted = !unmounted
+            if unmounted {
+                self.folders[idx].lastMessage = "Unmounted."
+                self.folders[idx].lastMessageIsError = false
+                self.globalMessage = "Unmounted \(name)."
+            } else {
+                self.folders[idx].lastMessage = "Still in use — close whatever has it open."
+                self.folders[idx].lastMessageIsError = true
+                self.globalMessage = "Couldn't unmount \(name)."
+            }
+        }
+    }
+
+    func toggleFolder(named name: String) {
+        guard let folder = folders.first(where: { $0.id == name }), !folder.isBusy else { return }
+        folder.isMounted ? unmountFolder(named: name) : mountFolder(named: name)
+    }
+
+    func revealFolder(named name: String) {
+        guard let folder = folders.first(where: { $0.id == name }) else { return }
+        NSWorkspace.shared.open(URL(fileURLWithPath: folder.config.effectiveLocalPath, isDirectory: true))
+    }
+
+    func removeFolder(named name: String) {
+        guard let folder = folders.first(where: { $0.id == name }) else { return }
+        let config = folder.config
+        Task { @MainActor [weak self] in
+            _ = await Task.detached { FolderSupport.unmount(config) }.value
+            guard let self else { return }
+            try? self.store.mutate { $0.folders.removeAll { $0.name == name } }
+            self.loadConfig()
+            self.globalMessage = "Removed folder \(name)."
+        }
+    }
+
+    func createFolder() {
+        guard let entry = FolderPrompt.request(knownHosts: sshConfigHosts.map(\.alias)) else { return }
+        do {
+            try store.mutate { config in
+                config.folders.removeAll { $0.name == entry.name }
+                config.folders.append(entry)
+            }
+            loadConfig()
+            globalMessage = "Saved folder \(entry.name) — mount it from the Folders section."
+        } catch {
+            globalMessage = "Couldn't save folder: \(error.localizedDescription)"
+        }
+    }
+
+    /// Refreshes mount states from the kernel mount table; flags mounts that
+    /// dropped underneath us (network change, server reboot).
+    fileprivate func refreshFolderMounts() {
+        for index in folders.indices {
+            let observed = FolderSupport.isMounted(folders[index].config)
+            if folders[index].isMounted, !observed, !folders[index].isBusy {
+                folders[index].lastMessage = "Mount dropped — remount when the host is reachable."
+                folders[index].lastMessageIsError = true
+            }
+            folders[index].isMounted = observed
+        }
     }
 
     func hideSSHHost(alias: String) {
@@ -3676,6 +3806,9 @@ struct MenuBarContent: View {
                             if !viewModel.sshConfigHosts.isEmpty {
                                 hostsSection
                             }
+                            if !viewModel.folders.isEmpty {
+                                foldersSection
+                            }
                         }
                         .padding(.horizontal, 12)
                         .padding(.vertical, 10)
@@ -3740,10 +3873,19 @@ struct MenuBarContent: View {
             hostsHeight = 32 // collapsed or all-hidden: header only
         }
 
+        let foldersHeight: CGFloat
+        if viewModel.folders.isEmpty {
+            foldersHeight = 0
+        } else if viewModel.isSectionExpanded("folders", defaultExpanded: true) {
+            foldersHeight = 32 + CGFloat(viewModel.folders.count) * 48 + CGFloat(max(viewModel.folders.count - 1, 0)) + 10
+        } else {
+            foldersHeight = 32
+        }
+
         // Footer is a single row now.
         let headerAndFooterChrome: CGFloat = 134
         let emptyStateHeight: CGFloat = viewModel.tunnels.isEmpty ? 70 : 0
-        return headerAndFooterChrome + profileChipsHeight + gatewaysHeight + listHeight + hostsHeight + emptyStateHeight
+        return headerAndFooterChrome + profileChipsHeight + gatewaysHeight + listHeight + hostsHeight + foldersHeight + emptyStateHeight
     }
 
     private var header: some View {
@@ -3893,6 +4035,11 @@ struct MenuBarContent: View {
                     viewModel.createSSHHost()
                 } label: {
                     Label("New SSH Host…", systemImage: "terminal")
+                }
+                Button {
+                    viewModel.createFolder()
+                } label: {
+                    Label("New Mounted Folder…", systemImage: "folder.badge.plus")
                 }
                 Button {
                     viewModel.createProfile()
@@ -4128,6 +4275,78 @@ struct MenuBarContent: View {
         }
     }
 
+    private var foldersSection: some View {
+        let expanded = viewModel.isSectionExpanded("folders", defaultExpanded: true)
+        return VStack(alignment: .leading, spacing: 5) {
+            HStack(spacing: 8) {
+                Button {
+                    viewModel.toggleSection("folders")
+                } label: {
+                    HStack(spacing: 8) {
+                        Image(systemName: "chevron.right")
+                            .font(.system(size: 9, weight: .bold))
+                            .foregroundStyle(.secondary.opacity(0.6))
+                            .rotationEffect(.degrees(expanded ? 90 : 0))
+                            .frame(width: 14, height: 17)
+                        Text(verbatim: "Folders")
+                            .font(.system(size: 10, weight: .bold))
+                            .tracking(0.15)
+                            .foregroundStyle(Color.secondary.opacity(0.62))
+                        Text(verbatim: "\(viewModel.folders.filter(\.isMounted).count)/\(viewModel.folders.count) mounted")
+                            .font(.system(size: 9))
+                            .foregroundStyle(Color.secondary.opacity(0.45))
+                    }
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                Spacer(minLength: 4)
+                Button {
+                    viewModel.createFolder()
+                } label: {
+                    Image(systemName: "plus")
+                        .font(.system(size: 9, weight: .bold))
+                        .foregroundStyle(.secondary.opacity(0.7))
+                        .frame(width: 17, height: 17)
+                        .background(
+                            RoundedRectangle(cornerRadius: 6, style: .continuous)
+                                .fill(Color.secondary.opacity(0.055))
+                        )
+                }
+                .buttonStyle(.plain)
+                .help("Mount a remote directory over SSH")
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 1)
+
+            if expanded {
+                VStack(alignment: .leading, spacing: 0) {
+                    ForEach(Array(viewModel.folders.enumerated()), id: \.element.id) { index, folder in
+                        if index > 0 {
+                            Divider()
+                                .opacity(0.34)
+                                .padding(.leading, 42)
+                        }
+                        FolderRow(
+                            folder: folder,
+                            onToggleMount: { viewModel.toggleFolder(named: folder.id) },
+                            onReveal: { viewModel.revealFolder(named: folder.id) },
+                            onRemove: { viewModel.removeFolder(named: folder.id) }
+                        )
+                    }
+                }
+                .background(
+                    RoundedRectangle(cornerRadius: 16, style: .continuous)
+                        .fill(Color(nsColor: .controlBackgroundColor).opacity(0.54))
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: 16, style: .continuous)
+                        .stroke(Color.primary.opacity(0.06), lineWidth: 1)
+                )
+                .shadow(color: Color.black.opacity(0.045), radius: 6, x: 0, y: 3)
+            }
+        }
+    }
+
     private var importCandidatesBinding: Binding<[SSHConfigImportCandidate]> {
         Binding(
             get: { viewModel.importCandidates ?? [] },
@@ -4214,6 +4433,113 @@ private struct WarmStatusButton: View {
 
 /// A plain ssh login target from ~/.ssh/config — no forwards, no supervision.
 /// Whole-row click opens the session; the menu also offers copy.
+private struct FolderRow: View {
+    let folder: MenuBarViewModel.FolderState
+    let onToggleMount: () -> Void
+    let onReveal: () -> Void
+    let onRemove: () -> Void
+    @State private var hovering = false
+    @State private var breathing = false
+
+    private var subtitle: String {
+        let remote = folder.config.remotePath.isEmpty ? "~" : folder.config.remotePath
+        let jump = folder.config.jumpHost.map { " via \($0)" } ?? ""
+        return "\(folder.config.host):\(remote)\(jump)"
+    }
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Image(systemName: folder.isMounted ? "folder.fill.badge.gearshape" : "folder")
+                .font(.system(size: 12.5))
+                .foregroundStyle(folder.isMounted ? Color.burrowAccent : .secondary.opacity(0.8))
+                .frame(width: 24, height: 24)
+                .background(
+                    RoundedRectangle(cornerRadius: 7, style: .continuous)
+                        .fill((folder.isMounted ? Color.burrowAccent : .secondary).opacity(0.07))
+                )
+            VStack(alignment: .leading, spacing: 1) {
+                Text(folder.config.name)
+                    .font(.system(size: 13, weight: .semibold))
+                    .lineLimit(1)
+                if folder.isBusy {
+                    HStack(spacing: 5) {
+                        Circle()
+                            .fill(Color.orange)
+                            .frame(width: 6, height: 6)
+                            .opacity(breathing ? 1 : 0.25)
+                        Text(verbatim: folder.lastMessage.isEmpty ? "working…" : folder.lastMessage)
+                            .font(.system(size: 10, weight: .medium, design: .monospaced))
+                            .foregroundStyle(.secondary)
+                    }
+                } else if folder.lastMessageIsError {
+                    Text(folder.lastMessage)
+                        .font(.system(size: 10, weight: .medium, design: .monospaced))
+                        .foregroundStyle(Color.burrowFailure.opacity(0.9))
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                } else {
+                    Text(subtitle)
+                        .font(.system(size: 10, design: .monospaced))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                }
+            }
+            Spacer(minLength: 6)
+
+            if folder.isMounted {
+                Button(action: onReveal) {
+                    Image(systemName: "arrow.up.forward.square")
+                        .font(.system(size: 11.5))
+                        .foregroundStyle(.secondary.opacity(0.7))
+                        .frame(width: 24, height: 26)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .help("Reveal in Finder")
+            }
+
+            Button(action: onToggleMount) {
+                Image(systemName: folder.isMounted ? "eject.fill" : "externaldrive.badge.plus")
+                    .font(.system(size: 12))
+                    .foregroundStyle(folder.isMounted ? Color.burrowAccent.opacity(0.85) : .secondary.opacity(0.8))
+                    .frame(width: 26, height: 26)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .disabled(folder.isBusy)
+            .help(folder.isMounted ? "Unmount" : "Mount")
+
+            Menu {
+                Button(folder.isMounted ? "Unmount" : "Mount", action: onToggleMount)
+                if folder.isMounted {
+                    Button("Reveal in Finder", action: onReveal)
+                }
+                Divider()
+                Button("Remove Folder", role: .destructive, action: onRemove)
+            } label: {
+                Image(systemName: "ellipsis")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(.secondary.opacity(0.7))
+                    .frame(width: 22, height: 26)
+                    .contentShape(Rectangle())
+            }
+            .menuStyle(.borderlessButton)
+            .menuIndicator(.hidden)
+            .fixedSize()
+        }
+        .padding(.horizontal, 12)
+        .frame(height: 48)
+        .contentShape(Rectangle())
+        .onHover { hovering = $0 }
+        .onAppear {
+            withAnimation(.easeInOut(duration: 0.8).repeatForever(autoreverses: true)) {
+                breathing = true
+            }
+        }
+    }
+}
+
 private struct SSHHostRow: View {
     let host: SSHConfigHost
     let isWarm: Bool

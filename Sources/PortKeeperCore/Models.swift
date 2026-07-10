@@ -18,6 +18,8 @@ public struct AppConfig: Codable, Sendable {
     /// User's preferred display order for ~/.ssh/config hosts (aliases). Hosts
     /// not listed fall back to file order after the listed ones.
     public var sshHostOrder: [String]
+    /// Remote directories mounted locally over SSH (FUSE-T sshfs).
+    public var folders: [FolderConfig]
 
     public init(
         version: Int = 1,
@@ -28,7 +30,8 @@ public struct AppConfig: Codable, Sendable {
         terminalApp: String = "auto",
         twoFactorUnlockCacheSeconds: Int = 0,
         keepWarmHosts: [String] = [],
-        sshHostOrder: [String] = []
+        sshHostOrder: [String] = [],
+        folders: [FolderConfig] = []
     ) {
         self.version = version
         self.tunnels = tunnels
@@ -39,6 +42,7 @@ public struct AppConfig: Codable, Sendable {
         self.twoFactorUnlockCacheSeconds = twoFactorUnlockCacheSeconds
         self.keepWarmHosts = keepWarmHosts
         self.sshHostOrder = sshHostOrder
+        self.folders = folders
     }
 
     public init(from decoder: Decoder) throws {
@@ -52,6 +56,7 @@ public struct AppConfig: Codable, Sendable {
         self.twoFactorUnlockCacheSeconds = try container.decodeIfPresent(Int.self, forKey: .twoFactorUnlockCacheSeconds) ?? 0
         self.keepWarmHosts = try container.decodeIfPresent([String].self, forKey: .keepWarmHosts) ?? []
         self.sshHostOrder = try container.decodeIfPresent([String].self, forKey: .sshHostOrder) ?? []
+        self.folders = try container.decodeIfPresent([FolderConfig].self, forKey: .folders) ?? []
     }
 }
 
@@ -100,6 +105,62 @@ public struct TwoFactorAccount: Codable, Sendable, Identifiable, Equatable {
         self.algorithm = try container.decodeIfPresent(String.self, forKey: .algorithm) ?? "sha1"
         self.sshHost = try container.decodeIfPresent(String.self, forKey: .sshHost)
         self.strategy = try container.decodeIfPresent(String.self, forKey: .strategy) ?? "codeOnly"
+    }
+}
+
+/// A remote directory mounted locally over SSH (FUSE-T sshfs). Rides the same
+/// ssh config as everything else, so a warm ControlMaster makes mounts
+/// instant and prompt-free.
+public struct FolderConfig: Codable, Sendable, Identifiable, Equatable {
+    public var id: String { name }
+    public var name: String
+    /// ssh destination: an ~/.ssh/config alias or host name.
+    public var host: String
+    public var user: String?
+    /// Remote directory; empty means the login home.
+    public var remotePath: String
+    /// Local mountpoint; empty means ~/mnt/<name>.
+    public var localPath: String
+    /// Optional jump host (FUSE-T's sshfs needs it via ssh_command).
+    public var jumpHost: String?
+    public var extraOptions: [String]
+
+    public init(
+        name: String,
+        host: String,
+        user: String? = nil,
+        remotePath: String = "",
+        localPath: String = "",
+        jumpHost: String? = nil,
+        extraOptions: [String] = []
+    ) {
+        self.name = name
+        self.host = host
+        self.user = user
+        self.remotePath = remotePath
+        self.localPath = localPath
+        self.jumpHost = jumpHost
+        self.extraOptions = extraOptions
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.name = try container.decode(String.self, forKey: .name)
+        self.host = try container.decode(String.self, forKey: .host)
+        self.user = try container.decodeIfPresent(String.self, forKey: .user)
+        self.remotePath = try container.decodeIfPresent(String.self, forKey: .remotePath) ?? ""
+        self.localPath = try container.decodeIfPresent(String.self, forKey: .localPath) ?? ""
+        self.jumpHost = try container.decodeIfPresent(String.self, forKey: .jumpHost)
+        self.extraOptions = try container.decodeIfPresent([String].self, forKey: .extraOptions) ?? []
+    }
+
+    /// The effective local mountpoint (~/mnt/<name> when unset).
+    public var effectiveLocalPath: String {
+        let trimmed = localPath.trimmingCharacters(in: .whitespaces)
+        if trimmed.isEmpty {
+            return NSString(string: "~/mnt/\(name)").expandingTildeInPath
+        }
+        return NSString(string: trimmed).expandingTildeInPath
     }
 }
 

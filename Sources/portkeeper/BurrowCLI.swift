@@ -68,6 +68,8 @@ struct CLI {
             try reclaimRemotePort(arguments: Array(arguments.dropFirst()))
         case "profile", "profiles":
             try await profileCommand(Array(arguments.dropFirst()))
+        case "folder", "folders":
+            try foldersCommand(Array(arguments.dropFirst()))
         case "hosts", "host":
             try hostsCommand(Array(arguments.dropFirst()))
         case "gateway", "gateways", "vpn":
@@ -491,6 +493,11 @@ struct CLI {
               profile edit NAME [--tunnel T]... [--gateway G]...
               profile remove NAME
               profile run NAME          (run the profile's tunnels; Ctrl-C to stop)
+
+            Folders (remote dirs mounted locally via FUSE-T sshfs):
+              folders list [--json]
+              folders add --name NAME --host HOST [--user U] [--remote PATH] [--local PATH] [--jump HOST]
+              folders mount NAME | unmount NAME | remove NAME
 
             SSH hosts (~/.ssh/config):
               hosts list [--json]

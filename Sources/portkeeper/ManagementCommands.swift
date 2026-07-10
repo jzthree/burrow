@@ -474,7 +474,149 @@ extension CLI {
         }
     }
 
+    // MARK: - folders (sshfs mounts)
+
+    func foldersCommand(_ arguments: [String]) throws {
+        let sub = arguments.first ?? "list"
+        let rest = Array(arguments.dropFirst())
+        switch sub {
+        case "list", "ls":
+            try listFolders(json: rest.contains("--json"))
+        case "add":
+            try addFolder(rest)
+        case "remove", "rm":
+            try removeFolder(rest)
+        case "mount":
+            try mountFolder(rest)
+        case "unmount", "umount", "eject":
+            try unmountFolder(rest)
+        case "help", "-h", "--help":
+            print(Self.foldersHelp)
+        default:
+            throw CLIError("unknown folders command '\(sub)'. Try: list, add, remove, mount, unmount")
+        }
+    }
+
+    private func listFolders(json: Bool) throws {
+        let config = try store.load()
+        if json {
+            struct Row: Encodable {
+                let name: String
+                let host: String
+                let remotePath: String
+                let localPath: String
+                let jump: String?
+                let mounted: Bool
+            }
+            try printJSON(config.folders.map {
+                Row(name: $0.name, host: $0.host, remotePath: $0.remotePath,
+                    localPath: $0.effectiveLocalPath, jump: $0.jumpHost,
+                    mounted: FolderSupport.isMounted($0))
+            })
+            return
+        }
+        guard !config.folders.isEmpty else {
+            print("No folders yet. Add one: burrow folders add --name NAME --host HOST [--remote PATH]")
+            return
+        }
+        for folder in config.folders {
+            let state = FolderSupport.isMounted(folder) ? "mounted" : "-"
+            let remote = folder.remotePath.isEmpty ? "~" : folder.remotePath
+            print("\(folder.name)\t\(state)\t\(folder.host):\(remote) -> \(folder.effectiveLocalPath)")
+        }
+    }
+
+    private func addFolder(_ rest: [String]) throws {
+        let parser = ArgumentParser(arguments: rest)
+        let name = try parser.requiredValue(for: "--name")
+        let host = try parser.requiredValue(for: "--host")
+        let folder = FolderConfig(
+            name: name,
+            host: host,
+            user: parser.value(for: "--user"),
+            remotePath: parser.value(for: "--remote") ?? "",
+            localPath: parser.value(for: "--local") ?? "",
+            jumpHost: parser.value(for: "--jump")
+        )
+        try store.mutate { config in
+            config.folders.removeAll { $0.name == name }
+            config.folders.append(folder)
+        }
+        print("Saved folder '\(name)' (\(host):\(folder.remotePath.isEmpty ? "~" : folder.remotePath) -> \(folder.effectiveLocalPath))")
+    }
+
+    private func removeFolder(_ rest: [String]) throws {
+        guard let name = rest.first(where: { !$0.hasPrefix("-") }) else {
+            throw CLIError("usage: burrow folders remove <name>")
+        }
+        let config = try store.load()
+        if let folder = config.folders.first(where: { $0.name == name }) {
+            FolderSupport.unmount(folder)
+        }
+        let removed = try store.mutate { config -> Bool in
+            let count = config.folders.count
+            config.folders.removeAll { $0.name == name }
+            return config.folders.count != count
+        }
+        guard removed else { throw CLIError("folder '\(name)' was not found") }
+        print("Removed folder '\(name)'.")
+    }
+
+    private func mountFolder(_ rest: [String]) throws {
+        guard let name = rest.first(where: { !$0.hasPrefix("-") }) else {
+            throw CLIError("usage: burrow folders mount <name>")
+        }
+        guard let folder = try store.load().folders.first(where: { $0.name == name }) else {
+            throw CLIError("folder '\(name)' was not found")
+        }
+        guard let sshfs = FolderSupport.sshfsPath() else {
+            throw CLIError("FUSE-T sshfs not found — install with: brew install --cask macos-fuse-t/homebrew-cask/fuse-t macos-fuse-t/homebrew-cask/fuse-t-sshfs")
+        }
+        if FolderSupport.isMounted(folder) {
+            print("'\(name)' is already mounted at \(folder.effectiveLocalPath).")
+            return
+        }
+        print("Mounting \(folder.host):\(folder.remotePath.isEmpty ? "~" : folder.remotePath)…")
+        let result = FolderSupport.mount(folder, executablePath: sshfs)
+        if result.succeeded {
+            print("Mounted at \(folder.effectiveLocalPath).")
+        } else {
+            let detail = result.output.isEmpty ? "sshfs failed" : result.output
+            if detail.lowercased().contains("permission denied") {
+                throw CLIError("\(detail)\nHint: mounts are non-interactive — warm the host first (burrow hosts warm \(folder.host)) so the mount rides the master.")
+            }
+            throw CLIError(detail)
+        }
+    }
+
+    private func unmountFolder(_ rest: [String]) throws {
+        guard let name = rest.first(where: { !$0.hasPrefix("-") }) else {
+            throw CLIError("usage: burrow folders unmount <name>")
+        }
+        guard let folder = try store.load().folders.first(where: { $0.name == name }) else {
+            throw CLIError("folder '\(name)' was not found")
+        }
+        if FolderSupport.unmount(folder) {
+            print("Unmounted '\(name)'.")
+        } else {
+            throw CLIError("couldn't unmount \(folder.effectiveLocalPath) — something is still using it.")
+        }
+    }
+
     // MARK: - help text
+
+    static let foldersHelp = """
+    burrow folders — remote directories mounted locally (FUSE-T sshfs)
+
+      list [--json]         folders and their mount state
+      add --name NAME --host HOST [--user U] [--remote PATH] [--local PATH] [--jump HOST]
+      remove NAME           unmounts, then deletes the entry
+      mount NAME            non-interactive: warm the host first for auth
+      unmount NAME
+
+    Requires FUSE-T (kextless, no restart):
+      brew install --cask macos-fuse-t/homebrew-cask/fuse-t macos-fuse-t/homebrew-cask/fuse-t-sshfs
+    """
 
     static let profileHelp = """
     burrow profile — named groups of tunnels + gateways
