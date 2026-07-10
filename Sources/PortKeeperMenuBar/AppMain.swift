@@ -4888,9 +4888,12 @@ private struct SSHHostRow: View {
                     .pickerStyle(.inline)
                     .labelsHidden()
                 } label: {
-                    Image(systemName: "network.badge.shield.half.filled")
+                    // Two clearly distinct states at a glance: accent = routed
+                    // via a VPN, steady gray = direct. (Not hover-dependent —
+                    // the faint version read as "missing", not "direct".)
+                    Image(systemName: linkedGateway != nil ? "network.badge.shield.half.filled" : "network")
                         .font(.system(size: 11))
-                        .foregroundStyle(linkedGateway != nil ? Color.burrowAccent.opacity(0.8) : .secondary.opacity(hovering ? 0.55 : 0.25))
+                        .foregroundStyle(linkedGateway != nil ? Color.burrowAccent.opacity(0.85) : .secondary.opacity(0.6))
                         .frame(width: 22, height: 26)
                         .contentShape(Rectangle())
                 }
