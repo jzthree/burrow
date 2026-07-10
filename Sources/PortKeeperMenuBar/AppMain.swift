@@ -519,7 +519,7 @@ final class MenuBarViewModel: ObservableObject {
             }
         }
 
-        refreshFolderMounts()
+        await refreshFolderMounts()
 
         await probeGatewayHealth()
         await refreshWarmStatus()
@@ -681,13 +681,19 @@ final class MenuBarViewModel: ObservableObject {
             sshHostOrder = config.sshHostOrder
             let existingFolders = Dictionary(uniqueKeysWithValues: folders.map { ($0.id, $0) })
             folders = config.folders.map { folderConfig in
+                // New entries start unmounted; the async refresh below fills in
+                // the truth. Checking here would put NFS statfs on the main
+                // thread (measured 15-35ms per mount — dropped frames).
                 var state = existingFolders[folderConfig.name] ?? FolderState(
                     id: folderConfig.name,
                     config: folderConfig,
-                    isMounted: FolderSupport.isMounted(folderConfig)
+                    isMounted: false
                 )
                 state.config = folderConfig
                 return state
+            }
+            Task { @MainActor [weak self] in
+                await self?.refreshFolderMounts()
             }
             let running = Set(tasks.keys).union(adoptedTunnels.keys)
             let existingStatesByName = Dictionary(uniqueKeysWithValues: tunnels.map { ($0.id, $0) })
@@ -1576,23 +1582,34 @@ final class MenuBarViewModel: ObservableObject {
 
     /// Refreshes mount states from the kernel mount table; flags mounts that
     /// dropped underneath us (network change, server reboot).
-    fileprivate func refreshFolderMounts() {
+    ///
+    /// statfs on an NFS (FUSE-T) mountpoint is a network round-trip — measured
+    /// 15-35ms per live mount, unbounded on a dead one — so the checks run off
+    /// the main thread. Doing them inline was enough to drop frames.
+    fileprivate func refreshFolderMounts() async {
+        let configs = folders.map(\.config)
+        guard !configs.isEmpty else { return }
+        let observed = await Task.detached {
+            Dictionary(uniqueKeysWithValues: configs.map { ($0.name, FolderSupport.isMounted($0)) })
+        }.value
         for index in folders.indices {
-            let observed = FolderSupport.isMounted(folders[index].config)
-            if folders[index].isMounted, !observed, !folders[index].isBusy {
+            guard let mounted = observed[folders[index].id] else { continue }
+            if folders[index].isMounted, !mounted, !folders[index].isBusy {
                 folders[index].lastMessage = "Mount dropped — remount when the host is reachable."
                 folders[index].lastMessageIsError = true
             }
-            folders[index].isMounted = observed
+            folders[index].isMounted = mounted
         }
     }
 
     /// The VPN gateway this host routes through, resolved from the gateways'
     /// host patterns — the same rules the generated ssh_include applies, so
-    /// tunnels, folders, and terminals to this host all inherit it.
-    func gatewayName(forHostAlias alias: String) -> String? {
-        guard let host = sshConfigHosts.first(where: { $0.matchesAlias(alias) }) else { return nil }
-        return GatewayLinker.gatewayName(matchingHost: host.effectiveHost, gateways: gateways.map(\.config))
+    /// tunnels, folders, and terminals to this host all inherit it. Accepts an
+    /// ssh-config alias or a raw host; aliases resolve to their HostName, so
+    /// every alias of the same machine reports the same routing.
+    func gatewayName(forHost raw: String) -> String? {
+        let resolved = sshConfigHosts.first(where: { $0.matchesAlias(raw) })?.effectiveHost ?? raw
+        return GatewayLinker.gatewayName(matchingHost: resolved, gateways: gateways.map(\.config))
     }
 
     /// Routes (or unroutes) a host through a gateway by managing its exact
@@ -1600,8 +1617,9 @@ final class MenuBarViewModel: ObservableObject {
     /// the ssh include, so ssh (and with it tunnels, folders, and terminals)
     /// picks the change up immediately.
     func setGateway(_ gatewayName: String?, forHostAlias alias: String) {
-        guard let host = sshConfigHosts.first(where: { $0.matchesAlias(alias) }) else { return }
-        let target = host.effectiveHost
+        // Route by resolved HostName, so aliases of the same machine stay in
+        // sync — changing one changes them all.
+        let target = sshConfigHosts.first(where: { $0.matchesAlias(alias) })?.effectiveHost ?? alias
         do {
             try store.mutate { config in
                 for index in config.gateways.indices {
@@ -1615,7 +1633,7 @@ final class MenuBarViewModel: ObservableObject {
                 }
             }
             loadConfig()
-            if let stillRouted = self.gatewayName(forHostAlias: alias), gatewayName == nil {
+            if let stillRouted = self.gatewayName(forHost: alias), gatewayName == nil {
                 // An exact pattern was removed but a wildcard still covers the
                 // host — be honest about where the routing now comes from.
                 globalMessage = "\(alias) is still covered by a \(stillRouted) host pattern — edit that gateway to change it."
@@ -3854,6 +3872,7 @@ struct MenuBarContent: View {
                                     EndpointHeader(
                                         group: group,
                                         gatewayNames: viewModel.gateways.map(\.id),
+                                        hostGateway: viewModel.gatewayName(forHost: group.hostForNewTunnel),
                                         isExpanded: groupExpanded,
                                         onToggleCollapse: { viewModel.toggleSection("group:\(group.id)") },
                                         onSelectGateway: { gatewayName in
@@ -4353,7 +4372,7 @@ struct MenuBarContent: View {
                             twoFactorAccountNames: viewModel.twoFactorAccountNames,
                             onSetTwoFactor: { viewModel.setTwoFactorLink(accountName: $0, forHostAlias: host.alias) },
                             onEnrollTwoFactor: { viewModel.enrollAndLinkTwoFactor(forHostAlias: host.alias) },
-                            linkedGateway: viewModel.gatewayName(forHostAlias: host.alias),
+                            linkedGateway: viewModel.gatewayName(forHost: host.alias),
                             gatewayNames: viewModel.gateways.map(\.id),
                             onSetGateway: { viewModel.setGateway($0, forHostAlias: host.alias) },
                             onEdit: { viewModel.editSSHHost(alias: host.alias) },
@@ -4780,9 +4799,9 @@ private struct SSHHostRow: View {
             .buttonStyle(.plain)
             .help("Open ssh \(host.alias) in a terminal")
 
-            // Latest keep-warm status, on demand and always available (not just
-            // on error) — the full message and when it happened.
-            if let status {
+            // Keep-warm status detail only when something went wrong — the
+            // healthy case has nothing worth a whole button.
+            if let status, status.isError {
                 WarmStatusButton(alias: host.alias, subtitle: subtitle, status: status)
             }
 
@@ -4794,16 +4813,36 @@ private struct SSHHostRow: View {
                     .help("2FA: \(linkedTwoFactorName) — entered automatically when warming")
             }
 
-            // Host-level VPN routing: tunnels, folders, and terminals to this
-            // host all inherit it (via the generated ssh include).
-            if let linkedGateway {
-                Image(systemName: "network.badge.shield.half.filled")
-                    .font(.system(size: 11))
-                    .foregroundStyle(Color.burrowAccent.opacity(0.75))
-                    .help("Routes via \(linkedGateway) when the VPN is connected")
+            // Host-level VPN routing, clickable: pick the gateway right here.
+            // Tunnels, folders, and terminals to this host all inherit it
+            // (via the generated ssh include).
+            if !gatewayNames.isEmpty {
+                Menu {
+                    Picker("VPN Route", selection: Binding(
+                        get: { linkedGateway },
+                        set: { onSetGateway($0) }
+                    )) {
+                        Text("Direct (No VPN)").tag(String?.none)
+                        ForEach(gatewayNames, id: \.self) { name in
+                            Text("Via \(name)").tag(Optional(name))
+                        }
+                    }
+                    .pickerStyle(.inline)
+                    .labelsHidden()
+                } label: {
+                    Image(systemName: "network.badge.shield.half.filled")
+                        .font(.system(size: 11))
+                        .foregroundStyle(linkedGateway != nil ? Color.burrowAccent.opacity(0.8) : .secondary.opacity(hovering ? 0.55 : 0.25))
+                        .frame(width: 22, height: 26)
+                        .contentShape(Rectangle())
+                }
+                .menuStyle(.borderlessButton)
+                .menuIndicator(.hidden)
+                .fixedSize()
+                .help(linkedGateway.map { "Routes via \($0) — click to change" } ?? "Direct — click to route via a VPN")
             }
 
-            // Visible inline actions (no right-click required).
+            // Essential inline actions only; everything else lives in ⋯.
             Button(action: onToggleKeepWarm) {
                 Image(systemName: isWarming ? "flame.fill" : flameIcon)
                     .font(.system(size: 12.5))
@@ -4814,30 +4853,6 @@ private struct SSHHostRow: View {
             }
             .buttonStyle(.plain)
             .help(isWarming ? "Signing in to \(host.alias)…" : flameHelp)
-
-            Button(action: onCopy) {
-                Image(systemName: "doc.on.doc")
-                    .font(.system(size: 11.5))
-                    .foregroundStyle(.secondary.opacity(0.7))
-                    .frame(width: 24, height: 26)
-                    .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-            .help("Copy the ssh command")
-            .opacity(hovering ? 1 : 0.35)
-
-            // Hide reveals only on hover — a light-touch way to declutter the
-            // menu without opening the ⋯ menu (also still available there).
-            Button(action: onHide) {
-                Image(systemName: "eye.slash")
-                    .font(.system(size: 11.5))
-                    .foregroundStyle(.secondary.opacity(0.7))
-                    .frame(width: 24, height: 26)
-                    .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-            .help("Hide \(host.alias) from the menu (unhide from the SSH Hosts header)")
-            .opacity(hovering ? 1 : 0)
 
             Menu {
                 Button("Open SSH in Terminal", action: onOpen)
@@ -4915,6 +4930,10 @@ private struct SSHHostRow: View {
 private struct EndpointHeader: View {
     let group: MenuBarContent.EndpointGroup
     let gatewayNames: [String]
+    /// Host-level VPN routing (from the gateways' host patterns). When no
+    /// tunnel sets an explicit gateway, ssh still routes through this via the
+    /// generated include — the chip shows it so the UI matches reality.
+    var hostGateway: String? = nil
     var isExpanded: Bool = true
     var onToggleCollapse: () -> Void = {}
     let onSelectGateway: (String?) -> Void
@@ -4983,7 +5002,7 @@ private struct EndpointHeader: View {
                     onSelectGateway(selected.isEmpty ? nil : selected)
                 }
             )) {
-                Text("Direct (No VPN)").tag("")
+                Text(hostGateway.map { "Host default (via \($0))" } ?? "Direct (No VPN)").tag("")
                 ForEach(gatewayNames, id: \.self) { name in
                     Text("Via \(name)").tag(name)
                 }
@@ -5017,7 +5036,9 @@ private struct EndpointHeader: View {
     private var chipLabel: String {
         switch uniformGatewaySelection {
         case .some(""):
-            return "direct"
+            // No per-tunnel gateway, but host-level routing still applies —
+            // show the truth, in sync with the host row's VPN picker.
+            return hostGateway ?? "direct"
         case .some(let name):
             return name
         case nil:
@@ -5029,7 +5050,7 @@ private struct EndpointHeader: View {
         if let selection = uniformGatewaySelection, !selection.isEmpty {
             return true
         }
-        return false
+        return uniformGatewaySelection == "" && hostGateway != nil
     }
 }
 
