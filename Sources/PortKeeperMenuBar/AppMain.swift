@@ -5575,11 +5575,18 @@ struct TunnelRow: View {
                     .truncationMode(.middle)
                     .layoutPriority(1)
 
-                if tunnel.connectionState == .failed {
-                    failureStatusView
-                } else {
-                    routeWithSSHSuffix
+                // Pinned to the CopyPortChip's height (21) so the row doesn't
+                // grow/shrink as the subtitle swaps between the route (with
+                // its chip) and the plain failure text — a failing tunnel used
+                // to shift every row below it on each state change.
+                Group {
+                    if tunnel.connectionState == .failed {
+                        failureStatusView
+                    } else {
+                        routeWithSSHSuffix
+                    }
                 }
+                .frame(height: 21, alignment: .leading)
             }
             .layoutPriority(1)
             .contentShape(Rectangle())
