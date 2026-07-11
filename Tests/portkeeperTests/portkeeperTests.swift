@@ -635,6 +635,7 @@ private func waitUntil(timeout: TimeInterval, condition: @escaping @Sendable () 
     let line = "To trust this server in future, perhaps add this to your command line:  --servercert pin-sha256:0Yt0jETVKnZxPLLqkjVdCfsdtF/CNqo04gQpkznFPGI="
     #expect(GatewaySupervisor.extractServerCertPin(from: line) == "pin-sha256:0Yt0jETVKnZxPLLqkjVdCfsdtF/CNqo04gQpkznFPGI=")
     #expect(GatewaySupervisor.extractServerCertPin(from: "--servercert=pin-sha256:abc=") == "pin-sha256:abc=")
+    #expect(GatewaySupervisor.extractServerCertPin(from: "None of the 1 fingerprint(s) specified via --servercert match server's certificate: pin-sha256:xZ0hNBOuAWfsgzQEDnKgcdYI1PktYvBPu7PjDtjUBXg=") == "pin-sha256:xZ0hNBOuAWfsgzQEDnKgcdYI1PktYvBPu7PjDtjUBXg=")
     #expect(GatewaySupervisor.extractServerCertPin(from: "no cert here") == nil)
 }
 
