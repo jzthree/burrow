@@ -974,3 +974,25 @@ final class TCPTestServer {
     let bare = try #require(TOTPSecret.parse("gezdgnbvgy3tqojq")) // lowercase tolerated
     #expect(bare.digits == 6 && bare.period == 30 && bare.algorithm == .sha1)
 }
+
+@Test func ssoDetectorParsesASATunnelGroups() {
+    // Shape taken verbatim from a real ASA logon page (UChicago): option
+    // values are HTML-entity-encoded ("&#x2D;" for "-").
+    let page = """
+    <form><select id="group_list"  name="group_list" style="z-index:1;" \
+    onchange="updateLogonForm(this.value,{'cvpn&#x2D;conn&#x2D;profile':true})">
+    <option value="cvpn&#x2D;conn&#x2D;profile" selected>cvpn-conn-profile</option>
+    <option value="cvpn&#x2D;stage&#x2D;conn&#x2D;profile">stage</option>
+    <option value="vpn&#x2D;conn&#x2D;profile">legacy</option>
+    </select></form>
+    """
+    let groups = VPNSSODetector.parseTunnelGroups(fromLogonPage: page)
+    #expect(groups == ["cvpn-conn-profile", "cvpn-stage-conn-profile", "vpn-conn-profile"])
+
+    // No group picker on the page → no groups, never a crash.
+    #expect(VPNSSODetector.parseTunnelGroups(fromLogonPage: "<html><body>logon</body></html>") == [])
+
+    // Entity decoding: numeric hex/decimal and the named few; a bare "&" survives.
+    #expect(VPNSSODetector.decodeHTMLEntities("a&#x2D;b&#45;c") == "a-b-c")
+    #expect(VPNSSODetector.decodeHTMLEntities("x&amp;y &quot;z&quot; & w") == "x&y \"z\" & w")
+}

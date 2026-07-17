@@ -189,7 +189,7 @@ struct AuthenticatorSheet: View {
                 .foregroundStyle(.secondary.opacity(0.5))
             Text("No codes yet")
                 .font(.system(size: 13, weight: .semibold))
-            Text("Add a code from any site's authenticator setup — paste its otpauth:// link or the “can't scan” secret key.")
+            Text("Add a code from any site's authenticator setup — scan its QR right off the screen, or paste the otpauth:// link or “can't scan” secret key.")
                 .font(.system(size: 11))
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
@@ -354,6 +354,8 @@ private struct AddCodeCard: View {
     @State private var secretText = ""
     @State private var nameText = ""
     @State private var nameEditedByUser = false
+    @State private var scanning = false
+    @State private var scanError: String?
 
     private var parsed: TOTPSecret? {
         let trimmed = secretText.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -394,6 +396,18 @@ private struct AddCodeCard: View {
                     TextField("otpauth://… or base32 key", text: $secretText)
                         .textFieldStyle(.roundedBorder)
                         .font(.system(size: 12, design: .monospaced))
+                    Button {
+                        scanFromScreen()
+                    } label: {
+                        if scanning {
+                            ProgressView().controlSize(.small)
+                        } else {
+                            Image(systemName: "qrcode.viewfinder")
+                        }
+                    }
+                    .buttonStyle(.bordered)
+                    .disabled(scanning)
+                    .help("Scan a QR code on screen — drag a box around it")
                     Button {
                         if let clip = NSPasteboard.general.string(forType: .string) {
                             secretText = clip
@@ -444,6 +458,7 @@ private struct AddCodeCard: View {
                 .stroke(Color.burrowAccent.opacity(0.25), lineWidth: 1)
         )
         .onChange(of: secretText) { _ in
+            scanError = nil
             // Auto-fill the name from the secret until the user types their own.
             if !nameEditedByUser {
                 nameText = suggestedName
@@ -454,9 +469,31 @@ private struct AddCodeCard: View {
         }
     }
 
+    /// Native drag-to-select screenshot, then decode a QR from it into the
+    /// secret field. Runs off-main since screencapture blocks on the selection.
+    private func scanFromScreen() {
+        scanError = nil
+        scanning = true
+        Task {
+            defer { scanning = false }
+            do {
+                let decoded = try await Task.detached { try ScreenQRScanner.scanRegion() }.value
+                secretText = decoded
+            } catch ScreenQRScanner.ScanError.cancelled {
+                // User pressed Escape — nothing to report.
+            } catch {
+                scanError = error.localizedDescription
+            }
+        }
+    }
+
     @ViewBuilder
     private var statusLine: some View {
-        if let parsed {
+        if let scanError {
+            Label(scanError, systemImage: "exclamationmark.triangle.fill")
+                .font(.system(size: 10))
+                .foregroundStyle(.orange)
+        } else if let parsed {
             Label("Valid code · \(parsed.digits) digits · every \(parsed.period)s · \(parsed.algorithm.rawValue.uppercased())",
                   systemImage: "checkmark.seal.fill")
                 .font(.system(size: 10))

@@ -103,6 +103,15 @@ struct GatewayEditorSheet: View {
     let onDelete: () -> Void
     @State private var detectedVPNs: [DetectedVPN] = []
 
+    // SSO autodetection: a credential-free probe of the server's login endpoint
+    // (SAML redirect / GP prelogin). A definitive "SSO" auto-selects SAML on a
+    // new gateway and warns when password mode is picked anyway.
+    @State private var ssoVerdict: VPNSSODetector.Verdict?
+    @State private var ssoProbeTask: Task<Void, Never>?
+    /// True once the user chose a sign-in mode themselves (or is editing an
+    /// existing gateway) — autodetection then advises but never overrides.
+    @State private var authModePinnedByUser = false
+
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             VStack(alignment: .leading, spacing: 2) {
@@ -138,7 +147,51 @@ struct GatewayEditorSheet: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .onAppear {
             detectedVPNs = VPNClientConfigScanner.detect()
+            authModePinnedByUser = draft.originalName != nil
+            scheduleSSOProbe(debounce: false)
         }
+        .onChange(of: draft.server) { _ in scheduleSSOProbe(debounce: true) }
+        .onChange(of: draft.vpnProtocol) { _ in scheduleSSOProbe(debounce: true) }
+        .onChange(of: draft.samlGroup) { _ in scheduleSSOProbe(debounce: true) }
+        .onDisappear { ssoProbeTask?.cancel() }
+    }
+
+    /// Probes the (debounced) current server for browser SSO. On a definitive
+    /// yes: auto-select SAML unless the user pinned a mode; the caption under
+    /// the Sign-in picker explains either way.
+    private func scheduleSSOProbe(debounce: Bool) {
+        ssoProbeTask?.cancel()
+        ssoVerdict = nil
+        let server = draft.server.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !server.isEmpty else { return }
+        let vpnProtocol = draft.vpnProtocol
+        let group = draft.samlGroup
+        ssoProbeTask = Task {
+            if debounce {
+                try? await Task.sleep(for: .milliseconds(700))
+            }
+            guard !Task.isCancelled else { return }
+            let verdict = await VPNSSODetector.probe(server: server, vpnProtocol: vpnProtocol, samlGroup: group)
+            guard !Task.isCancelled else { return }
+            await MainActor.run {
+                ssoVerdict = verdict
+                guard case .sso(let suggestedGroup) = verdict else { return }
+                if !authModePinnedByUser && draft.authMode != "saml" {
+                    withAnimation { draft.authMode = "saml" }
+                }
+                // Fill the discovered tunnel group when the user hasn't set one —
+                // the piece nobody knows by heart (e.g. "cvpn-conn-profile").
+                if let suggestedGroup,
+                   draft.samlGroup.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    draft.samlGroup = suggestedGroup
+                }
+            }
+        }
+    }
+
+    private var detectedSSO: Bool {
+        if case .sso = ssoVerdict { return true }
+        return false
     }
 
     private var connectionSection: some View {
@@ -187,13 +240,37 @@ struct GatewayEditorSheet: View {
                 }
                 GridRow {
                     label("Sign-in")
-                    Picker("Sign-in", selection: $draft.authMode) {
+                    Picker("Sign-in", selection: Binding(
+                        get: { draft.authMode },
+                        set: { draft.authMode = $0; authModePinnedByUser = true }
+                    )) {
                         Text("SAML (browser)").tag("saml")
                         Text("Password").tag("password")
                     }
                     .labelsHidden()
                     .pickerStyle(.segmented)
                     .frame(maxWidth: 240)
+                }
+                if detectedSSO {
+                    GridRow {
+                        Color.clear.frame(width: 1, height: 1)
+                        if draft.authMode == "saml" {
+                            Label("This server signs in with SSO (browser) — SAML is right.", systemImage: "checkmark.seal.fill")
+                                .font(.system(size: 10))
+                                .foregroundStyle(.green)
+                        } else {
+                            HStack(spacing: 8) {
+                                Label("This server signs in with SSO (browser) — password mode can’t complete it.", systemImage: "exclamationmark.triangle.fill")
+                                    .font(.system(size: 10))
+                                    .foregroundStyle(.orange)
+                                Button("Use SAML") {
+                                    draft.authMode = "saml"
+                                    authModePinnedByUser = true
+                                }
+                                .controlSize(.small)
+                            }
+                        }
+                    }
                 }
                 if draft.authMode == "saml" && draft.vpnProtocol == "anyconnect" {
                     GridRow {

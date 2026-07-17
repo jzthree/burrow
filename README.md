@@ -41,6 +41,8 @@ git clone https://github.com/jzthree/Burrow.git && cd Burrow
 ./scripts/install-app.sh && open ~/Applications/Burrow.app
 ```
 
+**That's the whole install.** Everything else — tunnels, SSH hosts, VPN gateways, 2FA codes — is configured from the menu-bar app itself; no config files or terminal steps are required. The [Quick Start](#quick-start-cli-from-source) section below is the optional CLI walkthrough for people working from a source checkout, not a continuation of these steps.
+
 ## Requirements
 
 - macOS 13 or later, and the Xcode Command Line Tools to build (`xcode-select --install`). Building needs Swift 6.3 or newer (`swift --version`); if the build fails with a tools-version error, update Xcode or the Command Line Tools.
@@ -51,7 +53,9 @@ git clone https://github.com/jzthree/Burrow.git && cd Burrow
 
   You don't have to install openconnect up front either: the first time you connect a gateway, Burrow offers to brew-install whatever is actually missing in a Terminal window and connects automatically when it finishes. Burrow prefers binaries bundled in the app, then `/opt/homebrew/bin`, `/usr/local/bin`, `/opt/local/bin`, and `/usr/bin`, or paths set via `BURROW_OPENCONNECT` / `BURROW_OCPROXY`. Tunnels are unaffected either way.
 
-## Quick Start
+## Quick Start (CLI, from source)
+
+Already installed the app above? Skip this section — the app needs none of it. These steps are for driving Burrow from the command line out of a source checkout (the CLI and the app share the same config).
 
 Build everything:
 

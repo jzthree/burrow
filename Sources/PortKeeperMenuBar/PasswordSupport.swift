@@ -277,7 +277,7 @@ enum PasswordPrompt {
             alert.alertStyle = .warning
         } else {
             alert.messageText = "VPN password for \(user)@\(server)"
-            alert.informativeText = "Burrow is connecting the VPN gateway “\(gatewayName)” with openconnect.\n\nEnter the VPN password you use with the official client for \(server). If your login needs a second factor (e.g. Duo), approve it when prompted on your device.\n\nThe password is stored in your macOS Keychain after the first successful connection."
+            alert.informativeText = "Burrow is connecting the VPN gateway “\(gatewayName)” with openconnect.\n\nEnter the VPN password you use with the official client for \(server).\n\nIf this VPN signs in through a browser (single sign-on / Duo), password mode usually can’t finish it — switch this gateway to SAML sign-in in its settings instead.\n\nThe password is stored in your macOS Keychain after the first successful connection."
         }
 
         alert.addButton(withTitle: "Connect")

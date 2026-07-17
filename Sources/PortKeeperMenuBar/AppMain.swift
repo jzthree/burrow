@@ -300,6 +300,9 @@ final class MenuBarViewModel: ObservableObject {
     /// is only declared dead after a couple in a row so a transient blip
     /// doesn't tear down a working VPN.
     private var gatewayHealthFailures: [String: Int] = [:]
+    /// Consecutive liveness misses per gateway (openconnect gone / SOCKS port
+    /// closed), for the fast backstop that demotes a stuck-green VPN.
+    private var gatewaySessionMisses: [String: Int] = [:]
     private var gatewayHealthTick = 0
     private var toolInstallWatchTask: Task<Void, Never>?
     private var samlSessionConnectedAt: [String: Date] = [:]
@@ -499,27 +502,44 @@ final class MenuBarViewModel: ObservableObject {
     }
 
     private func probeConnectedServices() async {
-        // Adopted gateways have no supervisor watching them; notice here when
-        // their session ends so the menu doesn't show a dead VPN as connected.
-        // openconnect can exit while its ocproxy child lingers holding the
-        // SOCKS port — that orphan answers a plain port check but routes
-        // nowhere, so liveness must confirm openconnect itself is alive.
-        let adopted = Array(adoptedGateways).compactMap { name in
-            gateways.first(where: { $0.id == name }).map { (name: name, config: $0.config) }
-        }
-        if !adopted.isEmpty {
-            let dead = await Task.detached { () -> [String] in
-                adopted.filter { !GatewayPortReclaimer.hasLiveSession(socksPort: $0.config.socksPort, server: $0.config.server) }
-                    .map(\.name)
+        // Any gateway shown "connected" must have a live session behind it, or
+        // the menu lies and host routing silently falls back to direct (a green
+        // VPN with an unreachable host). Adopted gateways have no supervisor at
+        // all; a self-launched one can also wedge green if openconnect dies
+        // without a clean exit event. This is the fast backstop — independent of
+        // the slower healthCheckHost reachability probe, and it catches gateways
+        // that have no healthCheckHost configured. openconnect can exit while its
+        // ocproxy child lingers holding the SOCKS port, so liveness confirms
+        // openconnect itself is alive; a plain port check would be fooled.
+        let connectedGateways = gateways
+            .filter { $0.connectionState == .connected }
+            .map { (name: $0.id, config: $0.config) }
+        if !connectedGateways.isEmpty {
+            let deadNames = await Task.detached { () -> Set<String> in
+                Set(connectedGateways
+                    .filter { !GatewayPortReclaimer.hasLiveSession(socksPort: $0.config.socksPort, server: $0.config.server) }
+                    .map(\.name))
             }.value
-            for name in dead {
-                adoptedGateways.remove(name)
-                if let config = gateways.first(where: { $0.id == name })?.config {
-                    // Reap the orphaned ocproxy so the stale port stops
-                    // masquerading as a working tunnel.
-                    GatewayPortReclaimer.reclaimStaleListeners(port: config.socksPort)
+            for gateway in connectedGateways {
+                guard deadNames.contains(gateway.name) else {
+                    gatewaySessionMisses[gateway.name] = 0
+                    continue
                 }
-                updateGatewayState(for: name, isRunning: false, state: .disconnected, message: "VPN session ended — reconnect")
+                // One tolerance tick (~10s) so a transient probe miss during the
+                // connect handshake can't tear down a VPN that's actually fine.
+                let misses = gatewaySessionMisses[gateway.name, default: 0] + 1
+                gatewaySessionMisses[gateway.name] = misses
+                guard misses >= 2 else { continue }
+                gatewaySessionMisses[gateway.name] = 0
+                let wasAdopted = adoptedGateways.remove(gateway.name) != nil
+                // Reap any orphaned ocproxy so the stale port stops masquerading.
+                GatewayPortReclaimer.reclaimStaleListeners(port: gateway.config.socksPort)
+                // A self-launched gateway still has a supervisor task to cancel;
+                // an adopted one doesn't, so only stop the former.
+                if !wasAdopted {
+                    stopGateway(named: gateway.name)
+                }
+                updateGatewayState(for: gateway.name, isRunning: false, state: .disconnected, message: "VPN session ended — reconnect")
             }
         }
 
@@ -955,6 +975,55 @@ final class MenuBarViewModel: ObservableObject {
         order.swapAt(i, j)
         sshHostOrder = order
         try? store.mutate { $0.sshHostOrder = order }
+    }
+
+    // MARK: Drag reordering
+    //
+    // Rows swap live (in-memory) while dragged for smooth feedback; the final
+    // arrangement is persisted once on drop, so nothing hits disk mid-drag.
+
+    func dragReorderSSHHost(_ dragged: String, over target: String) {
+        var order = sshHostEntries.map(\.alias)
+        guard let i = order.firstIndex(of: dragged), let j = order.firstIndex(of: target) else { return }
+        order.swapAt(i, j)
+        withAnimation(.easeInOut(duration: 0.18)) { sshHostOrder = order }
+    }
+
+    func commitSSHHostOrder() {
+        let order = sshHostEntries.map(\.alias)
+        sshHostOrder = order
+        try? store.mutate { $0.sshHostOrder = order }
+    }
+
+    func dragReorderGateway(_ dragged: String, over target: String) {
+        guard let i = gateways.firstIndex(where: { $0.id == dragged }),
+              let j = gateways.firstIndex(where: { $0.id == target }) else { return }
+        withAnimation(.easeInOut(duration: 0.18)) { gateways.swapAt(i, j) }
+    }
+
+    func commitGatewayOrder() {
+        let order = gateways.map(\.id)
+        try? store.mutate { config in
+            config.gateways = OrderingSupport.ordered(config.gateways, by: order, key: \.name)
+        }
+        loadConfig()
+    }
+
+    /// Tunnels reorder only within their endpoint group (matching Move Up/Down):
+    /// a cross-group swap is rejected so the grouping stays intact.
+    func dragReorderTunnel(_ dragged: String, over target: String) {
+        guard let i = tunnels.firstIndex(where: { $0.id == dragged }),
+              let j = tunnels.firstIndex(where: { $0.id == target }),
+              tunnelGroupKey(tunnels[i].tunnel) == tunnelGroupKey(tunnels[j].tunnel) else { return }
+        withAnimation(.easeInOut(duration: 0.18)) { tunnels.swapAt(i, j) }
+    }
+
+    func commitTunnelOrder() {
+        let order = tunnels.map(\.id)
+        try? store.mutate { config in
+            config.tunnels = OrderingSupport.ordered(config.tunnels, by: order, key: \.name)
+        }
+        loadConfig()
     }
 
     /// Whether this tunnel's latest failure is a remote reverse-forward port
@@ -1487,12 +1556,16 @@ final class MenuBarViewModel: ObservableObject {
 
     @Published private(set) var folders: [FolderState] = []
 
-    func mountFolder(named name: String) {
+    /// `announce == false` for auto-mounts: they update the folder row's own
+    /// status but stay out of the shared footer so a warm event doesn't spam it.
+    func mountFolder(named name: String, announce: Bool = true) {
         guard let index = folders.firstIndex(where: { $0.id == name }) else { return }
         guard let sshfs = FolderSupport.sshfsPath() else {
             folders[index].lastMessage = "FUSE-T sshfs not installed"
             folders[index].lastMessageIsError = true
-            globalMessage = "Folders need FUSE-T (no restart): brew install --cask macos-fuse-t/homebrew-cask/fuse-t macos-fuse-t/homebrew-cask/fuse-t-sshfs"
+            if announce {
+                globalMessage = "Folders need FUSE-T (no restart): brew install --cask macos-fuse-t/homebrew-cask/fuse-t macos-fuse-t/homebrew-cask/fuse-t-sshfs"
+            }
             return
         }
         let folder = folders[index].config
@@ -1506,7 +1579,9 @@ final class MenuBarViewModel: ObservableObject {
         folders[index].isBusy = true
         folders[index].lastMessage = "Mounting…"
         folders[index].lastMessageIsError = false
-        globalMessage = "Mounting \(name)…"
+        if announce {
+            globalMessage = "Mounting \(name)…"
+        }
         Task { @MainActor [weak self] in
             // Even a loopback probe is I/O — keep it (and the mount) off main.
             if let routedVia, let gatewaySocksPort {
@@ -1518,7 +1593,9 @@ final class MenuBarViewModel: ObservableObject {
                     self.folders[idx].isBusy = false
                     self.folders[idx].lastMessage = "Connect \(routedVia) first — this host routes through it."
                     self.folders[idx].lastMessageIsError = true
-                    self.globalMessage = "\(name) needs \(routedVia) — connect the VPN, then mount."
+                    if announce {
+                        self.globalMessage = "\(name) needs \(routedVia) — connect the VPN, then mount."
+                    }
                     return
                 }
             }
@@ -1528,7 +1605,9 @@ final class MenuBarViewModel: ObservableObject {
             self.folders[idx].isMounted = result.succeeded
             if result.succeeded {
                 self.folders[idx].lastMessage = "Mounted at \(folder.effectiveLocalPath)."
-                self.globalMessage = "Mounted \(name)."
+                if announce {
+                    self.globalMessage = "Mounted \(name)."
+                }
             } else {
                 var message = result.output.split(whereSeparator: \.isNewline).last.map(String.init) ?? "sshfs failed"
                 if message.lowercased().contains("permission denied") {
@@ -1538,7 +1617,9 @@ final class MenuBarViewModel: ObservableObject {
                 }
                 self.folders[idx].lastMessage = message
                 self.folders[idx].lastMessageIsError = true
-                self.globalMessage = "Couldn't mount \(name)."
+                if announce {
+                    self.globalMessage = "Couldn't mount \(name)."
+                }
             }
         }
     }
@@ -1747,6 +1828,45 @@ final class MenuBarViewModel: ObservableObject {
     func isHostWarm(_ alias: String) -> Bool { warmHosts.contains(alias) }
     func isHostKeptWarm(_ alias: String) -> Bool { keepWarmHosts.contains(alias) }
 
+    /// A host is confirmed warm: mark it, end any in-flight breathing, and drop
+    /// the stale "this probe failed" verdict. Doing all three together means the
+    /// row can never show green *and* "signing in…" at once, and a later warm
+    /// won't be short-circuited to a manual prompt by an obsolete failure.
+    private func confirmHostWarm(_ alias: String) {
+        let wasWarm = warmHosts.contains(alias)
+        warmHosts.insert(alias)
+        warmingHosts.remove(alias)
+        warmProbeFailures[alias] = nil
+        // Only on the cold→warm edge: mount this host's folders now that its
+        // master is live. This rides the connection keep-warm already opened —
+        // no new ssh, no auth prompt — so the marginal cost is negligible.
+        if !wasWarm {
+            autoMountFolders(forWarmHost: alias)
+        }
+    }
+
+    /// Mounts any of a freshly-warmed host's folders that aren't up yet. Scoped
+    /// to warm hosts on purpose: a mount is non-interactive (BatchMode), so it
+    /// only succeeds over an existing master — meaning this never opens a new
+    /// connection or triggers 2FA. Quiet: a failure just leaves the row's status.
+    private func autoMountFolders(forWarmHost alias: String) {
+        guard FolderSupport.sshfsPath() != nil else { return }
+        for folder in folders where !folder.isMounted && !folder.isBusy {
+            // The mount authenticates to the folder's destination host; match it
+            // (minus any user@) against the alias that just warmed.
+            let destination = folder.config.host.split(separator: "@").last.map(String.init) ?? folder.config.host
+            guard destination.caseInsensitiveCompare(alias) == .orderedSame else { continue }
+            mountFolder(named: folder.id, announce: false)
+        }
+    }
+
+    /// A host's 2FA seed changed (rotated or relinked). The previous probe
+    /// verdict was about different credentials, so it must not gate the next
+    /// silent attempt — otherwise keep-warm skips straight to a manual prompt.
+    private func invalidateWarmProbe(forHostAlias alias: String) {
+        warmProbeFailures[alias] = nil
+    }
+
     func toggleKeepWarm(alias: String) {
         if keepWarmHosts.contains(alias) {
             keepWarmHosts.remove(alias)
@@ -1794,7 +1914,7 @@ final class MenuBarViewModel: ObservableObject {
 
             // Already warm (a live master exists)? Nothing to do.
             if await Task.detached(operation: { SSHHostWarmer.isWarm(alias: alias) }).value {
-                self.warmHosts.insert(alias)
+                self.confirmHostWarm(alias)
                 self.setWarmStatus(alias, "\(alias) is already warm.")
                 return
             }
@@ -1850,8 +1970,7 @@ final class MenuBarViewModel: ObservableObject {
                 let silent = await Task.detached(operation: { SSHHostWarmer.warm(alias: alias, environment: environment) }).value
                 if silent.succeeded {
                     _ = AskPassSupport.consumePrompts(at: promptLog)
-                    self.warmProbeFailures[alias] = nil
-                    self.warmHosts.insert(alias)
+                    self.confirmHostWarm(alias)
                     self.setWarmStatus(alias, "\(alias) is warm — terminals open instantly.")
                     return
                 }
@@ -1946,7 +2065,7 @@ final class MenuBarViewModel: ObservableObject {
                 if outcome.succeeded {
                     self.warmProbeFailures[alias] = nil
                     if await Task.detached(operation: { SSHHostWarmer.isWarm(alias: alias) }).value {
-                        self.warmHosts.insert(alias)
+                        self.confirmHostWarm(alias)
                         self.setWarmStatus(alias, "\(alias) is warm — terminals open instantly.")
                     } else {
                         self.warmHosts.remove(alias)
@@ -2154,6 +2273,13 @@ final class MenuBarViewModel: ObservableObject {
             syncAuthenticatorWindow()
         }
     }
+    @Published var showingBugReport = false {
+        didSet {
+            guard oldValue != showingBugReport else { return }
+            syncBugReportWindow()
+        }
+    }
+    private var bugReportWindowController: BugReportWindowController?
     /// Set when the window should open straight into the "add a code" form
     /// (e.g. from + New ▸ New Authenticator Code). The sheet consumes it once.
     @Published var authenticatorBeginInAdd = false
@@ -2271,6 +2397,39 @@ final class MenuBarViewModel: ObservableObject {
         }
     }
 
+    func openBugReport() {
+        showingBugReport = true
+    }
+
+    private func syncBugReportWindow() {
+        if showingBugReport {
+            if bugReportWindowController == nil {
+                bugReportWindowController = BugReportWindowController(viewModel: self)
+            }
+            bugReportWindowController?.present()
+        } else {
+            bugReportWindowController?.dismiss()
+        }
+    }
+
+    /// Files a bug as a GitHub issue (via gh, with a browser fallback). Runs the
+    /// blocking gh subprocess off the main actor and returns the created issue's
+    /// URL, or a `SubmitError` carrying a prefilled browser fallback.
+    func submitBugReport(title: String, details: String) async -> Result<URL, BugReporter.SubmitError> {
+        let trimmedTitle = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        let body = details.trimmingCharacters(in: .whitespacesAndNewlines)
+        do {
+            let url = try await Task.detached {
+                try BugReporter.fileIssue(title: trimmedTitle, body: body)
+            }.value
+            return .success(url)
+        } catch let error as BugReporter.SubmitError {
+            return .failure(error)
+        } catch {
+            return .failure(BugReporter.SubmitError(message: error.localizedDescription, fallbackURL: nil))
+        }
+    }
+
     /// Generates and reveals the current code for an account. Presents the
     /// system authentication sheet (off the main thread), copies the code to the
     /// clipboard, and schedules the row to re-lock at the period boundary.
@@ -2331,6 +2490,11 @@ final class MenuBarViewModel: ObservableObject {
                 algorithm: parsed.algorithm.rawValue
             )
             try store.upsertTwoFactorAccount(account)
+            // Re-enrolling replaces the seed; any host wired to this account now
+            // has a fresh code, so its prior probe verdict is void.
+            for host in twoFactorAccounts.filter({ $0.name == trimmedName }).compactMap(\.sshHost) {
+                invalidateWarmProbe(forHostAlias: host)
+            }
             loadConfig()
             // If the Authenticator is already unlocked, fold the new seed into
             // the open session so it reveals right away — no second Touch ID.
@@ -2403,6 +2567,9 @@ final class MenuBarViewModel: ObservableObject {
             } else {
                 globalMessage = "Cleared the 2FA link for \(alias)."
             }
+            // The host's code source just changed — a probe that failed under the
+            // old seed must not keep routing keep-warm to a manual prompt.
+            invalidateWarmProbe(forHostAlias: alias)
             loadConfig()
         } catch {
             globalMessage = "Couldn't update the 2FA link: \(error.localizedDescription)"
@@ -3932,6 +4099,18 @@ struct MenuBarContent: View {
     private let menuWidth: CGFloat = 450
     private let minimumMenuHeight: CGFloat = 400
 
+    // Drag-reorder state, per list: the picked-up row id, its live finger
+    // offset, and the measured row frames used for hit-testing.
+    @State private var draggingHost: String?
+    @State private var draggingHostOffset: CGFloat = 0
+    @State private var hostFrames: [String: CGRect] = [:]
+    @State private var draggingGateway: String?
+    @State private var draggingGatewayOffset: CGFloat = 0
+    @State private var gatewayFrames: [String: CGRect] = [:]
+    @State private var draggingTunnel: String?
+    @State private var draggingTunnelOffset: CGFloat = 0
+    @State private var tunnelFrames: [String: CGRect] = [:]
+
     struct EndpointGroup: Identifiable {
         let endpoint: String
         let hostForNewTunnel: String
@@ -3983,6 +4162,10 @@ struct MenuBarContent: View {
                             if !viewModel.gateways.isEmpty {
                                 gatewaysSection
                             }
+                            // One coordinate space across all groups so a drag's
+                            // hit-testing stays consistent (cross-group swaps are
+                            // rejected in dragReorderTunnel).
+                            VStack(alignment: .leading, spacing: 10) {
                             ForEach(endpointGroups) { group in
                                 let groupExpanded = viewModel.isSectionExpanded("group:\(group.id)", defaultExpanded: true)
                                 VStack(alignment: .leading, spacing: 5) {
@@ -4026,6 +4209,15 @@ struct MenuBarContent: View {
                                                 onMoveUp: { viewModel.moveTunnel(named: tunnel.id, up: true) },
                                                 onMoveDown: { viewModel.moveTunnel(named: tunnel.id, up: false) }
                                             )
+                                            .reorderableRow(
+                                                id: tunnel.id,
+                                                space: "reorder-tunnels",
+                                                draggingId: $draggingTunnel,
+                                                dragOffset: $draggingTunnelOffset,
+                                                frames: tunnelFrames,
+                                                onReorder: { viewModel.dragReorderTunnel($0, over: $1) },
+                                                onCommit: { viewModel.commitTunnelOrder() }
+                                            )
                                         }
                                     }
                                     .background(
@@ -4040,6 +4232,8 @@ struct MenuBarContent: View {
                                     }
                                 }
                             }
+                            }
+                            .reorderableList(space: "reorder-tunnels", frames: $tunnelFrames)
                             if !viewModel.sshConfigHosts.isEmpty {
                                 hostsSection
                             }
@@ -4233,6 +4427,8 @@ struct MenuBarContent: View {
                     set: { viewModel.autoCheckForUpdates = $0 }
                 ))
 
+                Button("Report a Bug…", action: viewModel.openBugReport)
+
                 Divider()
 
                 Button("Quit Burrow") {
@@ -4391,8 +4587,18 @@ struct MenuBarContent: View {
                         onMoveUp: { viewModel.moveGateway(named: gateway.id, up: true) },
                         onMoveDown: { viewModel.moveGateway(named: gateway.id, up: false) }
                     )
+                    .reorderableRow(
+                        id: gateway.id,
+                        space: "reorder-gateways",
+                        draggingId: $draggingGateway,
+                        dragOffset: $draggingGatewayOffset,
+                        frames: gatewayFrames,
+                        onReorder: { viewModel.dragReorderGateway($0, over: $1) },
+                        onCommit: { viewModel.commitGatewayOrder() }
+                    )
                 }
             }
+            .reorderableList(space: "reorder-gateways", frames: $gatewayFrames)
             .background(
                 RoundedRectangle(cornerRadius: 16, style: .continuous)
                     .fill(Color(nsColor: .controlBackgroundColor).opacity(0.54))
@@ -4500,8 +4706,18 @@ struct MenuBarContent: View {
                             onMoveUp: { viewModel.moveSSHHost(alias: host.alias, up: true) },
                             onMoveDown: { viewModel.moveSSHHost(alias: host.alias, up: false) }
                         )
+                        .reorderableRow(
+                            id: host.alias,
+                            space: "reorder-hosts",
+                            draggingId: $draggingHost,
+                            dragOffset: $draggingHostOffset,
+                            frames: hostFrames,
+                            onReorder: { viewModel.dragReorderSSHHost($0, over: $1) },
+                            onCommit: { viewModel.commitSSHHostOrder() }
+                        )
                     }
                 }
+                .reorderableList(space: "reorder-hosts", frames: $hostFrames)
                 .background(
                     RoundedRectangle(cornerRadius: 16, style: .continuous)
                         .fill(Color(nsColor: .controlBackgroundColor).opacity(0.54))
@@ -4689,16 +4905,29 @@ private struct FolderRow: View {
         return "\(folder.config.host):\(remote)\(jump)"
     }
 
+    /// Leading folder glyph. When mounted it doubles as the "Reveal in Finder"
+    /// button (its natural action); unmounted there's nothing to reveal, so it
+    /// stays a plain icon.
+    @ViewBuilder private var leadingIcon: some View {
+        Image(systemName: folder.isMounted ? "folder.fill.badge.gearshape" : "folder")
+            .font(.system(size: 12.5))
+            .foregroundStyle(folder.isMounted ? Color.burrowAccent : .secondary.opacity(0.8))
+            .frame(width: 24, height: 24)
+            .background(
+                RoundedRectangle(cornerRadius: 7, style: .continuous)
+                    .fill((folder.isMounted ? Color.burrowAccent : .secondary).opacity(0.07))
+            )
+    }
+
     var body: some View {
         HStack(spacing: 8) {
-            Image(systemName: folder.isMounted ? "folder.fill.badge.gearshape" : "folder")
-                .font(.system(size: 12.5))
-                .foregroundStyle(folder.isMounted ? Color.burrowAccent : .secondary.opacity(0.8))
-                .frame(width: 24, height: 24)
-                .background(
-                    RoundedRectangle(cornerRadius: 7, style: .continuous)
-                        .fill((folder.isMounted ? Color.burrowAccent : .secondary).opacity(0.07))
-                )
+            if folder.isMounted {
+                Button(action: onReveal) { leadingIcon }
+                    .buttonStyle(.plain)
+                    .help("Reveal “\(folder.config.name)” in Finder")
+            } else {
+                leadingIcon
+            }
             VStack(alignment: .leading, spacing: 1) {
                 Text(folder.config.name)
                     .font(.system(size: 13, weight: .semibold))
@@ -4728,18 +4957,6 @@ private struct FolderRow: View {
                 }
             }
             Spacer(minLength: 6)
-
-            if folder.isMounted {
-                Button(action: onReveal) {
-                    Image(systemName: "arrow.up.forward.square")
-                        .font(.system(size: 11.5))
-                        .foregroundStyle(.secondary.opacity(0.7))
-                        .frame(width: 24, height: 26)
-                        .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-                .help("Reveal in Finder")
-            }
 
             Button(action: onToggleMount) {
                 Image(systemName: folder.isMounted ? "eject.fill" : "externaldrive.badge.plus")
@@ -4828,6 +5045,11 @@ private struct SSHHostRow: View {
         return text
     }
 
+    /// A live master supersedes an in-flight attempt — once the host is actually
+    /// warm we stop breathing, even if a sign-in Task is still settling (a
+    /// background status refresh can turn the flame green mid-attempt).
+    private var showWarming: Bool { isWarming && !isWarm }
+
     private var flameIcon: String { isKeptWarm ? "flame.fill" : "flame" }
     private var flameColor: Color {
         guard isKeptWarm else { return .secondary.opacity(0.55) }
@@ -4840,81 +5062,80 @@ private struct SSHHostRow: View {
             : "Kept warm (cold now). Click to stop, or use ⋯ ▸ Finish Sign-In."
     }
 
-    /// The identity block (icon + alias + subtitle). Inert by default; while a
-    /// sign-in window is pending it becomes a button that brings it forward.
-    @ViewBuilder private var identity: some View {
-        HStack(spacing: 11) {
-            Image(systemName: isAwaitingSignIn ? "lock.badge.clock" : "terminal")
-                .font(.system(size: 12.5))
-                .foregroundStyle(isAwaitingSignIn ? Color.burrowAccent : .secondary.opacity(0.8))
-                .frame(width: 24, height: 24)
-                .background(
-                    RoundedRectangle(cornerRadius: 7, style: .continuous)
-                        .fill((isAwaitingSignIn ? Color.burrowAccent : .secondary).opacity(0.07))
-                )
-            VStack(alignment: .leading, spacing: 1) {
-                Text(host.alias)
-                    .font(.system(size: 13, weight: .semibold))
+    /// Leading glyph. It doubles as the Terminal button (opening a session is
+    /// its natural action), or a lock badge that focuses a pending sign-in.
+    @ViewBuilder private var leadingIcon: some View {
+        Image(systemName: isAwaitingSignIn ? "lock.badge.clock" : "terminal")
+            .font(.system(size: 12.5))
+            .foregroundStyle(isAwaitingSignIn ? Color.burrowAccent : .secondary.opacity(0.8))
+            .frame(width: 24, height: 24)
+            .background(
+                RoundedRectangle(cornerRadius: 7, style: .continuous)
+                    .fill((isAwaitingSignIn ? Color.burrowAccent : .secondary).opacity(0.07))
+            )
+    }
+
+    /// Alias + a state-dependent subtitle (pending sign-in, in-flight attempt,
+    /// last error, else the address).
+    @ViewBuilder private var identityText: some View {
+        VStack(alignment: .leading, spacing: 1) {
+            Text(host.alias)
+                .font(.system(size: 13, weight: .semibold))
+                .lineLimit(1)
+            if isAwaitingSignIn {
+                Text("waiting for sign-in — click to show")
+                    .font(.system(size: 10, weight: .medium, design: .monospaced))
+                    .foregroundStyle(Color.burrowAccent.opacity(0.9))
                     .lineLimit(1)
-                // The subtitle reflects state: an open sign-in to return to, an
-                // in-flight attempt, the last error, else the address.
-                if isAwaitingSignIn {
-                    Text("waiting for sign-in — click to show")
+            } else if showWarming {
+                HStack(spacing: 5) {
+                    Circle()
+                        .fill(Color.orange)
+                        .frame(width: 6, height: 6)
+                        .opacity(breathing ? 1 : 0.25)
+                    Text("signing in…")
                         .font(.system(size: 10, weight: .medium, design: .monospaced))
-                        .foregroundStyle(Color.burrowAccent.opacity(0.9))
-                        .lineLimit(1)
-                } else if isWarming {
-                    HStack(spacing: 5) {
-                        Circle()
-                            .fill(Color.orange)
-                            .frame(width: 6, height: 6)
-                            .opacity(breathing ? 1 : 0.25)
-                        Text("signing in…")
-                            .font(.system(size: 10, weight: .medium, design: .monospaced))
-                            .foregroundStyle(.secondary)
-                    }
-                } else if let status, status.isError {
-                    Text(status.message)
-                        .font(.system(size: 10, weight: .medium, design: .monospaced))
-                        .foregroundStyle(Color.burrowFailure.opacity(0.9))
-                        .lineLimit(1)
-                        .truncationMode(.tail)
-                } else {
-                    Text(subtitle)
-                        .font(.system(size: 10, design: .monospaced))
                         .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                        .truncationMode(.middle)
                 }
+            } else if let status, status.isError {
+                Text(status.message)
+                    .font(.system(size: 10, weight: .medium, design: .monospaced))
+                    .foregroundStyle(Color.burrowFailure.opacity(0.9))
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+            } else {
+                Text(subtitle)
+                    .font(.system(size: 10, design: .monospaced))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
             }
-            Spacer(minLength: 6)
         }
-        .contentShape(Rectangle())
     }
 
     var body: some View {
         HStack(spacing: 8) {
-            // Identity is inert unless a sign-in is pending, in which case one
-            // click brings the sign-in window back to the front.
-            if isAwaitingSignIn {
-                Button(action: onFocusSignIn) { identity }
+            HStack(spacing: 11) {
+                // The leading terminal glyph *is* the Terminal button; while a
+                // sign-in is pending it turns into a lock badge that focuses the
+                // sign-in window instead.
+                Button(action: isAwaitingSignIn ? onFocusSignIn : onOpen) { leadingIcon }
                     .buttonStyle(.plain)
-                    .help("Show the sign-in window for \(host.alias)")
-            } else {
-                identity
-            }
+                    .help(isAwaitingSignIn
+                        ? "Show the sign-in window for \(host.alias)"
+                        : "Open ssh \(host.alias) in a terminal")
 
-            // Dedicated Terminal button — opening a session is now explicit,
-            // not a side effect of clicking the row.
-            Button(action: onOpen) {
-                Image(systemName: "terminal")
-                    .font(.system(size: 12))
-                    .foregroundStyle(.secondary.opacity(0.8))
-                    .frame(width: 24, height: 26)
-                    .contentShape(Rectangle())
+                // The text block is inert unless a sign-in is pending, in which
+                // case one click brings that window back to the front.
+                if isAwaitingSignIn {
+                    Button(action: onFocusSignIn) { identityText }
+                        .buttonStyle(.plain)
+                        .help("Show the sign-in window for \(host.alias)")
+                } else {
+                    identityText
+                }
             }
-            .buttonStyle(.plain)
-            .help("Open ssh \(host.alias) in a terminal")
+            Spacer(minLength: 6)
 
             // Keep-warm status detail only when something went wrong — the
             // healthy case has nothing worth a whole button.
@@ -4964,15 +5185,15 @@ private struct SSHHostRow: View {
 
             // Essential inline actions only; everything else lives in ⋯.
             Button(action: onToggleKeepWarm) {
-                Image(systemName: isWarming ? "flame.fill" : flameIcon)
+                Image(systemName: showWarming ? "flame.fill" : flameIcon)
                     .font(.system(size: 12.5))
-                    .foregroundStyle(isWarming ? Color.orange : flameColor)
-                    .opacity(isWarming ? (breathing ? 1 : 0.35) : 1)
+                    .foregroundStyle(showWarming ? Color.orange : flameColor)
+                    .opacity(showWarming ? (breathing ? 1 : 0.35) : 1)
                     .frame(width: 26, height: 26)
                     .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
-            .help(isWarming ? "Signing in to \(host.alias)…" : flameHelp)
+            .help(showWarming ? "Signing in to \(host.alias)…" : flameHelp)
 
             Menu {
                 Button("Open SSH in Terminal", action: onOpen)
@@ -7542,7 +7763,14 @@ private struct SuggestingTextField: NSViewRepresentable {
 
         func comboBoxSelectionDidChange(_ notification: Notification) {
             guard let comboBox = notification.object as? NSComboBox else { return }
-            parent.text = comboBox.stringValue
+            // At this point the combo box's stringValue still holds the *previous*
+            // text — it isn't updated to the chosen item until after this delegate
+            // call. Reading stringValue here writes the old value straight back to
+            // the binding, so the field appears not to change. Read the selected
+            // item instead.
+            let index = comboBox.indexOfSelectedItem
+            guard index >= 0, let value = comboBox.itemObjectValue(at: index) as? String else { return }
+            parent.text = value
         }
 
         @MainActor

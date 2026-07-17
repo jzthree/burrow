@@ -554,7 +554,14 @@ public final class GatewaySupervisor: @unchecked Sendable {
         self.eventHandler = eventHandler
     }
 
+    /// How many sign-in attempts that never reached a live session to allow
+    /// before giving up and telling the user, instead of looping silently.
+    private static let maxNeverConnectedAttempts = 3
+
     public func run() async {
+        // Attempts in a row where openconnect exited before the VPN came up. A
+        // successful connect resets it; too many means retrying won't fix it.
+        var neverConnectedStreak = 0
         await withTaskCancellationHandler(operation: {
             while !Task.isCancelled {
                 do {
@@ -570,7 +577,25 @@ public final class GatewaySupervisor: @unchecked Sendable {
                         logger("[gateway \(gateway.name)] openconnect exited with code \(result.exitCode).\(suffix) SAML session ended; a fresh sign-in is required.")
                         break
                     }
-                    logger("[gateway \(gateway.name)] openconnect exited with code \(result.exitCode).\(suffix) Reconnecting in \(gateway.reconnectDelaySeconds)s.")
+                    if result.connected {
+                        // A real session dropped — a genuine reconnect.
+                        neverConnectedStreak = 0
+                        logger("[gateway \(gateway.name)] openconnect exited with code \(result.exitCode).\(suffix) Reconnecting in \(gateway.reconnectDelaySeconds)s.")
+                    } else {
+                        neverConnectedStreak += 1
+                        // A form that wants more input than we can feed will want
+                        // it every time, and a 2-minute hang means the user missed
+                        // (or never got) an approval — in both cases another silent
+                        // attempt can't help. Give up on the first sight, not the third.
+                        let futile = Self.indicatesInteractionRequired(result.diagnostic) || result.timedOut
+                        if futile || neverConnectedStreak >= Self.maxNeverConnectedAttempts {
+                            // Stop the silent loop and tell the user what to do.
+                            eventHandler(.failedToStart(giveUpMessage(diagnostic: result.diagnostic, exitCode: result.exitCode, timedOut: result.timedOut)))
+                            logger("[gateway \(gateway.name)] stopped after \(neverConnectedStreak) sign-in attempt(s) that never connected.\(suffix)")
+                            break
+                        }
+                        logger("[gateway \(gateway.name)] openconnect exited with code \(result.exitCode) before the VPN came up (attempt \(neverConnectedStreak)/\(Self.maxNeverConnectedAttempts)).\(suffix) Reconnecting in \(gateway.reconnectDelaySeconds)s.")
+                    }
                 } catch let error as AuthenticationFailureError {
                     if Task.isCancelled {
                         break
@@ -611,6 +636,15 @@ public final class GatewaySupervisor: @unchecked Sendable {
     private struct RunResult {
         let exitCode: Int32
         let diagnostic: String?
+        /// True if the SOCKS listener came up this run (the VPN session was
+        /// actually established). False means openconnect exited during the
+        /// connect/sign-in phase — retrying blindly won't help if the cause is
+        /// wrong auth mode (SAML vs password), an unmet second factor, or a
+        /// server that isn't answering.
+        let connected: Bool
+        /// True when openconnect stayed alive past the readiness deadline
+        /// without a session and Burrow ended the attempt itself.
+        let timedOut: Bool
     }
 
     private func runOnce() throws -> RunResult {
@@ -701,10 +735,19 @@ public final class GatewaySupervisor: @unchecked Sendable {
             }
             usleep(300_000)
         }
+        var timedOut = false
         if !announcedConnection && process.isRunning && !runState.hasAuthenticationFailure() {
             // Late success after the deadline still flips the state.
             if PortProbe.canConnect(host: "127.0.0.1", port: gateway.socksPort) {
+                announcedConnection = true
                 eventHandler(.connected)
+            } else {
+                // openconnect is alive but the session never came up. Waiting
+                // on it forever would leave the UI stuck at "Connecting" with
+                // no explanation — end the attempt and report a timeout.
+                timedOut = true
+                logger("[gateway \(gateway.name)] no VPN session after 120s; ending the attempt.")
+                process.terminate()
             }
         }
 
@@ -726,7 +769,12 @@ public final class GatewaySupervisor: @unchecked Sendable {
             throw AuthenticationFailureError(message: failure)
         }
 
-        return RunResult(exitCode: process.terminationStatus, diagnostic: runState.currentDiagnostic())
+        return RunResult(
+            exitCode: process.terminationStatus,
+            diagnostic: runState.currentDiagnostic(),
+            connected: announcedConnection,
+            timedOut: timedOut
+        )
     }
 
     /// Parses openconnect's "To trust this server in future, perhaps add this
@@ -765,7 +813,48 @@ public final class GatewaySupervisor: @unchecked Sendable {
             normalized.contains("connection timed out") ||
             normalized.contains("certificate") && normalized.contains("fail") ||
             normalized.contains("ssl connection failure") ||
-            normalized.contains("address already in use")
+            normalized.contains("address already in use") ||
+            normalized.contains("user input required")
+    }
+
+    /// openconnect printed "User input required in non-interactive mode": the
+    /// server's sign-in form wants more than the single stored password Burrow
+    /// can feed on stdin (a second factor, a group choice, …). Retrying is
+    /// pointless — every attempt hits the same form.
+    private static func indicatesInteractionRequired(_ diagnostic: String?) -> Bool {
+        diagnostic?.lowercased().contains("user input required") ?? false
+    }
+
+    /// The actionable message shown when we stop retrying a VPN that never came
+    /// up — tailored to whether it looks like a network problem or a sign-in one.
+    private func giveUpMessage(diagnostic: String?, exitCode: Int32, timedOut: Bool = false) -> String {
+        if timedOut {
+            let hint = gateway.usesSAML
+                ? "Finish the browser sign-in (including any Duo prompt), then connect again."
+                : "If your sign-in needs an approval (e.g. a push notification), complete it promptly after connecting — or switch this gateway to SAML sign-in if it uses a browser/SSO login."
+            return "The VPN session to \(gateway.server) didn’t come up within 2 minutes, so Burrow stopped the attempt. \(hint)"
+        }
+        if Self.indicatesInteractionRequired(diagnostic) {
+            // The definitive password-mode dead end: the server's form wants
+            // more than a stored password (second factor, group choice, …).
+            return "\(gateway.server) asked for more than a password (a second factor or group choice), which password mode can’t answer. Switch this gateway to SAML sign-in in its settings — the browser window handles the full sign-in, Duo included."
+        }
+        if let diagnostic, Self.looksLikeNetworkFailure(diagnostic) {
+            return "Can’t reach \(gateway.server): \(diagnostic). Stopped retrying — check your internet or the VPN server, then connect again."
+        }
+        let base = "Couldn’t complete VPN sign-in to \(gateway.server) — openconnect exited before the session came up (code \(exitCode)). Stopped retrying."
+        if gateway.usesSAML {
+            return base + " Approve the browser / Duo sign-in when it opens; if it never appears, check the gateway’s SAML group."
+        }
+        return base + " If this VPN uses single sign-on or Duo, switch this gateway to SAML sign-in — password mode can’t complete a second factor. Otherwise re-check the VPN password."
+    }
+
+    private static func looksLikeNetworkFailure(_ diagnostic: String) -> Bool {
+        let normalized = diagnostic.lowercased()
+        return normalized.contains("failed to connect") ||
+            normalized.contains("could not resolve") ||
+            normalized.contains("connection timed out") ||
+            normalized.contains("ssl connection failure")
     }
 
     private func terminateCurrentProcess() {
