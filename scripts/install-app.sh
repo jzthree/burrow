@@ -15,9 +15,15 @@ if [ -z "${SIGNING_IDENTITY:-}" ]; then
 fi
 SIGNING_IDENTITY="${SIGNING_IDENTITY:--}"
 BUILD_CONFIGURATION="${BUILD_CONFIGURATION:-release}"
-# Stamp the actual build (tag or commit) so installs are distinguishable;
-# a hardcoded "1.0" would make every source build claim the same version.
-VERSION="$(git -C "$ROOT_DIR" describe --tags --always 2>/dev/null || echo 0.0.0)"
+# Stamp the actual build (tag or commit) so installs are distinguishable, and
+# add "-dirty" when the working tree has uncommitted changes — otherwise a build
+# containing local edits would masquerade as the clean commit it was branched
+# from (and look identical to what's on GitHub when it isn't).
+VERSION="$(git -C "$ROOT_DIR" describe --tags --always --dirty 2>/dev/null || echo 0.0.0)"
+if [[ "$VERSION" == *-dirty ]]; then
+  echo "warning: installing a DIRTY build ($VERSION) — it contains uncommitted changes not on GitHub." >&2
+  echo "         commit + push to keep the running app, GitHub, and ~/Applications in sync." >&2
+fi
 
 echo "Building ${APP_NAME} (${BUILD_CONFIGURATION})..."
 swift build \
