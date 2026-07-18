@@ -118,6 +118,18 @@ final class TwoFactorStore {
             reason: reason,
             unlockCacheSeconds: unlockCacheSeconds
         )
+        if account.isHOTP {
+            // Counter-based: "current" at the stored counter, "next" as one-step
+            // look-ahead, then advance so a later warm produces a fresh code.
+            guard let secret = String(data: bytes, encoding: .utf8), !secret.isEmpty else {
+                throw TwoFactorStoreError.parseFailed
+            }
+            let counter = hotpCounter(account.name)
+            let current = DuoActivation.passcode(hotpSecret: secret, counter: counter, digits: account.digits)
+            let next = DuoActivation.passcode(hotpSecret: secret, counter: counter + 1, digits: account.digits)
+            setHOTPCounter(account.name, counter + 1)
+            return (current: current, next: next, periodEnd: .distantFuture)
+        }
         let secret = TOTPSecret(
             secret: bytes,
             digits: account.digits,
@@ -191,6 +203,48 @@ final class TwoFactorStore {
         return TOTPGenerator.code(for: secret, at: date)
     }
 
+    // MARK: - HOTP (Duo offline passcodes)
+
+    /// The HOTP moving factor is device state that advances on every generated
+    /// code, so the store owns it (in UserDefaults) rather than the synced config.
+    private func hotpCounterKey(_ account: String) -> String { "Burrow-2FA-hotp-counter.\(account)" }
+    private func hotpCounter(_ account: String) -> Int { UserDefaults.standard.integer(forKey: hotpCounterKey(account)) }
+    private func setHOTPCounter(_ account: String, _ value: Int) { UserDefaults.standard.set(value, forKey: hotpCounterKey(account)) }
+
+    /// Starts a freshly enrolled Duo account's counter at 0.
+    func resetHOTPCounter(account: String) { setHOTPCounter(account, 0) }
+
+    /// Reveals a Duo/HOTP passcode at the current counter, then advances and
+    /// persists it (behind Mac auth or the unlock cache).
+    func hotpCode(for account: TwoFactorAccount, reason: String, unlockCacheSeconds: Int = 0) async throws -> String {
+        let bytes = try await secretBytes(
+            account: account.name,
+            reason: reason,
+            unlockCacheSeconds: unlockCacheSeconds
+        )
+        return try nextHOTP(account: account.name, secretBytes: bytes, digits: account.digits)
+    }
+
+    /// An HOTP passcode from an already-open unlock session (no auth), advancing
+    /// the counter; nil if the session isn't open.
+    func sessionHOTPCode(for account: TwoFactorAccount) -> String? {
+        guard let bytes = sessionSeeds?[account.name] else { return nil }
+        return try? nextHOTP(account: account.name, secretBytes: bytes, digits: account.digits)
+    }
+
+    /// Generates the passcode at the account's current counter, then advances it.
+    /// Duo tolerates a look-ahead window, so an occasionally unused code just
+    /// costs a small resync on the server.
+    private func nextHOTP(account: String, secretBytes: Data, digits: Int) throws -> String {
+        guard let secret = String(data: secretBytes, encoding: .utf8), !secret.isEmpty else {
+            throw TwoFactorStoreError.parseFailed
+        }
+        let counter = hotpCounter(account)
+        let code = DuoActivation.passcode(hotpSecret: secret, counter: counter, digits: digits)
+        setHOTPCounter(account, counter + 1)
+        return code
+    }
+
     private func secretBytes(
         account: String,
         reason: String,
@@ -259,6 +313,7 @@ final class TwoFactorStore {
 
     func delete(account: String) {
         cachedSecrets[account] = nil
+        UserDefaults.standard.removeObject(forKey: hotpCounterKey(account))
         SecItemDelete(baseQuery(account: account) as CFDictionary)
     }
 }

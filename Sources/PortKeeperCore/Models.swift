@@ -76,10 +76,16 @@ public struct TwoFactorAccount: Codable, Sendable, Identifiable, Equatable {
     /// How the askpass answers prompts: "codeOnly" (the keyboard-interactive
     /// prompt is just the OTP) or "passwordThenCode" (password, then OTP).
     public var strategy: String
+    /// "totp" (time-based, the default) or "hotp" (counter-based, e.g. a Duo
+    /// offline passcode). The HOTP moving factor is device state kept by the
+    /// store (it advances on every generation), not synced config.
+    public var kind: String
 
     public var totpAlgorithm: TOTPSecret.Algorithm {
         TOTPSecret.Algorithm(rawValue: algorithm.lowercased()) ?? .sha1
     }
+
+    public var isHOTP: Bool { kind.lowercased() == "hotp" }
 
     public init(
         name: String,
@@ -87,7 +93,8 @@ public struct TwoFactorAccount: Codable, Sendable, Identifiable, Equatable {
         period: Int = 30,
         algorithm: String = "sha1",
         sshHost: String? = nil,
-        strategy: String = "codeOnly"
+        strategy: String = "codeOnly",
+        kind: String = "totp"
     ) {
         self.name = name
         self.digits = digits
@@ -95,6 +102,7 @@ public struct TwoFactorAccount: Codable, Sendable, Identifiable, Equatable {
         self.algorithm = algorithm
         self.sshHost = sshHost
         self.strategy = strategy
+        self.kind = kind
     }
 
     public init(from decoder: Decoder) throws {
@@ -105,6 +113,7 @@ public struct TwoFactorAccount: Codable, Sendable, Identifiable, Equatable {
         self.algorithm = try container.decodeIfPresent(String.self, forKey: .algorithm) ?? "sha1"
         self.sshHost = try container.decodeIfPresent(String.self, forKey: .sshHost)
         self.strategy = try container.decodeIfPresent(String.self, forKey: .strategy) ?? "codeOnly"
+        self.kind = try container.decodeIfPresent(String.self, forKey: .kind) ?? "totp"
     }
 }
 
@@ -226,6 +235,10 @@ public struct GatewayConfig: Codable, Sendable, Identifiable, Equatable {
     public var sshHostPatterns: [String]
     public var extraArgs: [String]
     public var reconnectDelaySeconds: Int
+    /// Connect this gateway automatically at launch (mirrors a tunnel's
+    /// `enabled`). With Okta "remember this device" a SAML gateway usually
+    /// finishes hands-free; otherwise it opens the sign-in flow once.
+    public var autoConnect: Bool
 
     public var usesSAML: Bool {
         authMode.lowercased() == "saml"
@@ -243,6 +256,7 @@ public struct GatewayConfig: Codable, Sendable, Identifiable, Equatable {
         case sshHostPatterns
         case extraArgs
         case reconnectDelaySeconds
+        case autoConnect
     }
 
     public init(
@@ -256,7 +270,8 @@ public struct GatewayConfig: Codable, Sendable, Identifiable, Equatable {
         healthCheckHost: String? = nil,
         sshHostPatterns: [String] = [],
         extraArgs: [String] = [],
-        reconnectDelaySeconds: Int = 5
+        reconnectDelaySeconds: Int = 5,
+        autoConnect: Bool = false
     ) {
         self.name = name
         self.vpnProtocol = vpnProtocol
@@ -269,6 +284,7 @@ public struct GatewayConfig: Codable, Sendable, Identifiable, Equatable {
         self.sshHostPatterns = sshHostPatterns
         self.extraArgs = extraArgs
         self.reconnectDelaySeconds = reconnectDelaySeconds
+        self.autoConnect = autoConnect
     }
 
     public init(from decoder: Decoder) throws {
@@ -284,6 +300,7 @@ public struct GatewayConfig: Codable, Sendable, Identifiable, Equatable {
         self.sshHostPatterns = try container.decodeIfPresent([String].self, forKey: .sshHostPatterns) ?? []
         self.extraArgs = try container.decodeIfPresent([String].self, forKey: .extraArgs) ?? []
         self.reconnectDelaySeconds = try container.decodeIfPresent(Int.self, forKey: .reconnectDelaySeconds) ?? 5
+        self.autoConnect = try container.decodeIfPresent(Bool.self, forKey: .autoConnect) ?? false
     }
 }
 

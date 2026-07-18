@@ -189,7 +189,7 @@ struct AuthenticatorSheet: View {
                 .foregroundStyle(.secondary.opacity(0.5))
             Text("No codes yet")
                 .font(.system(size: 13, weight: .semibold))
-            Text("Add a code from any site's authenticator setup — scan its QR right off the screen, or paste the otpauth:// link or “can't scan” secret key.")
+            Text("Add a code from any site's authenticator setup — scan its QR right off the screen, or paste the otpauth:// link, a Duo duo:// activation code, or a “can't scan” secret key.")
                 .font(.system(size: 11))
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
@@ -362,6 +362,13 @@ private struct AddCodeCard: View {
         return trimmed.isEmpty ? nil : TOTPSecret.parse(trimmed)
     }
 
+    /// A Duo activation code — valid to add, but it's not a TOTP secret (it needs
+    /// the online activation), so `parsed` is nil for it.
+    private var isDuoCode: Bool {
+        let trimmed = secretText.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.lowercased().hasPrefix("duo://") && DuoActivation.parse(trimmed) != nil
+    }
+
     private var suggestedName: String {
         guard let parsed else { return "" }
         if let issuer = parsed.issuer, !issuer.isEmpty { return issuer }
@@ -380,7 +387,7 @@ private struct AddCodeCard: View {
     }
 
     private var canAdd: Bool {
-        parsed != nil && !trimmedName.isEmpty && !nameTaken
+        (parsed != nil || isDuoCode) && !trimmedName.isEmpty && !nameTaken
     }
 
     var body: some View {
@@ -393,7 +400,7 @@ private struct AddCodeCard: View {
                     .font(.system(size: 9, weight: .semibold))
                     .foregroundStyle(.secondary)
                 HStack(spacing: 6) {
-                    TextField("otpauth://… or base32 key", text: $secretText)
+                    TextField("otpauth://… · duo://… · or base32 key", text: $secretText)
                         .textFieldStyle(.roundedBorder)
                         .font(.system(size: 12, design: .monospaced))
                     Button {
@@ -498,12 +505,17 @@ private struct AddCodeCard: View {
                   systemImage: "checkmark.seal.fill")
                 .font(.system(size: 10))
                 .foregroundStyle(.green)
+        } else if isDuoCode {
+            Label("Duo activation code · Add provisions this device (single-use; may replace your phone's Duo)",
+                  systemImage: "checkmark.shield.fill")
+                .font(.system(size: 10))
+                .foregroundStyle(.green)
         } else if !secretText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             Label("Not a recognizable authenticator secret yet", systemImage: "exclamationmark.triangle.fill")
                 .font(.system(size: 10))
                 .foregroundStyle(.orange)
         } else {
-            Text("Paste the otpauth:// link, or the “can't scan the QR?” key.")
+            Text("Paste the otpauth:// link, a Duo duo:// activation code, or the “can't scan the QR?” key.")
                 .font(.system(size: 10))
                 .foregroundStyle(.secondary)
         }

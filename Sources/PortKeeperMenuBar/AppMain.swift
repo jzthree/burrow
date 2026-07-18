@@ -342,6 +342,7 @@ final class MenuBarViewModel: ObservableObject {
             // immediately.
             guard let self else { return }
             await self.adoptSurvivingGatewaySessions()
+            self.startAutoConnectGatewaysIfNeeded()
             await self.adoptSurvivingTunnelProcesses()
             self.startEnabledTunnelsIfNeeded()
         }
@@ -876,6 +877,28 @@ final class MenuBarViewModel: ObservableObject {
         }
         hasStartedAutoConnect = true
         startEnabledTunnels()
+    }
+
+    private var hasStartedGatewayAutoConnect = false
+
+    /// Connect auto-connect gateways once at launch — mirrors enabled tunnels.
+    /// Run after surviving sessions are adopted so a live gateway is never raced.
+    /// Headless (allowPasswordPrompt: false): a saved-password gateway connects
+    /// silently; a SAML gateway signs in off-screen via remember-device, or shows
+    /// "click Connect" if that needs a hand.
+    func startAutoConnectGatewaysIfNeeded() {
+        guard !hasStartedGatewayAutoConnect else {
+            return
+        }
+        hasStartedGatewayAutoConnect = true
+        for state in gateways where state.config.autoConnect {
+            // startGateway also guards against a live task / adopted session; skip
+            // the obvious already-up cases here to avoid a redundant attempt.
+            if state.connectionState == .connected || adoptedGateways.contains(state.id) {
+                continue
+            }
+            _ = startGateway(named: state.id, allowPasswordPrompt: false)
+        }
     }
 
     func startAll() {
@@ -2354,6 +2377,9 @@ final class MenuBarViewModel: ObservableObject {
     private func refreshRevealedFromSession() {
         let now = Date()
         for account in twoFactorAccounts {
+            // HOTP (Duo) codes are counter-based: generating one advances state,
+            // so they're revealed only on explicit tap, never auto-refreshed.
+            if account.isHOTP { continue }
             if let existing = revealedCodes[account.id], existing.periodEnd > now { continue }
             guard let code = twoFactorStore.sessionCode(for: account, at: now) else { continue }
             let period = Double(max(1, account.period))
@@ -2437,6 +2463,10 @@ final class MenuBarViewModel: ObservableObject {
         guard let account = twoFactorAccounts.first(where: { $0.id == name }) else {
             return
         }
+        if account.isHOTP {
+            revealDuoCode(account)
+            return
+        }
         Task { @MainActor [weak self] in
             guard let self else { return }
             let now = Date()
@@ -2481,6 +2511,14 @@ final class MenuBarViewModel: ObservableObject {
             globalMessage = "A name is required for the 2FA account."
             return false
         }
+        // A Duo activation code isn't a TOTP secret — it needs a one-time online
+        // activation. Route it there (async); the form dismisses and the result
+        // arrives via globalMessage.
+        let trimmedSecret = secret.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmedSecret.lowercased().hasPrefix("duo://"), let parsed = DuoActivation.parse(trimmedSecret) {
+            enrollDuo(name: trimmedName, parsed: parsed)
+            return true
+        }
         do {
             let parsed = try twoFactorStore.enroll(secretInput: secret, account: trimmedName)
             let account = TwoFactorAccount(
@@ -2510,6 +2548,71 @@ final class MenuBarViewModel: ObservableObject {
         } catch {
             globalMessage = "Couldn't save code: \(error.localizedDescription)"
             return false
+        }
+    }
+
+    /// Enrolls a Duo account: performs the one-time activation exchange (which
+    /// provisions Burrow as a Duo device and consumes the single-use code),
+    /// stores the returned HOTP secret, and records an HOTP account.
+    private func enrollDuo(name: String, parsed: DuoActivation.ParsedCode) {
+        globalMessage = "Activating Duo for \(name) with \(parsed.host)…"
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            do {
+                let enrollment = try await DuoActivation.activate(parsed)
+                try self.twoFactorStore.storeSecretBytes(Data(enrollment.hotpSecret.utf8), account: name)
+                self.twoFactorStore.resetHOTPCounter(account: name)
+                let account = TwoFactorAccount(
+                    name: name,
+                    digits: 6,
+                    period: 30,
+                    algorithm: "sha1",
+                    kind: "hotp"
+                )
+                try self.store.upsertTwoFactorAccount(account, replacing: name)
+                self.loadConfig()
+                if self.authenticatorUnlocked {
+                    self.twoFactorStore.addToUnlockSession(accountName: name)
+                }
+                let who = enrollment.customerName.map { " (\($0))" } ?? ""
+                self.globalMessage = "Enrolled Duo for \(name)\(who) — reveal a passcode from the Authenticator or link it to a host."
+            } catch let error as DuoActivation.DuoError {
+                self.globalMessage = error.localizedDescription
+            } catch let error as TwoFactorStoreError {
+                self.globalMessage = error.localizedDescription
+            } catch {
+                self.globalMessage = "Couldn't enroll Duo for \(name): \(error.localizedDescription)"
+            }
+        }
+    }
+
+    /// Reveals a Duo/HOTP passcode. The store advances the counter as it
+    /// generates, so each reveal is a fresh code. Unlike TOTP it doesn't expire
+    /// on a timer — it stays shown until hidden or another is revealed.
+    private func revealDuoCode(_ account: TwoFactorAccount) {
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            do {
+                let code: String
+                if let sessionCode = self.twoFactorStore.sessionHOTPCode(for: account) {
+                    code = sessionCode
+                } else {
+                    code = try await self.twoFactorStore.hotpCode(
+                        for: account,
+                        reason: "Reveal the \(account.name) Duo passcode",
+                        unlockCacheSeconds: self.twoFactorUnlockCacheSeconds
+                    )
+                }
+                self.revealedCodes[account.name] = RevealedCode(code: code, periodEnd: .distantFuture)
+                NSPasteboard.general.clearContents()
+                NSPasteboard.general.setString(code, forType: .string)
+                self.globalMessage = "Copied \(account.name) Duo passcode — type it into the Duo prompt."
+            } catch let error as TwoFactorStoreError {
+                if case .cancelled = error { return }
+                self.globalMessage = error.localizedDescription
+            } catch {
+                self.globalMessage = "Couldn't read the \(account.name) Duo passcode: \(error.localizedDescription)"
+            }
         }
     }
 
@@ -2799,6 +2902,26 @@ final class MenuBarViewModel: ObservableObject {
             }
             loadConfig()
             globalMessage = enabled ? "Enabled auto-connect for \(name)." : "Disabled auto-connect for \(name)."
+        } catch {
+            globalMessage = "Failed to update auto-connect: \(error.localizedDescription)"
+        }
+    }
+
+    func setGatewayAutoConnect(named name: String, enabled: Bool) {
+        do {
+            let found = try store.mutate { config -> Bool in
+                guard let index = config.gateways.firstIndex(where: { $0.name == name }) else {
+                    return false
+                }
+                config.gateways[index].autoConnect = enabled
+                return true
+            }
+            guard found else {
+                globalMessage = "Gateway '\(name)' not found."
+                return
+            }
+            loadConfig()
+            globalMessage = enabled ? "Auto-connect \(name) at launch." : "Won't auto-connect \(name)."
         } catch {
             globalMessage = "Failed to update auto-connect: \(error.localizedDescription)"
         }
@@ -4581,6 +4704,7 @@ struct MenuBarContent: View {
                         onStop: { viewModel.stopGateway(named: gateway.id) },
                         onEdit: { viewModel.openGatewayEditor(for: gateway.id) },
                         onDelete: { viewModel.deleteGateway(named: gateway.id) },
+                        onToggleAutoConnect: { viewModel.setGatewayAutoConnect(named: gateway.id, enabled: $0) },
                         onOpenBrowser: { viewModel.openBrowser($0, viaGateway: gateway.id) },
                         canMoveUp: viewModel.canMoveGateway(named: gateway.id, up: true),
                         canMoveDown: viewModel.canMoveGateway(named: gateway.id, up: false),
@@ -5609,6 +5733,7 @@ private struct GatewayRow: View {
     let onStop: () -> Void
     let onEdit: () -> Void
     let onDelete: () -> Void
+    var onToggleAutoConnect: (Bool) -> Void = { _ in }
     var onOpenBrowser: (ChromiumBrowser) -> Void = { _ in }
     var canMoveUp: Bool = false
     var canMoveDown: Bool = false
@@ -5739,6 +5864,9 @@ private struct GatewayRow: View {
     private var menu: some View {
         Menu {
             Button("Edit…", action: onEdit)
+            Button(gateway.config.autoConnect ? "Auto-Connect at Launch ✓" : "Auto-Connect at Launch") {
+                onToggleAutoConnect(!gateway.config.autoConnect)
+            }
             let browsers = ChromiumBrowserLauncher.installed()
             if !browsers.isEmpty {
                 Divider()

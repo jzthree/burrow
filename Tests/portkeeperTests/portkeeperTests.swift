@@ -509,6 +509,26 @@ private func waitUntil(timeout: TimeInterval, condition: @escaping @Sendable () 
     #expect(after.contains("ControlMaster auto"))
 }
 
+@Test func duoActivationParsesCodeAndHost() async throws {
+    let parsed = try #require(DuoActivation.parse("duo://iwAn2DUTIJoOPLuFGjQ3-YXBpLTMyMmMyNzQ5LmR1b3NlY3VyaXR5LmNvbQ"))
+    #expect(parsed.activationCode == "iwAn2DUTIJoOPLuFGjQ3")
+    #expect(parsed.host == "api-322c2749.duosecurity.com")
+    // Tolerates the bare code (no scheme), and rejects junk.
+    #expect(DuoActivation.parse("iwAn2DUTIJoOPLuFGjQ3-YXBpLTMyMmMyNzQ5LmR1b3NlY3VyaXR5LmNvbQ")?.host == "api-322c2749.duosecurity.com")
+    #expect(DuoActivation.parse("nodash") == nil)
+}
+
+@Test func duoPasscodeMatchesRFC4226() async throws {
+    // Duo offline passcodes are HOTP-SHA1 (6 digits) with the ASCII bytes of the
+    // hotp_secret as the key — i.e. exactly the RFC 4226 "12345678901234567890"
+    // reference vectors.
+    let key = "12345678901234567890"
+    #expect(DuoActivation.passcode(hotpSecret: key, counter: 0) == "755224")
+    #expect(DuoActivation.passcode(hotpSecret: key, counter: 1) == "287082")
+    #expect(DuoActivation.passcode(hotpSecret: key, counter: 2) == "359152")
+    #expect(DuoActivation.passcode(hotpSecret: key, counter: 9) == "520489")
+}
+
 @Test func warmDiagnosisClassifiesSSHFailures() async throws {
     #expect(WarmDiagnosis.classify("jzthree@vista: Permission denied (keyboard-interactive).") == .authRejected)
     #expect(WarmDiagnosis.classify("ssh: connect to host x port 22: Operation timed out") == .network)

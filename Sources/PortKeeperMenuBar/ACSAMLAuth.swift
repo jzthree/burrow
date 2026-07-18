@@ -47,20 +47,19 @@ final class AnyConnectSAMLAuthenticator: NSObject, WKNavigationDelegate, NSWindo
     private var webView: WKWebView?
     private var completion: ((Result<String, Error>) -> Void)?
     private var cookiePollTask: Task<Void, Never>?
+    private var headlessTimeoutTask: Task<Void, Never>?
 
     init(gateway: GatewayConfig) {
         self.gateway = gateway
     }
 
-    /// Opens the sign-in window and watches for the session cookie.
-    /// `interactive == false` (headless launch auto-start) skips the window
-    /// and reports that a sign-in is needed, mirroring the GP flow.
+    /// Opens the sign-in and watches for the session cookie. `interactive`
+    /// shows the window; `interactive == false` (autoconnect) runs it off-screen
+    /// and lets Okta "remember this device" complete it silently — falling back
+    /// to `.interactionRequired` (the gateway shows "click Connect") if no
+    /// session cookie appears before the timeout.
     func begin(interactive: Bool = true, completion: @escaping (Result<String, Error>) -> Void) {
         self.completion = completion
-        guard interactive else {
-            finish(.failure(ACSAMLError.interactionRequired))
-            return
-        }
 
         // A configured group jumps straight into its SAML redirect; without
         // one the ASA logon page lets the user pick the group and sign in.
@@ -120,9 +119,23 @@ final class AnyConnectSAMLAuthenticator: NSObject, WKNavigationDelegate, NSWindo
             }
         }
 
-        MenuBarPopover.dismiss()
-        window.makeKeyAndOrderFront(nil)
-        NSApp.activate(ignoringOtherApps: true)
+        if interactive {
+            MenuBarPopover.dismiss()
+            window.makeKeyAndOrderFront(nil)
+            NSApp.activate(ignoringOtherApps: true)
+        } else {
+            // Autoconnect: run the sign-in off-screen (ordered front, so the web
+            // view runs at full speed rather than being throttled) — the user
+            // sees nothing. Remember-device usually completes it via redirects
+            // and the webvpn cookie appears; otherwise the timeout gives up.
+            window.setFrameOrigin(NSPoint(x: -30000, y: -30000))
+            window.orderFrontRegardless()
+            headlessTimeoutTask = Task { @MainActor [weak self] in
+                try? await Task.sleep(for: .seconds(20))
+                guard let self, self.completion != nil else { return }
+                self.finish(.failure(ACSAMLError.interactionRequired))
+            }
+        }
     }
 
     func cancel() {
@@ -185,6 +198,8 @@ final class AnyConnectSAMLAuthenticator: NSObject, WKNavigationDelegate, NSWindo
         self.completion = nil
         cookiePollTask?.cancel()
         cookiePollTask = nil
+        headlessTimeoutTask?.cancel()
+        headlessTimeoutTask = nil
         if closeWindow {
             window?.delegate = nil
             window?.close()
