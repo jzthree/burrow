@@ -5741,6 +5741,40 @@ private struct GatewayRow: View {
     var onMoveDown: () -> Void = {}
     @State private var isPrimaryHovered = false
     @State private var isDetailsPresented = false
+    @State private var isAutoHovered = false
+
+    // Matches the tunnel row's lightning toggle: accent when auto-connect is on.
+    private var autoConnectButton: some View {
+        Button {
+            onToggleAutoConnect(!gateway.config.autoConnect)
+        } label: {
+            Image(systemName: "bolt.fill")
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(
+                    gateway.config.autoConnect
+                        ? Color.burrowAccent
+                        : Color.secondary.opacity(isAutoHovered ? 0.55 : 0.30)
+                )
+                .frame(width: 28, height: 28)
+                .background(
+                    Circle()
+                        .fill(
+                            gateway.config.autoConnect
+                                ? Color.burrowAccentHalo.opacity(isAutoHovered ? 1.0 : 0.75)
+                                : Color.secondary.opacity(isAutoHovered ? 0.09 : 0.0)
+                        )
+                )
+                .scaleEffect(isAutoHovered ? 1.05 : 1.0)
+        }
+        .buttonStyle(CompactPressButtonStyle())
+        .onHover { hovering in
+            withAnimation(.easeOut(duration: 0.12)) {
+                isAutoHovered = hovering
+            }
+        }
+        .frame(width: 28, height: 28)
+        .help(gateway.config.autoConnect ? "Auto-connect on — click to turn off" : "Auto-connect off — click to turn on")
+    }
 
     var body: some View {
         HStack(alignment: .center, spacing: 10) {
@@ -5780,11 +5814,12 @@ private struct GatewayRow: View {
             Spacer(minLength: 6)
 
             HStack(spacing: 5) {
+                autoConnectButton
                 primaryButton
                 detailsButton
                 menu
             }
-            .frame(width: 122, alignment: .trailing)
+            .frame(width: 150, alignment: .trailing)
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 10)
@@ -5864,9 +5899,6 @@ private struct GatewayRow: View {
     private var menu: some View {
         Menu {
             Button("Edit…", action: onEdit)
-            Button(gateway.config.autoConnect ? "Auto-Connect at Launch ✓" : "Auto-Connect at Launch") {
-                onToggleAutoConnect(!gateway.config.autoConnect)
-            }
             let browsers = ChromiumBrowserLauncher.installed()
             if !browsers.isEmpty {
                 Divider()
