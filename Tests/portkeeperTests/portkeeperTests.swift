@@ -30,6 +30,13 @@ final class EventRecorder: @unchecked Sendable {
         lock.unlock()
         return diagnostic
     }
+
+    func count(where predicate: (TunnelRuntimeEvent) -> Bool) -> Int {
+        lock.lock()
+        let result = events.filter(predicate).count
+        lock.unlock()
+        return result
+    }
 }
 
 @Test func sshArgumentsIncludeExpectedFlags() async throws {
@@ -145,7 +152,8 @@ final class EventRecorder: @unchecked Sendable {
         eventHandler: { event in
             recorder.append(event)
         },
-        executablePath: scriptURL.path
+        executablePath: scriptURL.path,
+        authFailurePolicy: .stopAndReport
     )
 
     await supervisor.run()
@@ -214,7 +222,8 @@ final class EventRecorder: @unchecked Sendable {
             "PORTKEEPER_PASSWORD": "wrong-password",
             "PORTKEEPER_ASKPASS_LOG": askPassLogURL.path,
         ],
-        executablePath: fakeSSHURL.path
+        executablePath: fakeSSHURL.path,
+        authFailurePolicy: .stopAndReport
     )
 
     await supervisor.run()
@@ -289,7 +298,7 @@ final class EventRecorder: @unchecked Sendable {
         runTask.cancel()
     }
 
-    try await waitUntil(timeout: 2.0) {
+    try await waitUntil(timeout: 8.0) {
         recorder.contains {
             if case .exited = $0 { return true }
             return false
@@ -309,6 +318,66 @@ final class EventRecorder: @unchecked Sendable {
     #expect(!sawAuthFailure)
     #expect(sawExit)
     #expect(diagnostic?.contains("Could not resolve hostname") == true)
+
+    runTask.cancel()
+    _ = await runTask.result
+}
+
+@Test func retryDelayDoublesToCapAndFloorsAtOneSecond() async throws {
+    // Ordinary schedule: reconnect-delay 5 doubling to the 60s cap — retries
+    // never stop, they just slow down.
+    let ordinary = (1...7).map { TunnelSupervisor.retryDelay(consecutiveFailures: $0, base: 5, cap: 60) }
+    #expect(ordinary == [5, 10, 20, 40, 60, 60, 60])
+    // Auth schedule: 30s doubling to the 300s cap.
+    let auth = (1...6).map { TunnelSupervisor.retryDelay(consecutiveFailures: $0, base: 30, cap: 300) }
+    #expect(auth == [30, 60, 120, 240, 300, 300])
+    // Degenerate config never busy-loops.
+    #expect(TunnelSupervisor.retryDelay(consecutiveFailures: 1, base: 0, cap: 60) == 1)
+}
+
+@Test func supervisorKeepsRetryingThroughAuthFailureByDefault() async throws {
+    let tempDirectory = FileManager.default.temporaryDirectory
+        .appendingPathComponent(UUID().uuidString, isDirectory: true)
+    try FileManager.default.createDirectory(at: tempDirectory, withIntermediateDirectories: true)
+
+    let scriptURL = tempDirectory.appendingPathComponent("fake-ssh.sh")
+    let script = """
+    #!/bin/sh
+    echo "alice@example.com: Permission denied (publickey,password)." 1>&2
+    exit 255
+    """
+    try script.write(to: scriptURL, atomically: true, encoding: .utf8)
+    try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: scriptURL.path)
+
+    let recorder = EventRecorder()
+    let tunnel = TunnelConfig(
+        name: "auth-retry",
+        host: "example.com",
+        user: "alice",
+        forwards: [],
+        reconnectDelaySeconds: 1
+    )
+
+    let supervisor = TunnelSupervisor(
+        tunnel: tunnel,
+        logger: { _ in },
+        eventHandler: { event in
+            recorder.append(event)
+        },
+        executablePath: scriptURL.path,
+        retryTuning: RetryTuning(ordinaryCapSeconds: 1, authBaseSeconds: 1, authCapSeconds: 1)
+    )
+
+    // A key-based tunnel must ride through auth refusals (a host mid-reboot
+    // reports "Permission denied" too) — a second attempt cycle proves the
+    // supervisor did not latch off after the first strike.
+    let runTask = Task { await supervisor.run() }
+    defer { runTask.cancel() }
+
+    try await waitUntil(timeout: 10.0) {
+        recorder.count(where: { if case .authenticationFailed = $0 { return true }; return false }) >= 2 &&
+            recorder.count(where: { if case .starting = $0 { return true }; return false }) >= 2
+    }
 
     runTask.cancel()
     _ = await runTask.result

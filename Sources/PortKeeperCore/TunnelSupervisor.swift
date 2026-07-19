@@ -16,6 +16,36 @@ struct AuthenticationFailureError: LocalizedError {
     var errorDescription: String? { message }
 }
 
+/// What the supervisor does when ssh output classifies as an authentication
+/// failure. Ordinary failures always retry forever — this policy only governs
+/// the auth-classified ones.
+public enum AuthFailureRetryPolicy: Sendable {
+    /// Keep the supervisor alive and retry on a long capped backoff. The right
+    /// default for key-authenticated tunnels: "Permission denied" there is as
+    /// often a host mid-reboot (PAM/sssd half-down) as a revoked key, and
+    /// retrying a public key cannot lock an account.
+    case retryWithBackoff
+    /// Return from run() so the owner can invalidate credentials and re-prompt
+    /// (the app's password flow). Retrying forever with a known-bad password
+    /// would hammer the host and risk a lockout.
+    case stopAndReport
+}
+
+/// Backoff schedule knobs — injectable so tests don't sleep for real.
+public struct RetryTuning: Sendable {
+    public var ordinaryCapSeconds: Int
+    public var authBaseSeconds: Int
+    public var authCapSeconds: Int
+
+    public init(ordinaryCapSeconds: Int = 60, authBaseSeconds: Int = 30, authCapSeconds: Int = 300) {
+        self.ordinaryCapSeconds = ordinaryCapSeconds
+        self.authBaseSeconds = authBaseSeconds
+        self.authCapSeconds = authCapSeconds
+    }
+
+    public static let standard = RetryTuning()
+}
+
 public final class TunnelSupervisor: @unchecked Sendable {
     private let tunnel: TunnelConfig
     private let logger: @Sendable (String) -> Void
@@ -23,6 +53,8 @@ public final class TunnelSupervisor: @unchecked Sendable {
     private let environment: [String: String]
     private let executablePath: String
     private let captureOutput: Bool
+    private let authFailurePolicy: AuthFailureRetryPolicy
+    private let retryTuning: RetryTuning
     private let processLock = NSLock()
     private var currentProcess: Process?
 
@@ -32,7 +64,9 @@ public final class TunnelSupervisor: @unchecked Sendable {
         eventHandler: @escaping @Sendable (TunnelRuntimeEvent) -> Void = { _ in },
         environment: [String: String] = [:],
         executablePath: String = "/usr/bin/ssh",
-        captureOutput: Bool = true
+        captureOutput: Bool = true,
+        authFailurePolicy: AuthFailureRetryPolicy = .retryWithBackoff,
+        retryTuning: RetryTuning = .standard
     ) {
         self.tunnel = tunnel
         self.logger = logger
@@ -40,39 +74,84 @@ public final class TunnelSupervisor: @unchecked Sendable {
         self.environment = environment
         self.executablePath = executablePath
         self.captureOutput = captureOutput
+        self.authFailurePolicy = authFailurePolicy
+        self.retryTuning = retryTuning
+    }
+
+    /// Delay before retry number `consecutiveFailures` (1-based): base doubling
+    /// per consecutive failure, capped. A run that reached forward readiness
+    /// resets the count, so a long-lived connection that drops retries fast.
+    static func retryDelay(consecutiveFailures: Int, base: Int, cap: Int) -> Int {
+        let flooredBase = max(1, base)
+        let cappedAt = max(flooredBase, cap)
+        var delay = flooredBase
+        for _ in 1..<max(1, consecutiveFailures) {
+            delay = min(cappedAt, delay * 2)
+            if delay >= cappedAt { break }
+        }
+        return min(cappedAt, delay)
     }
 
     public func run() async {
         await withTaskCancellationHandler(operation: {
+            // Never give up: failures back off (doubling to a cap) instead of
+            // counting toward a stop. The floor of 1s keeps an instantly-failing
+            // ssh from spawn-fail-respawning in a tight loop; the cap keeps a
+            // long outage from hammering the host every few seconds.
+            var consecutiveFailures = 0
+            var nextDelaySeconds = max(1, tunnel.reconnectDelaySeconds)
             while !Task.isCancelled {
                 do {
                     let result = try runOnce()
                     if Task.isCancelled {
                         break
                     }
+                    if result.didConnect {
+                        consecutiveFailures = 0
+                    }
+                    consecutiveFailures += 1
+                    nextDelaySeconds = Self.retryDelay(
+                        consecutiveFailures: consecutiveFailures,
+                        base: tunnel.reconnectDelaySeconds,
+                        cap: retryTuning.ordinaryCapSeconds
+                    )
                     eventHandler(.exited(result.exitCode, result.diagnosticMessage))
                     let diagnosticSuffix = result.diagnosticMessage.map { " \($0)" } ?? ""
-                    logger("[\(tunnel.name)] ssh exited with code \(result.exitCode).\(diagnosticSuffix) Reconnecting in \(tunnel.reconnectDelaySeconds)s.")
+                    logger("[\(tunnel.name)] ssh exited with code \(result.exitCode).\(diagnosticSuffix) Reconnecting in \(nextDelaySeconds)s.")
                 } catch let error as AuthenticationFailureError {
                     if Task.isCancelled {
                         break
                     }
                     eventHandler(.authenticationFailed(error.message))
-                    logger("[\(tunnel.name)] authentication failed: \(error.message). Stopping retries until credentials are updated.")
-                    break
+                    if case .stopAndReport = authFailurePolicy {
+                        logger("[\(tunnel.name)] authentication failed: \(error.message). Stopping retries until credentials are updated.")
+                        break
+                    }
+                    // Key-based tunnel: a host mid-reboot reports "Permission
+                    // denied" too. Back off hard, but never stop.
+                    consecutiveFailures += 1
+                    nextDelaySeconds = Self.retryDelay(
+                        consecutiveFailures: consecutiveFailures,
+                        base: retryTuning.authBaseSeconds,
+                        cap: retryTuning.authCapSeconds
+                    )
+                    logger("[\(tunnel.name)] authentication failed: \(error.message). Retrying in \(nextDelaySeconds)s.")
                 } catch {
                     if Task.isCancelled {
                         break
                     }
+                    consecutiveFailures += 1
+                    nextDelaySeconds = Self.retryDelay(
+                        consecutiveFailures: consecutiveFailures,
+                        base: tunnel.reconnectDelaySeconds,
+                        cap: retryTuning.ordinaryCapSeconds
+                    )
                     eventHandler(.failedToStart(error.localizedDescription))
-                    logger("[\(tunnel.name)] failed to start: \(error.localizedDescription). Retrying in \(tunnel.reconnectDelaySeconds)s.")
+                    logger("[\(tunnel.name)] failed to start: \(error.localizedDescription). Retrying in \(nextDelaySeconds)s.")
                 }
 
                 do {
-                    // Floor of 1s: a configured 0 (or negative) with an
-                    // instantly-failing ssh would otherwise spawn-fail-respawn
-                    // in a tight loop, pegging a core and hammering the host.
-                    try await Task.sleep(for: .seconds(max(1, tunnel.reconnectDelaySeconds)))
+                    try await Task.sleep(for: .seconds(max(1, nextDelaySeconds)))
                 } catch {
                     break
                 }
@@ -161,7 +240,11 @@ public final class TunnelSupervisor: @unchecked Sendable {
             throw AuthenticationFailureError(message: authenticationFailure)
         }
 
-        return RunResult(exitCode: process.terminationStatus, diagnosticMessage: runState.currentDiagnostic())
+        return RunResult(
+            exitCode: process.terminationStatus,
+            diagnosticMessage: runState.currentDiagnostic(),
+            didConnect: didConnect
+        )
     }
 
     private static func isAuthenticationFailureLine(_ line: String) -> Bool {
@@ -297,6 +380,8 @@ public final class TunnelSupervisor: @unchecked Sendable {
 private struct RunResult {
     let exitCode: Int32
     let diagnosticMessage: String?
+    /// Whether this run reached forward readiness — resets the retry backoff.
+    let didConnect: Bool
 }
 
 private final class RunState: @unchecked Sendable {

@@ -854,16 +854,27 @@ final class MenuBarViewModel: ObservableObject {
         // when the watcher fires for our own writes.
         globalMessage = previousMessage
 
-        // External edits previously reloaded tunnel DEFINITIONS but never
-        // started newly-eligible tunnels — a tunnel added or fixed via the CLI
-        // stayed disconnected until the app restarted. Start enabled,
-        // not-running tunnels whose config is new or changed in this reload;
-        // tunnels the user stopped and the edit didn't touch stay stopped.
-        let newlyEligible = tunnels.filter { state in
-            state.isConfiguredEnabled && !state.isRunning && previousConfigs[state.id] != state.tunnel
+        // Reconcile runtime with the reloaded config. config.json is the ground
+        // truth and the CLI is a peer interface to it: a tunnel edited outside
+        // the app restarts with its new definition, one disabled outside the
+        // app stops, one enabled (or fixed) outside the app starts. Tunnels the
+        // edit didn't touch keep their state, so a manual UI connect/disconnect
+        // is never overridden by an unrelated edit.
+        var toStart: [TunnelState] = []
+        for state in tunnels where previousConfigs[state.id] != state.tunnel {
+            if state.isRunning {
+                if state.isConfiguredEnabled {
+                    stopTunnel(named: state.id)
+                    startTunnel(named: state.id, allowPasswordPrompt: false)
+                } else {
+                    stopTunnel(named: state.id)
+                }
+            } else if state.isConfiguredEnabled {
+                toStart.append(state)
+            }
         }
-        if !newlyEligible.isEmpty {
-            startTunnels(newlyEligible, allowPasswordPrompt: false, preloadCredentials: true)
+        if !toStart.isEmpty {
+            startTunnels(toStart, allowPasswordPrompt: false, preloadCredentials: true)
         }
     }
 
@@ -1235,6 +1246,15 @@ final class MenuBarViewModel: ObservableObject {
 
         updateState(for: name, isRunning: true, state: .connecting, message: "Connecting")
         let bridge = TunnelEventBridge(owner: self, tunnelName: name)
+        // Password-backed tunnels stop on auth failure so finishTunnel can
+        // invalidate the credential and re-prompt; key-based tunnels retry
+        // forever with backoff — "Permission denied" from a host mid-reboot
+        // must not strand the tunnel until someone clicks Connect.
+        let authPolicy: AuthFailureRetryPolicy =
+            {
+                if case .none = preparation.credentialSource { return .retryWithBackoff }
+                return .stopAndReport
+            }()
         let task = Task.detached(priority: .userInitiated) {
             let supervisor = TunnelSupervisor(
                 tunnel: preparedLaunch.tunnel,
@@ -1244,7 +1264,8 @@ final class MenuBarViewModel: ObservableObject {
                 eventHandler: { event in
                     bridge.handle(event)
                 },
-                environment: preparation.environment
+                environment: preparation.environment,
+                authFailurePolicy: authPolicy
             )
             await supervisor.run()
             bridge.finish()
@@ -4048,6 +4069,19 @@ final class MenuBarViewModel: ObservableObject {
         sawAuthenticationFailure.insert(name)
     }
 
+    fileprivate func clearRecordedAuthenticationFailure(for name: String) {
+        sawAuthenticationFailure.remove(name)
+    }
+
+    /// Whether this tunnel's supervisor rides through auth failures (key-based
+    /// launch — no password credential source) instead of stopping to re-prompt.
+    fileprivate func tunnelRetriesThroughAuthFailure(_ name: String) -> Bool {
+        if case .some(.none) = activeCredentialSources[name] {
+            return true
+        }
+        return false
+    }
+
     private func handleAuthenticationFailure(for name: String) {
         guard let source = activeCredentialSources[name] else {
             return
@@ -4135,10 +4169,20 @@ final class TunnelEventBridge: @unchecked Sendable {
                 self.owner?.persistPasswordIfNeeded(for: self.tunnelName)
                 self.owner?.resetAuthRePromptCount(for: self.tunnelName)
                 self.owner?.clearRetryIndicator(for: self.tunnelName, resetAttempt: true)
+                self.owner?.clearRecordedAuthenticationFailure(for: self.tunnelName)
                 self.owner?.updateState(for: self.tunnelName, isRunning: true, state: .connected, message: "Connected")
             case .authenticationFailed(let message):
                 self.owner?.recordAuthenticationFailure(for: self.tunnelName)
-                self.owner?.updateState(for: self.tunnelName, isRunning: false, state: .failed, message: "Authentication failed: \(message)")
+                // Key-based tunnels keep retrying with backoff (the supervisor
+                // never stops), so the row stays "running"; password tunnels
+                // stop here and finishTunnel takes over with a re-prompt.
+                let keepsRetrying = self.owner?.tunnelRetriesThroughAuthFailure(self.tunnelName) ?? false
+                self.owner?.updateState(
+                    for: self.tunnelName,
+                    isRunning: keepsRetrying,
+                    state: .failed,
+                    message: keepsRetrying ? "Authentication refused — retrying: \(message)" : "Authentication failed: \(message)"
+                )
                 self.owner?.globalMessage = "\(self.tunnelName): authentication failed. \(message)"
             case .exited(let code, let diagnostic):
                 let message = diagnostic.map { "ssh exited \(code): \($0); retrying" } ?? "ssh exited \(code); retrying"
