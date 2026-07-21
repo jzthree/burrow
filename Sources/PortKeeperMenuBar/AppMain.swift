@@ -2948,6 +2948,28 @@ final class MenuBarViewModel: ObservableObject {
         }
     }
 
+    /// Persists a sign-in recipe learned during a normal interactive login.
+    /// Does *not* touch autoConnect — learning is transparent; the user turns on
+    /// autoconnect with the lightning toggle when they want it, and the recipe
+    /// then makes it work.
+    private func saveGatewaySignInRecipe(name: String, recipe: SAMLSignInRecipe) {
+        do {
+            _ = try store.mutate { config -> Bool in
+                guard let index = config.gateways.firstIndex(where: { $0.name == name }) else { return false }
+                config.gateways[index].signInRecipe = recipe
+                return true
+            }
+            loadConfig()
+        } catch {
+            // Non-fatal: the connect already succeeded; we just didn't learn.
+        }
+    }
+
+    private func saveGatewayPassword(_ gateway: GatewayConfig, password: String) {
+        guard let key = TunnelCredentialKey(gateway: gateway) else { return }
+        try? passwordStore.save(password: password, for: key)
+    }
+
     func createTunnel() {
         gatewayDraft = nil
         profileDraft = nil
@@ -2967,28 +2989,34 @@ final class MenuBarViewModel: ObservableObject {
             let tunnel = try draft.toTunnelConfig()
             let originalName = draft.originalName
             let wasRunning = originalName.map { tasks[$0] != nil } ?? false
-            var pendingOldTask: Task<Void, Never>?
 
-            if let originalName, originalName != tunnel.name {
+            // A running tunnel must be torn down and relaunched for the edit to
+            // take effect — the live ssh still holds the OLD host/port/forwards.
+            // This applies even when the name is unchanged (the common "just
+            // changed the SSH port" case), which previously left the stale
+            // session running because startTunnel no-ops on an existing task.
+            var pendingOldTask: Task<Void, Never>?
+            if wasRunning, let originalName {
                 pendingOldTask = tasks[originalName]
-                if tasks[originalName] != nil {
-                    stopTunnel(named: originalName)
-                }
+                stopTunnel(named: originalName)
             }
 
             try store.upsert(tunnel, replacing: originalName)
             loadConfig()
 
             if wasRunning {
+                let newName = tunnel.name
                 if let pendingOldTask {
-                    let newName = tunnel.name
-                    updateState(for: newName, isRunning: false, state: .connecting, message: "Waiting for previous session to close")
+                    // Wait for the old ssh to fully exit so it frees its ports
+                    // (and, for reverse forwards, avoids the remote-bind race)
+                    // before the new session launches.
+                    updateState(for: newName, isRunning: false, state: .connecting, message: "Applying changes…")
                     Task { @MainActor [weak self] in
                         _ = await pendingOldTask.value
                         self?.startTunnel(named: newName)
                     }
                 } else {
-                    startTunnel(named: tunnel.name)
+                    startTunnel(named: newName)
                 }
             }
 
@@ -3330,13 +3358,27 @@ final class MenuBarViewModel: ObservableObject {
                 updateGatewayState(for: name, isRunning: false, state: .connecting, message: "Signing in (SAML)")
                 let authenticator = AnyConnectSAMLAuthenticator(gateway: gateway)
                 activeSAMLAuthenticators[name] = authenticator
-                authenticator.begin(interactive: allowPasswordPrompt) { [weak self] result in
+                // Learn the sign-in recipe transparently on the first interactive
+                // login. Only interactive (a headless auto-connect can't show its
+                // work), only if there's no recipe yet, and — decided below — only
+                // if it captured real steps, so a remember-device flash-through or
+                // a password-only login is handled without saving junk.
+                let learnRecipe = allowPasswordPrompt && gateway.signInRecipe == nil
+                authenticator.begin(interactive: allowPasswordPrompt, record: learnRecipe) { [weak self, weak authenticator] result in
                     guard let self else {
                         return
                     }
                     self.activeSAMLAuthenticators[name] = nil
                     switch result {
                     case .success(let cookie):
+                        if learnRecipe,
+                           let recipe = authenticator?.capturedRecipe,
+                           recipe.steps.contains(where: { $0.action == .fillPassword || $0.action == .fillCode }) {
+                            self.saveGatewaySignInRecipe(name: name, recipe: recipe)
+                            if let password = authenticator?.capturedPassword {
+                                self.saveGatewayPassword(gateway, password: password)
+                            }
+                        }
                         self.spawnGatewaySupervisor(gateway, credential: .sessionCookie(cookie))
                     case .failure(let error):
                         self.updateGatewayState(for: name, isRunning: false, state: .failed, message: error.localizedDescription)
@@ -7377,6 +7419,13 @@ struct TunnelEditorSheet: View {
     let onSave: () -> Void
     let onDelete: () -> Void
     @State private var isAdvancedExpanded = false
+    /// True once the user has typed into or picked from the SSH Port field
+    /// directly. Guards applyEndpointGuess: before this, the field tracks the
+    /// host guess (including snapping to a newly-typed host's known port);
+    /// after, it's the user's — even if they land on the literal value "22",
+    /// which used to be (mis)read as "still untouched" and get silently
+    /// reverted to another saved tunnel's port for the same host.
+    @State private var sshPortIsUserEdited = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -7420,9 +7469,11 @@ struct TunnelEditorSheet: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .onChange(of: draft.host) { _ in
-            applyEndpointGuess(overwrite: false)
-        }
-        .onChange(of: draft.sshPort) { _ in
+            // Refills the port too (when the user hasn't taken it over) — this
+            // one call already cascades into user/identity/jump using the
+            // freshly-guessed port, so there's no need to also react to
+            // draft.sshPort changing (that used to be exactly what let a
+            // direct edit of the port field re-trigger and snap itself back).
             applyEndpointGuess(overwrite: false)
         }
     }
@@ -7459,10 +7510,17 @@ struct TunnelEditorSheet: View {
                     HStack(spacing: 8) {
                         SuggestingTextField(
                             placeholder: "22",
-                            text: $draft.sshPort,
+                            // Wrapped so typing OR picking a suggestion both mark
+                            // the field user-owned — including landing on "22"
+                            // itself, which used to read as "still the untouched
+                            // default" and get silently reverted.
+                            text: Binding(
+                                get: { draft.sshPort },
+                                set: { draft.sshPort = $0; sshPortIsUserEdited = true }
+                            ),
                             suggestions: suggestions.sshPorts
                         )
-                        .frame(width: 92)
+                        .frame(width: 112)
 
                         Button {
                             applyEndpointGuess(overwrite: true)
@@ -7661,8 +7719,11 @@ struct TunnelEditorSheet: View {
         let host = draft.host.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !host.isEmpty else { return }
 
-        if let port = suggestions.preferredSSHPort(for: host), overwrite || draft.sshPort.isEmpty || draft.sshPort == "22" {
+        if let port = suggestions.preferredSSHPort(for: host), overwrite || !sshPortIsUserEdited {
             draft.sshPort = port
+            // A guess, not a user choice — and pressing Autofill re-arms
+            // following so a later host change can still refine it.
+            sshPortIsUserEdited = false
         }
 
         if let user = suggestions.preferredUser(for: host, sshPort: draft.sshPort), overwrite || draft.user.isEmpty {
@@ -7913,73 +7974,36 @@ private struct ForwardEditorCard: View {
     }
 }
 
-private struct SuggestingTextField: NSViewRepresentable {
+/// A free-editing text field with a dropdown of suggestions. Deliberately a
+/// plain SwiftUI TextField (which never fights an AppKit field editor) plus a
+/// Menu — the old NSComboBox bridge kept mangling in-progress input (the
+/// recurring "type 3000 into 42244" bug). Typing is unhindered; the chevron
+/// offers the suggestions; picking one replaces the text.
+private struct SuggestingTextField: View {
     let placeholder: String
     @Binding var text: String
     let suggestions: [String]
 
-    func makeNSView(context: Context) -> NSComboBox {
-        let comboBox = NSComboBox()
-        comboBox.isEditable = true
-        comboBox.completes = true
-        comboBox.usesDataSource = false
-        comboBox.numberOfVisibleItems = 8
-        comboBox.placeholderString = placeholder
-        comboBox.controlSize = .small
-        comboBox.font = .systemFont(ofSize: NSFont.systemFontSize(for: .small))
-        comboBox.delegate = context.coordinator
-        comboBox.target = context.coordinator
-        comboBox.action = #selector(Coordinator.commit(_:))
-        comboBox.addItems(withObjectValues: suggestions)
-        return comboBox
-    }
-
-    func updateNSView(_ comboBox: NSComboBox, context: Context) {
-        context.coordinator.parent = self
-
-        if comboBox.stringValue != text {
-            comboBox.stringValue = text
-        }
-
-        let existing = (0..<comboBox.numberOfItems).compactMap { comboBox.itemObjectValue(at: $0) as? String }
-        if existing != suggestions {
-            comboBox.removeAllItems()
-            comboBox.addItems(withObjectValues: suggestions)
-            comboBox.numberOfVisibleItems = max(4, min(10, max(suggestions.count, 1)))
-        }
-    }
-
-    func makeCoordinator() -> Coordinator {
-        Coordinator(parent: self)
-    }
-
-    final class Coordinator: NSObject, NSComboBoxDelegate, NSControlTextEditingDelegate {
-        var parent: SuggestingTextField
-
-        init(parent: SuggestingTextField) {
-            self.parent = parent
-        }
-
-        func controlTextDidChange(_ obj: Notification) {
-            guard let comboBox = obj.object as? NSComboBox else { return }
-            parent.text = comboBox.stringValue
-        }
-
-        func comboBoxSelectionDidChange(_ notification: Notification) {
-            guard let comboBox = notification.object as? NSComboBox else { return }
-            // At this point the combo box's stringValue still holds the *previous*
-            // text — it isn't updated to the chosen item until after this delegate
-            // call. Reading stringValue here writes the old value straight back to
-            // the binding, so the field appears not to change. Read the selected
-            // item instead.
-            let index = comboBox.indexOfSelectedItem
-            guard index >= 0, let value = comboBox.itemObjectValue(at: index) as? String else { return }
-            parent.text = value
-        }
-
-        @MainActor
-        @objc func commit(_ sender: NSComboBox) {
-            parent.text = sender.stringValue
+    var body: some View {
+        HStack(spacing: 5) {
+            TextField(placeholder, text: $text)
+                .textFieldStyle(.roundedBorder)
+                .controlSize(.small)
+            if !suggestions.isEmpty {
+                Menu {
+                    ForEach(suggestions, id: \.self) { suggestion in
+                        Button(suggestion) { text = suggestion }
+                    }
+                } label: {
+                    Image(systemName: "chevron.down")
+                        .font(.system(size: 9, weight: .semibold))
+                        .foregroundStyle(.secondary)
+                }
+                .menuStyle(.borderlessButton)
+                .menuIndicator(.hidden)
+                .fixedSize()
+                .help("Pick from recent values")
+            }
         }
     }
 }

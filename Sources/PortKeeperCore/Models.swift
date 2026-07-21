@@ -239,6 +239,9 @@ public struct GatewayConfig: Codable, Sendable, Identifiable, Equatable {
     /// `enabled`). With Okta "remember this device" a SAML gateway usually
     /// finishes hands-free; otherwise it opens the sign-in flow once.
     public var autoConnect: Bool
+    /// A learned recipe for driving this gateway's SAML web sign-in (captured by
+    /// recording it once), used to complete autoconnect without user input.
+    public var signInRecipe: SAMLSignInRecipe?
 
     public var usesSAML: Bool {
         authMode.lowercased() == "saml"
@@ -257,6 +260,7 @@ public struct GatewayConfig: Codable, Sendable, Identifiable, Equatable {
         case extraArgs
         case reconnectDelaySeconds
         case autoConnect
+        case signInRecipe
     }
 
     public init(
@@ -271,7 +275,8 @@ public struct GatewayConfig: Codable, Sendable, Identifiable, Equatable {
         sshHostPatterns: [String] = [],
         extraArgs: [String] = [],
         reconnectDelaySeconds: Int = 5,
-        autoConnect: Bool = false
+        autoConnect: Bool = false,
+        signInRecipe: SAMLSignInRecipe? = nil
     ) {
         self.name = name
         self.vpnProtocol = vpnProtocol
@@ -285,6 +290,7 @@ public struct GatewayConfig: Codable, Sendable, Identifiable, Equatable {
         self.extraArgs = extraArgs
         self.reconnectDelaySeconds = reconnectDelaySeconds
         self.autoConnect = autoConnect
+        self.signInRecipe = signInRecipe
     }
 
     public init(from decoder: Decoder) throws {
@@ -301,6 +307,7 @@ public struct GatewayConfig: Codable, Sendable, Identifiable, Equatable {
         self.extraArgs = try container.decodeIfPresent([String].self, forKey: .extraArgs) ?? []
         self.reconnectDelaySeconds = try container.decodeIfPresent(Int.self, forKey: .reconnectDelaySeconds) ?? 5
         self.autoConnect = try container.decodeIfPresent(Bool.self, forKey: .autoConnect) ?? false
+        self.signInRecipe = try container.decodeIfPresent(SAMLSignInRecipe.self, forKey: .signInRecipe)
     }
 }
 
