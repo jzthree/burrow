@@ -17,6 +17,7 @@ struct AuthenticationFailureError: LocalizedError {
 }
 
 public final class TunnelSupervisor: @unchecked Sendable {
+    private static let activeRuns = ActiveTunnelSupervisorRegistry()
     private let tunnel: TunnelConfig
     private let logger: @Sendable (String) -> Void
     private let eventHandler: @Sendable (TunnelRuntimeEvent) -> Void
@@ -43,6 +44,9 @@ public final class TunnelSupervisor: @unchecked Sendable {
     }
 
     public func run() async {
+        Self.activeRuns.register(self, named: tunnel.name)
+        defer { Self.activeRuns.unregister(self, named: tunnel.name) }
+
         await withTaskCancellationHandler(operation: {
             while !Task.isCancelled {
                 do {
@@ -251,6 +255,27 @@ public final class TunnelSupervisor: @unchecked Sendable {
         return host ?? "127.0.0.1"
     }
 
+    /// Ends only the in-flight ssh process for a named supervisor. The
+    /// supervisor remains alive and performs its next scheduled retry.
+    @discardableResult
+    public static func cancelCurrentAttempt(named name: String) -> Bool {
+        activeRuns.cancelCurrentAttempt(named: name)
+    }
+
+    @discardableResult
+    fileprivate func terminateCurrentAttempt() -> Bool {
+        processLock.lock()
+        let process = currentProcess
+        processLock.unlock()
+
+        guard let process, process.isRunning else {
+            return false
+        }
+
+        process.terminate()
+        return true
+    }
+
     private func terminateCurrentProcess() {
         processLock.lock()
         let process = currentProcess
@@ -263,6 +288,32 @@ public final class TunnelSupervisor: @unchecked Sendable {
         if process.isRunning {
             process.terminate()
         }
+    }
+}
+
+private final class ActiveTunnelSupervisorRegistry: @unchecked Sendable {
+    private let lock = NSLock()
+    private var supervisors: [String: TunnelSupervisor] = [:]
+
+    func register(_ supervisor: TunnelSupervisor, named name: String) {
+        lock.lock()
+        supervisors[name] = supervisor
+        lock.unlock()
+    }
+
+    func unregister(_ supervisor: TunnelSupervisor, named name: String) {
+        lock.lock()
+        if supervisors[name] === supervisor {
+            supervisors[name] = nil
+        }
+        lock.unlock()
+    }
+
+    func cancelCurrentAttempt(named name: String) -> Bool {
+        lock.lock()
+        let supervisor = supervisors[name]
+        lock.unlock()
+        return supervisor?.terminateCurrentAttempt() ?? false
     }
 }
 
