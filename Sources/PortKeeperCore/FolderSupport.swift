@@ -53,23 +53,34 @@ public enum FolderSupport {
         return args
     }
 
-    /// Whether the folder's mountpoint currently has a FUSE-T mount on it,
-    /// read from the kernel mount table (no subprocess).
+    /// Whether the folder's mountpoint currently has a FUSE-T mount on it.
     public static func isMounted(_ folder: FolderConfig) -> Bool {
-        mountedFrom(path: folder.effectiveLocalPath)?.hasPrefix("fuse-t:") ?? false
+        fuseMountCount(at: folder.effectiveLocalPath) > 0
     }
 
-    /// f_mntfromname when `path` is itself a mountpoint, else nil.
-    private static func mountedFrom(path: String) -> String? {
-        var stat = statfs()
-        guard statfs(path, &stat) == 0 else { return nil }
-        let mountedOn = withUnsafeBytes(of: &stat.f_mntonname) { raw in
-            String(cString: raw.bindMemory(to: CChar.self).baseAddress!)
+    /// How many FUSE-T mounts sit on `path`, read from the kernel mount table
+    /// with MNT_NOWAIT. Never statfs(path) here: on a dead mount that blocks
+    /// for minutes, and it can't see *stacked* mounts — the exact combination
+    /// that let a remount pile seven dead layers on one mountpoint.
+    public static func fuseMountCount(at path: String) -> Int {
+        var entries: UnsafeMutablePointer<statfs>?
+        let count = getmntinfo(&entries, MNT_NOWAIT)
+        guard count > 0, let entries else { return 0 }
+        var matches = 0
+        for index in 0..<Int(count) {
+            var entry = entries[index]
+            let mountedOn = withUnsafeBytes(of: &entry.f_mntonname) { raw in
+                String(cString: raw.bindMemory(to: CChar.self).baseAddress!)
+            }
+            guard mountedOn == path else { continue }
+            let from = withUnsafeBytes(of: &entry.f_mntfromname) { raw in
+                String(cString: raw.bindMemory(to: CChar.self).baseAddress!)
+            }
+            if from.hasPrefix("fuse-t:") {
+                matches += 1
+            }
         }
-        guard mountedOn == path else { return nil }
-        return withUnsafeBytes(of: &stat.f_mntfromname) { raw in
-            String(cString: raw.bindMemory(to: CChar.self).baseAddress!)
-        }
+        return matches
     }
 
     public struct MountResult: Sendable {
@@ -82,6 +93,12 @@ public enum FolderSupport {
     /// successful call returns quickly.
     public static func mount(_ folder: FolderConfig, executablePath: String) -> MountResult {
         let localPath = folder.effectiveLocalPath
+        // A dead mount (VPN dropped, host gone) still occupies the mountpoint;
+        // mounting over it stacks layers that hang Finder and every file-table
+        // scan on the machine. Clear any existing layers first.
+        if fuseMountCount(at: localPath) > 0 && !unmount(folder) {
+            return MountResult(succeeded: false, output: "a previous mount is stuck at \(localPath) and couldn't be removed — close anything using it and try again")
+        }
         do {
             try FileManager.default.createDirectory(atPath: localPath, withIntermediateDirectories: true)
         } catch {
@@ -114,16 +131,25 @@ public enum FolderSupport {
         return MountResult(succeeded: process.terminationStatus == 0 && isMounted(folder), output: output)
     }
 
-    /// Unmounts and removes an empty auto-created mountpoint. Falls back to
-    /// diskutil for a busy mount (open Finder windows, running processes).
+    /// Unmounts (popping every stacked layer) and removes an empty auto-created
+    /// mountpoint. Falls back to a forced unmount for a busy or dead mount.
     @discardableResult
     public static func unmount(_ folder: FolderConfig) -> Bool {
         let localPath = folder.effectiveLocalPath
-        guard isMounted(folder) else { return true }
-        if runQuietly("/sbin/umount", [localPath]) != 0 {
-            _ = runQuietly("/usr/sbin/diskutil", ["unmount", "force", localPath])
+        // Each umount removes one layer; a healthy mountpoint has one, but a
+        // remount-over-dead-mount bug can stack several — pop them all.
+        var remaining = fuseMountCount(at: localPath)
+        var attempts = 0
+        while remaining > 0 && attempts < remaining + 8 {
+            attempts += 1
+            if runQuietly("/sbin/umount", [localPath]) != 0,
+               runQuietly("/sbin/umount", ["-f", localPath]) != 0,
+               runQuietly("/usr/sbin/diskutil", ["unmount", "force", localPath]) != 0 {
+                break
+            }
+            remaining = fuseMountCount(at: localPath)
         }
-        let unmounted = !isMounted(folder)
+        let unmounted = fuseMountCount(at: localPath) == 0
         if unmounted {
             // rmdir only removes an EMPTY directory — a stray mountpoint dir —
             // and fails harmlessly otherwise. Never a recursive delete here.

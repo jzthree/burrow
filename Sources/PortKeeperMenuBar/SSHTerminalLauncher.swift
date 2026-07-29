@@ -363,13 +363,35 @@ enum SSHTerminalLauncher {
         case "iterm":
             return openScriptInApp(scriptURL, candidates: iTermCandidates)
         case "terminal":
-            return openScriptInApp(scriptURL, candidates: terminalCandidates)
+            return runInAppleTerminal(scriptURL) || openScriptInApp(scriptURL, candidates: terminalCandidates)
         default:
-            // "auto": defer to whatever app macOS uses to open .command files
-            // (the user's effective default terminal). Returning false lets the
-            // caller's NSWorkspace.open(scriptURL) use that default handler.
+            // "auto": when the system's .command handler is Terminal.app, drive
+            // it via AppleScript for a single window; any other handler (iTerm
+            // et al) keeps the document-open path via the caller's fallback.
+            if let handler = NSWorkspace.shared.urlForApplication(toOpen: scriptURL),
+               handler.lastPathComponent == "Terminal.app" {
+                return runInAppleTerminal(scriptURL)
+            }
             return false
         }
+    }
+
+    /// Runs the script in Terminal with AppleScript `do script`: exactly one
+    /// window, even when Terminal is cold — opening a .command as a document
+    /// launches Terminal, which then adds its startup window *next to* the
+    /// script window (the "why did I get two terminals?" effect). Returns false
+    /// (→ document-open fallback) if Automation permission is declined.
+    private static func runInAppleTerminal(_ scriptURL: URL) -> Bool {
+        let source = """
+        tell application "Terminal"
+            activate
+            do script "clear; exec '\(scriptURL.path)'"
+        end tell
+        """
+        guard let script = NSAppleScript(source: source) else { return false }
+        var error: NSDictionary?
+        script.executeAndReturnError(&error)
+        return error == nil
     }
 
     private static let iTermCandidates = [

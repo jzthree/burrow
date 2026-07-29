@@ -7,6 +7,24 @@ import Foundation
 /// is not the same as "the gateway works." This asks the proxy to resolve and
 /// reach a host, which only succeeds once the VPN is genuinely ready.
 public enum SOCKSProbe {
+    /// Where a probe through the proxy got to — the stages tell different
+    /// stories about *what* is broken:
+    /// - `.reachable`: full CONNECT succeeded; the tunnel routes.
+    /// - `.targetUnreachable`: the proxy answered the CONNECT with a failure
+    ///   reply. The tunnel itself traverses (a reply came back through it);
+    ///   the *target* refused or is down — possibly throttling us. Advisory.
+    /// - `.tunnelDead`: the proxy accepted TCP but the SOCKS reply never came
+    ///   back before the timeout: traffic enters the proxy and vanishes — the
+    ///   signature of a session that died server-side while ocproxy lingers.
+    /// - `.proxyDown`: couldn't even reach the local SOCKS port (the process
+    ///   liveness backstop's territory).
+    public enum Verdict: Sendable, Equatable {
+        case reachable
+        case targetUnreachable
+        case tunnelDead
+        case proxyDown
+    }
+
     public static func canReach(
         proxyHost: String = "127.0.0.1",
         proxyPort: Int,
@@ -14,9 +32,19 @@ public enum SOCKSProbe {
         targetPort: Int,
         timeout: TimeInterval = 6
     ) -> Bool {
+        probe(proxyHost: proxyHost, proxyPort: proxyPort, targetHost: targetHost, targetPort: targetPort, timeout: timeout) == .reachable
+    }
+
+    public static func probe(
+        proxyHost: String = "127.0.0.1",
+        proxyPort: Int,
+        targetHost: String,
+        targetPort: Int,
+        timeout: TimeInterval = 6
+    ) -> Verdict {
         let fd = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP)
         guard fd >= 0 else {
-            return false
+            return .proxyDown
         }
         defer { close(fd) }
 
@@ -34,30 +62,32 @@ public enum SOCKSProbe {
             }
         }
         guard connected == 0 else {
-            return false
+            return .proxyDown
         }
 
-        // Greeting: SOCKS5, one method, no auth.
-        guard writeAll(fd, [0x05, 0x01, 0x00]) else { return false }
+        // Greeting: SOCKS5, one method, no auth. A proxy that accepts TCP but
+        // never answers the greeting is as dead as one that drops the CONNECT.
+        guard writeAll(fd, [0x05, 0x01, 0x00]) else { return .tunnelDead }
         guard let greeting = readExactly(fd, 2), greeting[0] == 0x05, greeting[1] == 0x00 else {
-            return false
+            return .tunnelDead
         }
 
         // CONNECT request with ATYP=domain so the proxy resolves the name.
         let hostBytes = Array(targetHost.utf8)
-        guard hostBytes.count <= 255 else { return false }
+        guard hostBytes.count <= 255 else { return .targetUnreachable }
         var request: [UInt8] = [0x05, 0x01, 0x00, 0x03, UInt8(hostBytes.count)]
         request.append(contentsOf: hostBytes)
         let port = UInt16(clamping: targetPort)
         request.append(UInt8(port >> 8))
         request.append(UInt8(port & 0xff))
-        guard writeAll(fd, request) else { return false }
+        guard writeAll(fd, request) else { return .tunnelDead }
 
-        // Reply: VER, REP, RSV, ATYP. REP==0 means the connection succeeded.
+        // Reply: VER, REP, RSV, ATYP. REP==0: connected. A failure REP still
+        // proves the round trip through the tunnel; no reply at all does not.
         guard let reply = readExactly(fd, 4), reply[0] == 0x05 else {
-            return false
+            return .tunnelDead
         }
-        return reply[1] == 0x00
+        return reply[1] == 0x00 ? .reachable : .targetUnreachable
     }
 
     private static func writeAll(_ fd: Int32, _ bytes: [UInt8]) -> Bool {

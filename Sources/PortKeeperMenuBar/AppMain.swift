@@ -303,10 +303,21 @@ final class MenuBarViewModel: ObservableObject {
     /// Consecutive liveness misses per gateway (openconnect gone / SOCKS port
     /// closed), for the fast backstop that demotes a stuck-green VPN.
     private var gatewaySessionMisses: [String: Int] = [:]
+    /// Consecutive in-VPN probe *timeouts* per gateway — the black-hole
+    /// signature that, confirmed twice, triggers an automatic reconnect.
+    private var gatewayDeadPathStrikes: [String: Int] = [:]
     private var gatewayHealthTick = 0
     private var toolInstallWatchTask: Task<Void, Never>?
     private var samlSessionConnectedAt: [String: Date] = [:]
     private var samlReauthAttempts: [String: Int] = [:]
+    /// Consecutive failed *silent* SAML attempts per gateway, for bounded
+    /// retry-with-backoff after wake/drop; reset on connect.
+    private var silentSAMLRetryAttempts: [String: Int] = [:]
+    /// Gateways the user explicitly stopped this session. Stop wins over every
+    /// automation: no silent retry, wake reconnect, or tunnel-driven summon may
+    /// revive one of these until the user connects it again (autoConnect stays
+    /// configured — a fresh app launch starts with a clean slate).
+    private var userStoppedGateways: Set<String> = []
     private var hasStartedAutoConnect = false
     private var pendingCredentialSaves: [String: PendingCredentialSave] = [:]
     private var activeCredentialSources: [String: CredentialSource] = [:]
@@ -410,8 +421,14 @@ final class MenuBarViewModel: ObservableObject {
                 }
                 if dead {
                     self.gatewayHealthFailures[state.id] = 0
-                    self.stopGateway(named: state.id)
+                    self.stopGateway(named: state.id, userInitiated: false)
                     self.updateGatewayState(for: state.id, isRunning: false, state: .disconnected, message: "VPN dropped on sleep — reconnect")
+                    // Autoconnect gateways come back on their own: headless, so
+                    // a live IdP session reconnects silently and an expired one
+                    // parks at "click Connect" instead of popping a window.
+                    if state.config.autoConnect {
+                        _ = self.startGateway(named: state.id, allowPasswordPrompt: false)
+                    }
                 }
             }
             for state in self.tunnels where self.tasks[state.id] != nil {
@@ -538,9 +555,14 @@ final class MenuBarViewModel: ObservableObject {
                 // A self-launched gateway still has a supervisor task to cancel;
                 // an adopted one doesn't, so only stop the former.
                 if !wasAdopted {
-                    stopGateway(named: gateway.name)
+                    stopGateway(named: gateway.name, userInitiated: false)
                 }
                 updateGatewayState(for: gateway.name, isRunning: false, state: .disconnected, message: "VPN session ended — reconnect")
+                // Autoconnect gateways come back by themselves (silent sign-in /
+                // recipe replay); failure parks at "click Connect".
+                if gateway.config.autoConnect {
+                    _ = startGateway(named: gateway.name, allowPasswordPrompt: false)
+                }
             }
         }
 
@@ -604,10 +626,23 @@ final class MenuBarViewModel: ObservableObject {
     /// proxy to a host only reachable when the VPN is genuinely up. A stale
     /// ocproxy (session died on sleep/network change but the process lingers)
     /// keeps the port open and passes every process/port check, yet routes
-    /// nowhere — this is the only thing that catches it. Runs ~every 30s.
+    /// nowhere — this is the only thing that catches it.
+    ///
+    /// Deliberately gentle and advisory:
+    /// - Every ~5 minutes, not seconds. The target is usually an sshd, and
+    ///   frequent connect-and-drop probes trip sshd/fail2ban per-source
+    ///   penalties on the VPN's shared egress IP — which first blocks real ssh
+    ///   logins ("green but can't connect"), then blocks the probe itself.
+    /// - Never stops the gateway. A failed target probe can mean a throttled
+    ///   sshd or a slow host, not a dead VPN — killing a healthy session over
+    ///   it (which this once did) looks exactly like "the VPN is unstable."
+    ///   Process liveness (the backstop above) remains the only auto-demote.
     private func probeGatewayHealth() async {
         gatewayHealthTick += 1
-        guard gatewayHealthTick % 3 == 0 else { return }
+        // 5-minute cadence normally (the target is usually an sshd — see
+        // above); a suspected-dead tunnel is rechecked every tick (~10s) so
+        // confirmation doesn't take another 5 minutes.
+        guard gatewayHealthTick % 30 == 0 || !gatewayDeadPathStrikes.isEmpty else { return }
 
         let checks: [(name: String, port: Int, host: String, target: Int)] = gateways.compactMap { state in
             guard state.connectionState == .connected,
@@ -616,12 +651,15 @@ final class MenuBarViewModel: ObservableObject {
             }
             return (state.id, state.config.socksPort, target.host, target.port)
         }
-        guard !checks.isEmpty else { return }
+        guard !checks.isEmpty else {
+            gatewayDeadPathStrikes.removeAll()
+            return
+        }
 
-        let reachability = await Task.detached { () -> [String: Bool] in
-            var out: [String: Bool] = [:]
+        let verdicts = await Task.detached { () -> [String: SOCKSProbe.Verdict] in
+            var out: [String: SOCKSProbe.Verdict] = [:]
             for check in checks {
-                out[check.name] = SOCKSProbe.canReach(
+                out[check.name] = SOCKSProbe.probe(
                     proxyPort: check.port,
                     targetHost: check.host,
                     targetPort: check.target,
@@ -631,23 +669,58 @@ final class MenuBarViewModel: ObservableObject {
             return out
         }.value
 
-        for (name, reachable) in reachability {
-            guard gateways.contains(where: { $0.id == name && $0.connectionState == .connected }) else {
+        for (name, verdict) in verdicts {
+            guard let index = gateways.firstIndex(where: { $0.id == name && $0.connectionState == .connected }) else {
                 gatewayHealthFailures[name] = 0
+                gatewayDeadPathStrikes[name] = nil
                 continue
             }
-            if reachable {
+            let target = checks.first(where: { $0.name == name }).map { "\($0.host):\($0.target)" } ?? "health target"
+            switch verdict {
+            case .reachable:
+                if gatewayHealthFailures[name, default: 0] > 0 || gatewayDeadPathStrikes[name] != nil {
+                    gateways[index].lastMessage = "Connected"
+                }
                 gatewayHealthFailures[name] = 0
-                continue
-            }
-            let failures = gatewayHealthFailures[name, default: 0] + 1
-            gatewayHealthFailures[name] = failures
-            // Two strikes (~1 min) before declaring the tunnel dead.
-            if failures >= 2 {
+                gatewayDeadPathStrikes[name] = nil
+
+            case .targetUnreachable:
+                // The reply came back *through the tunnel*, so the VPN routes —
+                // the target itself refused (down, or throttling us). Advisory
+                // only; tearing the VPN down would just make things worse.
+                gatewayDeadPathStrikes[name] = nil
+                let failures = gatewayHealthFailures[name, default: 0] + 1
+                gatewayHealthFailures[name] = failures
+                gateways[index].lastMessage = "Connected, but \(target) refused through the VPN (\(failures)×)"
+                if failures == 3 {
+                    globalMessage = "Gateway \(name): \(target) not answering through the VPN — routes may be degraded."
+                }
+
+            case .tunnelDead:
+                // Traffic enters the proxy and vanishes: the classic zombie —
+                // openconnect alive, ocproxy listening, session dead
+                // server-side. The process backstop can't see this. Confirm
+                // once (~10s later), then reconnect.
+                let strikes = gatewayDeadPathStrikes[name, default: 0] + 1
+                gatewayDeadPathStrikes[name] = strikes
+                GatewayLog.append(gateway: name, "in-VPN probe to \(target) timed out (\(strikes)/2) — proxy answers but traffic doesn't traverse")
+                gateways[index].lastMessage = "Connected, but traffic may not be traversing — verifying"
+                guard strikes >= 2 else { continue }
+                gatewayDeadPathStrikes[name] = nil
                 gatewayHealthFailures[name] = 0
-                stopGateway(named: name)
-                updateGatewayState(for: name, isRunning: false, state: .disconnected, message: "VPN unreachable — reconnect")
-                globalMessage = "Gateway \(name) stopped passing traffic; marked disconnected."
+                GatewayLog.append(gateway: name, "VPN path confirmed dead — reconnecting")
+                let autoConnect = gateways[index].config.autoConnect
+                stopGateway(named: name, userInitiated: false)
+                updateGatewayState(for: name, isRunning: false, state: .disconnected, message: "VPN stopped passing traffic — reconnecting")
+                if autoConnect {
+                    _ = startGateway(named: name, allowPasswordPrompt: false)
+                } else {
+                    updateGatewayState(for: name, isRunning: false, state: .disconnected, message: "VPN stopped passing traffic — reconnect")
+                }
+
+            case .proxyDown:
+                // Port gone entirely — the process-liveness backstop owns this.
+                gatewayDeadPathStrikes[name] = nil
             }
         }
     }
@@ -723,6 +796,7 @@ final class MenuBarViewModel: ObservableObject {
     }
 
     func loadConfig() {
+        scrubRecipeSecretsIfNeeded()
         do {
             let config = try store.load()
             // Apply keep-warm intent from config without triggering a write-back.
@@ -2941,6 +3015,11 @@ final class MenuBarViewModel: ObservableObject {
                 globalMessage = "Gateway '\(name)' not found."
                 return
             }
+            if enabled {
+                // Turning automation on is an explicit re-arm — it outranks an
+                // earlier Stop's suppression latch.
+                userStoppedGateways.remove(name)
+            }
             loadConfig()
             globalMessage = enabled ? "Auto-connect \(name) at launch." : "Won't auto-connect \(name)."
         } catch {
@@ -2952,6 +3031,44 @@ final class MenuBarViewModel: ObservableObject {
     /// Does *not* touch autoConnect — learning is transparent; the user turns on
     /// autoconnect with the lightning toggle when they want it, and the recipe
     /// then makes it work.
+    /// One-shot repair for recipes recorded before the capture-time redaction:
+    /// a fillPassword step's `text` held the typed password in config.json.
+    /// Move it where it belongs (Keychain, unless one is already saved) and
+    /// blank it in the stored recipe.
+    private var hasScrubbedRecipeSecrets = false
+    private func scrubRecipeSecretsIfNeeded() {
+        guard !hasScrubbedRecipeSecrets else { return }
+        hasScrubbedRecipeSecrets = true
+        do {
+            let changed = try store.mutate { config -> Bool in
+                var dirty = false
+                for gi in config.gateways.indices {
+                    guard var recipe = config.gateways[gi].signInRecipe else { continue }
+                    for si in recipe.steps.indices {
+                        let step = recipe.steps[si]
+                        guard step.action == .fillPassword || step.action == .fillCode,
+                              let leaked = step.field.text, !leaked.isEmpty else { continue }
+                        if step.action == .fillPassword,
+                           let key = TunnelCredentialKey(gateway: config.gateways[gi]),
+                           (try? self.passwordStore.password(for: key)) == nil {
+                            try? self.passwordStore.save(password: leaked, for: key)
+                        }
+                        recipe.steps[si].field.text = nil
+                        dirty = true
+                    }
+                    config.gateways[gi].signInRecipe = recipe
+                }
+                return dirty
+            }
+            if changed {
+                GatewayLog.append(gateway: "-", "scrubbed a recorded secret out of config.json (moved to Keychain)")
+                loadConfig()
+            }
+        } catch {
+            // Retry next launch — the flag is in-memory only.
+        }
+    }
+
     private func saveGatewaySignInRecipe(name: String, recipe: SAMLSignInRecipe) {
         do {
             _ = try store.mutate { config -> Bool in
@@ -3103,9 +3220,9 @@ final class MenuBarViewModel: ObservableObject {
         do {
             let gateway = try draft.toGatewayConfig()
             if let originalName = draft.originalName, originalName != gateway.name, gatewayTasks[originalName] != nil {
-                stopGateway(named: originalName)
+                stopGateway(named: originalName, userInitiated: false)
             } else if gatewayTasks[gateway.name] != nil {
-                stopGateway(named: gateway.name)
+                stopGateway(named: gateway.name, userInitiated: false)
             }
             try store.upsertGateway(gateway, replacing: draft.originalName)
             loadConfig()
@@ -3130,6 +3247,7 @@ final class MenuBarViewModel: ObservableObject {
                 stopGateway(named: name)
             }
             try store.removeGateway(name: name)
+            userStoppedGateways.remove(name)
             loadConfig()
             let dependents = tunnels.filter { $0.tunnel.gateway == name }.map(\.id)
             globalMessage = dependents.isEmpty
@@ -3296,6 +3414,14 @@ final class MenuBarViewModel: ObservableObject {
 
     @discardableResult
     func startGateway(named name: String, allowPasswordPrompt: Bool = true) -> Bool {
+        if allowPasswordPrompt {
+            // An explicit Connect re-arms the automation.
+            userStoppedGateways.remove(name)
+        } else if userStoppedGateways.contains(name) {
+            // The user said Stop; automatic paths must not override that.
+            GatewayLog.append(gateway: name, "suppressed automatic reconnect — stopped by the user")
+            return false
+        }
         guard gatewayTasks[name] == nil, !adoptedGateways.contains(name) else {
             return true
         }
@@ -3349,8 +3475,16 @@ final class MenuBarViewModel: ObservableObject {
             }
 
             if gateway.vpnProtocol.lowercased() == "anyconnect" {
-                guard activeSAMLAuthenticators[name] == nil else {
-                    return true
+                if let existing = activeSAMLAuthenticators[name] {
+                    // An explicit Connect outranks a silent background attempt
+                    // (which may just be waiting out its deadline) — replace it
+                    // with the visible window. A second click during a visible
+                    // sign-in stays a no-op.
+                    guard allowPasswordPrompt && !existing.isInteractive else {
+                        return true
+                    }
+                    activeSAMLAuthenticators[name] = nil
+                    existing.cancel()
                 }
                 // Modern ASAs won't start SAML inside openconnect's handshake,
                 // so sign in via the clientless web logon in an embedded window
@@ -3358,30 +3492,89 @@ final class MenuBarViewModel: ObservableObject {
                 updateGatewayState(for: name, isRunning: false, state: .connecting, message: "Signing in (SAML)")
                 let authenticator = AnyConnectSAMLAuthenticator(gateway: gateway)
                 activeSAMLAuthenticators[name] = authenticator
-                // Learn the sign-in recipe transparently on the first interactive
-                // login. Only interactive (a headless auto-connect can't show its
-                // work), only if there's no recipe yet, and — decided below — only
-                // if it captured real steps, so a remember-device flash-through or
-                // a password-only login is handled without saving junk.
-                let learnRecipe = allowPasswordPrompt && gateway.signInRecipe == nil
-                authenticator.begin(interactive: allowPasswordPrompt, record: learnRecipe) { [weak self, weak authenticator] result in
+                // Learn from every interactive sign-in (a headless attempt can't
+                // show its work): whichever path the user takes today is the one
+                // worth replaying tomorrow. The success handler below skips
+                // no-step flash-throughs and unchanged flows, so a good recipe
+                // is never clobbered by junk.
+                let learnRecipe = allowPasswordPrompt
+                // A silent attempt drives the learned recipe with the Keychain
+                // password — and, when a 2FA account is linked, live TOTP codes
+                // — so it can pass an expired-IdP re-login by itself.
+                var replayPassword: String?
+                var replayCodeProvider: (@MainActor () async -> String?)?
+                if !allowPasswordPrompt, gateway.signInRecipe?.isEmpty == false {
+                    if let key = TunnelCredentialKey(gateway: gateway) {
+                        replayPassword = try? passwordStore.password(for: key)
+                    }
+                    if let accountName = gateway.twoFactorAccount,
+                       let account = twoFactorAccounts.first(where: { $0.name == accountName }) {
+                        replayCodeProvider = { [weak self] in
+                            guard let self else { return nil }
+                            return try? await self.twoFactorStore.currentCode(
+                                for: account,
+                                reason: "Connect \(gateway.name) with the \(account.name) 2FA code",
+                                unlockCacheSeconds: self.keepWarmUnlockCacheSeconds
+                            )
+                        }
+                    }
+                }
+                authenticator.begin(
+                    interactive: allowPasswordPrompt,
+                    record: learnRecipe,
+                    replayPassword: replayPassword,
+                    replayCodeProvider: replayCodeProvider
+                ) { [weak self, weak authenticator] result in
                     guard let self else {
                         return
                     }
                     self.activeSAMLAuthenticators[name] = nil
                     switch result {
                     case .success(let cookie):
-                        if learnRecipe,
-                           let recipe = authenticator?.capturedRecipe,
-                           recipe.steps.contains(where: { $0.action == .fillPassword || $0.action == .fillCode }) {
-                            self.saveGatewaySignInRecipe(name: name, recipe: recipe)
-                            if let password = authenticator?.capturedPassword {
-                                self.saveGatewayPassword(gateway, password: password)
+                        if learnRecipe {
+                            // Every successful interactive sign-in is a lesson:
+                            // whatever path the user actually took (password,
+                            // "use a code instead", …) becomes the recipe. A
+                            // flash-through records no steps and never clobbers
+                            // the recipe learned from a full sign-in; an
+                            // unchanged flow is a no-op.
+                            if let recipe = authenticator?.capturedRecipe,
+                               recipe.steps.contains(where: { $0.action == .fillPassword || $0.action == .fillCode }) {
+                                if recipe.steps != gateway.signInRecipe?.steps {
+                                    self.saveGatewaySignInRecipe(name: name, recipe: recipe)
+                                    SAMLInteractionLog.append("recipe-saved", gateway: name, [
+                                        "steps": recipe.steps.count,
+                                        "savedPassword": authenticator?.capturedPassword != nil,
+                                        "replaced": gateway.signInRecipe != nil,
+                                    ])
+                                }
+                                if let password = authenticator?.capturedPassword {
+                                    self.saveGatewayPassword(gateway, password: password)
+                                }
+                                // The one thing replay can't conjure on its own
+                                // is a 2FA code — that needs the user to link
+                                // an authenticator account once.
+                                if recipe.needsTwoFactor && gateway.twoFactorAccount == nil {
+                                    self.globalMessage = "\(name) signs in with a 2FA code — link one in Edit… ▸ 2FA Code so reconnects can enter it automatically."
+                                }
+                            } else {
+                                // Flash-through or password-free flow — nothing
+                                // worth replaying was captured.
+                                SAMLInteractionLog.append("recipe-skipped", gateway: name, [
+                                    "recordedSteps": authenticator?.capturedRecipe?.steps.count ?? 0,
+                                ])
                             }
                         }
                         self.spawnGatewaySupervisor(gateway, credential: .sessionCookie(cookie))
                     case .failure(let error):
                         self.updateGatewayState(for: name, isRunning: false, state: .failed, message: error.localizedDescription)
+                        // A failed *silent* attempt on an autoconnect gateway
+                        // retries a couple of times — right after wake the
+                        // network may still be settling, and Okta can hiccup.
+                        // Exhausted retries park at "click Connect".
+                        if !allowPasswordPrompt && gateway.autoConnect {
+                            self.scheduleSilentSAMLRetry(named: name)
+                        }
                     }
                 }
                 return true
@@ -3483,14 +3676,22 @@ final class MenuBarViewModel: ObservableObject {
         globalMessage = "Starting gateway \(name)."
     }
 
-    func stopGateway(named name: String) {
+    /// `userInitiated: false` for internal teardown (a dead session being
+    /// demoted before auto-reconnect, an editor save) — only a real user Stop
+    /// latches out automatic revival.
+    func stopGateway(named name: String, userInitiated: Bool = true) {
         if let authenticator = activeSAMLAuthenticators[name] {
             activeSAMLAuthenticators[name] = nil
             authenticator.cancel()
         }
-        // A deliberate stop must not trigger automatic SAML re-sign-in.
+        // A deliberate stop must not trigger automatic SAML re-sign-in — and
+        // latches out every other automatic revival until an explicit Connect.
+        if userInitiated {
+            userStoppedGateways.insert(name)
+        }
         samlSessionConnectedAt[name] = nil
         samlReauthAttempts[name] = 0
+        silentSAMLRetryAttempts[name] = 0
 
         guard let task = gatewayTasks[name] else {
             if adoptedGateways.remove(name) != nil,
@@ -3515,6 +3716,15 @@ final class MenuBarViewModel: ObservableObject {
         gatewayTasks[name] = nil
         pendingGatewayCredentialSaves[name] = nil
         updateGatewayState(for: name, isRunning: false, state: .disconnected, message: "Stopped")
+        // Cancellation is advisory: a supervisor caught mid-launch (e.g. inside
+        // the pre-launch reclaim) can still spawn openconnect after the cancel
+        // lands. Reap by port+server shortly after so a stop truly stops.
+        if let config = gateways.first(where: { $0.id == name })?.config {
+            Task.detached {
+                try? await Task.sleep(for: .seconds(1))
+                GatewayPortReclaimer.killGatewayProcesses(socksPort: config.socksPort, server: config.server)
+            }
+        }
 
         let dependents = tunnels.filter { $0.tunnel.gateway == name && $0.isRunning }.map(\.id)
         globalMessage = dependents.isEmpty
@@ -3531,10 +3741,10 @@ final class MenuBarViewModel: ObservableObject {
     private func stopMissingGateways() {
         let configuredNames = Set((try? store.load().gateways.map(\.name)) ?? [])
         for name in gatewayTasks.keys where !configuredNames.contains(name) {
-            stopGateway(named: name)
+            stopGateway(named: name, userInitiated: false)
         }
         for name in adoptedGateways where !configuredNames.contains(name) {
-            stopGateway(named: name)
+            stopGateway(named: name, userInitiated: false)
         }
     }
 
@@ -3674,6 +3884,12 @@ final class MenuBarViewModel: ObservableObject {
         guard let index = gateways.firstIndex(where: { $0.id == name }) else {
             return
         }
+        // Persist transitions (not repeats) so the on-disk log always answers
+        // "when did it change state, and why?".
+        let stateChanged = state != nil && state != gateways[index].connectionState
+        if stateChanged || message != gateways[index].lastMessage {
+            GatewayLog.append(gateway: name, "state: \(state.map(String.init(describing:)) ?? "·") — \(message)")
+        }
         gateways[index].isRunning = isRunning
         if let state {
             gateways[index].connectionState = state
@@ -3693,11 +3909,34 @@ final class MenuBarViewModel: ObservableObject {
         if gateways[index].recentLogs.count > 20 {
             gateways[index].recentLogs.removeFirst(gateways[index].recentLogs.count - 20)
         }
+        GatewayLog.append(gateway: name, trimmed)
+    }
+
+    /// Bounded background retry after a failed silent SAML attempt: 20s, then
+    /// 60s, then give up (the row already says "click Connect").
+    private func scheduleSilentSAMLRetry(named name: String) {
+        let attempt = silentSAMLRetryAttempts[name, default: 0] + 1
+        guard attempt <= 2 else { return }
+        silentSAMLRetryAttempts[name] = attempt
+        let delay = attempt == 1 ? 20 : 60
+        Task { @MainActor [weak self] in
+            try? await Task.sleep(for: .seconds(delay))
+            guard let self,
+                  self.gatewayTasks[name] == nil,
+                  self.activeSAMLAuthenticators[name] == nil,
+                  !self.adoptedGateways.contains(name),
+                  self.gateways.first(where: { $0.id == name })?.connectionState != .connected else {
+                return
+            }
+            GatewayLog.append(gateway: name, "silent sign-in retry \(attempt)")
+            _ = self.startGateway(named: name, allowPasswordPrompt: false)
+        }
     }
 
     fileprivate func markGatewayConnected(named name: String) {
         samlSessionConnectedAt[name] = Date()
         samlReauthAttempts[name] = 0
+        silentSAMLRetryAttempts[name] = 0
 
         // The gateway may have come up after a tunnel's wait-for-gateway window
         // expired (slow SAML / manual connect). Re-launch its dependent tunnels
@@ -3719,8 +3958,12 @@ final class MenuBarViewModel: ObservableObject {
         gatewayTasks[name] = nil
         pendingGatewayCredentialSaves[name] = nil
         let connectedAt = samlSessionConnectedAt.removeValue(forKey: name)
-        let state: ConnectionState = gateways.first(where: { $0.id == name })?.connectionState == .failed ? .failed : .disconnected
-        updateGatewayState(for: name, isRunning: false, state: state, message: state == .failed ? "VPN connection failed" : "Stopped")
+        // A supervisor winding down after its gateway was already handed to a
+        // new sign-in attempt must not stomp that attempt's "Signing in" state.
+        if activeSAMLAuthenticators[name] == nil {
+            let state: ConnectionState = gateways.first(where: { $0.id == name })?.connectionState == .failed ? .failed : .disconnected
+            updateGatewayState(for: name, isRunning: false, state: state, message: state == .failed ? "VPN connection failed" : "Stopped")
+        }
 
         // SAML cookies are single-use, so a dropped session can't simply
         // retry — but the IdP session usually allows a silent re-sign-in.
@@ -3738,6 +3981,12 @@ final class MenuBarViewModel: ObservableObject {
         let attempt = samlReauthAttempts[name, default: 0] + 1
         samlReauthAttempts[name] = attempt
         globalMessage = "Gateway \(name) dropped — signing in again."
+        // An autoconnect AnyConnect gateway re-signs silently (live IdP session
+        // or recipe replay) — no window popping up mid-work; a failure parks at
+        // "click Connect" with bounded background retries. Others keep the
+        // visible window: for GP a headless attempt is a guaranteed no-op, and
+        // a non-autoconnect gateway asked for user-driven connects.
+        let silently = gateway.autoConnect && gateway.vpnProtocol.lowercased() == "anyconnect"
         // Progressive backoff so a flapping network doesn't hammer the IdP.
         let backoff = min(2 * attempt, 15)
         Task { @MainActor [weak self] in
@@ -3745,9 +3994,7 @@ final class MenuBarViewModel: ObservableObject {
             guard let self, self.gatewayTasks[name] == nil, self.activeSAMLAuthenticators[name] == nil else {
                 return
             }
-            // allowPasswordPrompt: true uses the interactive policy, so a stale
-            // IdP session reveals the sign-in window instead of silently failing.
-            self.startGateway(named: name, allowPasswordPrompt: true)
+            _ = self.startGateway(named: name, allowPasswordPrompt: !silently)
         }
     }
 
@@ -5100,6 +5347,45 @@ private struct WarmStatusButton: View {
 
 /// A plain ssh login target from ~/.ssh/config — no forwards, no supervision.
 /// Whole-row click opens the session; the menu also offers copy.
+/// The pulsing activity dot. Self-contained on purpose: its repeatForever
+/// animation exists only while the dot itself is in the tree, and dies with
+/// it. The previous pattern — a row-level `.animation(.repeatForever, value:)`
+/// — left a transition animating forever after any state flip, which kept the
+/// closed menu panel's ViewGraph rendering at full frame rate (~25% CPU,
+/// permanently, invisible). Never attach a repeatForever to a whole row.
+private struct BreathingDot: View {
+    @State private var on = false
+
+    var body: some View {
+        Circle()
+            .fill(Color.orange)
+            .frame(width: 6, height: 6)
+            .opacity(on ? 1 : 0.25)
+            .onAppear {
+                withAnimation(.easeInOut(duration: 0.85).repeatForever(autoreverses: true)) {
+                    on = true
+                }
+            }
+    }
+}
+
+/// Same idea for pulsing an existing view (the warming flame): conditional
+/// application changes the view's identity, so the animation ends the moment
+/// the condition does.
+private struct BreathingOpacity: ViewModifier {
+    @State private var on = false
+
+    func body(content: Content) -> some View {
+        content
+            .opacity(on ? 1 : 0.35)
+            .onAppear {
+                withAnimation(.easeInOut(duration: 0.85).repeatForever(autoreverses: true)) {
+                    on = true
+                }
+            }
+    }
+}
+
 private struct FolderRow: View {
     let folder: MenuBarViewModel.FolderState
     let onToggleMount: () -> Void
@@ -5107,7 +5393,6 @@ private struct FolderRow: View {
     let onEdit: () -> Void
     let onRemove: () -> Void
     @State private var hovering = false
-    @State private var breathing = false
 
     private var subtitle: String {
         let remote = folder.config.remotePath.isEmpty ? "~" : folder.config.remotePath
@@ -5144,10 +5429,7 @@ private struct FolderRow: View {
                     .lineLimit(1)
                 if folder.isBusy {
                     HStack(spacing: 5) {
-                        Circle()
-                            .fill(Color.orange)
-                            .frame(width: 6, height: 6)
-                            .opacity(breathing ? 1 : 0.25)
+                        BreathingDot()
                         Text(verbatim: folder.lastMessage.isEmpty ? "working…" : folder.lastMessage)
                             .font(.system(size: 10, weight: .medium, design: .monospaced))
                             .foregroundStyle(.secondary)
@@ -5202,11 +5484,6 @@ private struct FolderRow: View {
         .frame(height: 48)
         .contentShape(Rectangle())
         .onHover { hovering = $0 }
-        .onAppear {
-            withAnimation(.easeInOut(duration: 0.8).repeatForever(autoreverses: true)) {
-                breathing = true
-            }
-        }
     }
 }
 
@@ -5239,7 +5516,6 @@ private struct SSHHostRow: View {
     var onMoveDown: () -> Void = {}
 
     @State private var hovering = false
-    @State private var breathing = false
 
     private var subtitle: String {
         var text = host.user.map { "\($0)@\(host.effectiveHost)" } ?? host.effectiveHost
@@ -5299,10 +5575,7 @@ private struct SSHHostRow: View {
                     .lineLimit(1)
             } else if showWarming {
                 HStack(spacing: 5) {
-                    Circle()
-                        .fill(Color.orange)
-                        .frame(width: 6, height: 6)
-                        .opacity(breathing ? 1 : 0.25)
+                    BreathingDot()
                     Text("signing in…")
                         .font(.system(size: 10, weight: .medium, design: .monospaced))
                         .foregroundStyle(.secondary)
@@ -5395,12 +5668,20 @@ private struct SSHHostRow: View {
 
             // Essential inline actions only; everything else lives in ⋯.
             Button(action: onToggleKeepWarm) {
-                Image(systemName: showWarming ? "flame.fill" : flameIcon)
-                    .font(.system(size: 12.5))
-                    .foregroundStyle(showWarming ? Color.orange : flameColor)
-                    .opacity(showWarming ? (breathing ? 1 : 0.35) : 1)
-                    .frame(width: 26, height: 26)
-                    .contentShape(Rectangle())
+                if showWarming {
+                    Image(systemName: "flame.fill")
+                        .font(.system(size: 12.5))
+                        .foregroundStyle(Color.orange)
+                        .modifier(BreathingOpacity())
+                        .frame(width: 26, height: 26)
+                        .contentShape(Rectangle())
+                } else {
+                    Image(systemName: flameIcon)
+                        .font(.system(size: 12.5))
+                        .foregroundStyle(flameColor)
+                        .frame(width: 26, height: 26)
+                        .contentShape(Rectangle())
+                }
             }
             .buttonStyle(.plain)
             .help(showWarming ? "Signing in to \(host.alias)…" : flameHelp)
@@ -5470,11 +5751,6 @@ private struct SSHHostRow: View {
         .padding(.vertical, 7)
         .background(hovering ? Color.primary.opacity(0.03) : Color.clear)
         .onHover { hovering = $0 }
-        .animation(.easeInOut(duration: 0.85).repeatForever(autoreverses: true), value: breathing)
-        .onChange(of: isWarming) { warming in
-            breathing = warming
-        }
-        .onAppear { breathing = isWarming }
     }
 }
 

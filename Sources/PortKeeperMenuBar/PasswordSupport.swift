@@ -15,14 +15,21 @@ struct TunnelCredentialKey: Hashable {
     }
 
     init?(gateway: GatewayConfig) {
-        guard let user = gateway.user?.trimmingCharacters(in: .whitespacesAndNewlines), !user.isEmpty else {
+        let trimmed = gateway.user?.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let trimmed, !trimmed.isEmpty {
+            self.user = trimmed
+        } else if gateway.usesSAML {
+            // SAML gateways often have no username of their own (the IdP knows
+            // it) — without a fallback the recipe-replay password could never
+            // be stored, so every silent re-login died at the password field.
+            self.user = "saml"
+        } else {
             return nil
         }
         // 443 = the TLS port openconnect VPNs answer on; keeps the keychain
         // account label meaningful ("user@vpn.host:443").
         self.host = gateway.server
         self.port = 443
-        self.user = user
     }
 
     init?(tunnel: TunnelConfig) {

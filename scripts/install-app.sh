@@ -116,6 +116,8 @@ cat > "$APP_DIR/Contents/Info.plist" <<EOF
   <true/>
   <key>NSHighResolutionCapable</key>
   <true/>
+  <key>NSAppleEventsUsageDescription</key>
+  <string>Burrow opens SSH sessions in Terminal windows.</string>
   <key>SUFeedURL</key>
   <string>https://github.com/jzthree/burrow/releases/latest/download/appcast.xml</string>
   <key>SUPublicEDKey</key>

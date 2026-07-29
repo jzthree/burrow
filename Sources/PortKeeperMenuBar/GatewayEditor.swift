@@ -4,12 +4,18 @@ import SwiftUI
 struct GatewayDraft: Identifiable {
     let id = UUID()
     let originalName: String?
+    /// The config being edited, so fields the editor doesn't manage (learned
+    /// recipe, autoconnect, health check, …) survive a save instead of being
+    /// silently wiped by the rebuild in toGatewayConfig.
+    let original: GatewayConfig?
     var name: String
     var vpnProtocol: String
     var server: String
     var user: String
     var authMode: String
     var samlGroup: String
+    /// Linked 2FA account name ("" = none) answering code prompts in replay.
+    var twoFactorAccount: String
     var socksPort: String
     var sshHostPatternsText: String
     var extraArgsText: String
@@ -23,12 +29,14 @@ struct GatewayDraft: Identifiable {
 
     init(gateway: GatewayConfig, originalName: String?) {
         self.originalName = originalName
+        self.original = originalName == nil ? nil : gateway
         self.name = gateway.name
         self.vpnProtocol = gateway.vpnProtocol
         self.server = gateway.server
         self.user = gateway.user ?? ""
         self.authMode = gateway.authMode
         self.samlGroup = gateway.samlGroup ?? ""
+        self.twoFactorAccount = gateway.twoFactorAccount ?? ""
         self.socksPort = String(gateway.socksPort)
         self.sshHostPatternsText = gateway.sshHostPatterns.joined(separator: ", ")
         self.extraArgsText = gateway.extraArgs.joined(separator: "\n")
@@ -82,6 +90,7 @@ struct GatewayDraft: Identifiable {
 
         let trimmedUser = user.trimmingCharacters(in: .whitespacesAndNewlines)
         let trimmedGroup = samlGroup.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmedAccount = twoFactorAccount.trimmingCharacters(in: .whitespacesAndNewlines)
         return GatewayConfig(
             name: trimmedName,
             vpnProtocol: vpnProtocol,
@@ -90,14 +99,21 @@ struct GatewayDraft: Identifiable {
             socksPort: portValue,
             authMode: authMode,
             samlGroup: trimmedGroup.isEmpty ? nil : trimmedGroup,
+            healthCheckHost: original?.healthCheckHost,
             sshHostPatterns: patterns,
-            extraArgs: args
+            extraArgs: args,
+            reconnectDelaySeconds: original?.reconnectDelaySeconds ?? 5,
+            autoConnect: original?.autoConnect ?? false,
+            signInRecipe: original?.signInRecipe,
+            twoFactorAccount: trimmedAccount.isEmpty ? nil : trimmedAccount
         )
     }
 }
 
 struct GatewayEditorSheet: View {
     @Binding var draft: GatewayDraft
+    /// Authenticator account names for the 2FA code picker.
+    var twoFactorAccountNames: [String] = []
     let onCancel: () -> Void
     let onSave: () -> Void
     let onDelete: () -> Void
@@ -280,6 +296,25 @@ struct GatewayEditorSheet: View {
                                 .textFieldStyle(.roundedBorder)
                                 .frame(width: 180)
                             Text("tunnel group; empty shows the logon page's group picker")
+                                .font(.system(size: 10))
+                                .foregroundStyle(.secondary)
+                            Spacer()
+                        }
+                    }
+                }
+                if draft.authMode == "saml" && !twoFactorAccountNames.isEmpty {
+                    GridRow {
+                        label("2FA Code")
+                        HStack(spacing: 8) {
+                            Picker("2FA Code", selection: $draft.twoFactorAccount) {
+                                Text("None").tag("")
+                                ForEach(twoFactorAccountNames, id: \.self) { name in
+                                    Text(name).tag(name)
+                                }
+                            }
+                            .labelsHidden()
+                            .frame(width: 180)
+                            Text("answers a code prompt during automatic sign-in")
                                 .font(.system(size: 10))
                                 .foregroundStyle(.secondary)
                             Spacer()

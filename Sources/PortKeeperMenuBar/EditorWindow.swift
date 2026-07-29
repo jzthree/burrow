@@ -92,6 +92,7 @@ private struct EditorWindowContent: View {
             } else if let gatewayDraft = viewModel.gatewayDraft {
                 GatewayEditorSheet(
                     draft: gatewayBinding(for: gatewayDraft),
+                    twoFactorAccountNames: viewModel.twoFactorAccountNames,
                     onCancel: { viewModel.closeGatewayEditor() },
                     onSave: { viewModel.saveGatewayEditor() },
                     onDelete: { viewModel.deleteGatewayEditorTarget() }

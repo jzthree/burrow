@@ -77,3 +77,64 @@ public struct SAMLSignInRecipe: Codable, Sendable, Equatable {
     /// account is required for replay).
     public var needsTwoFactor: Bool { steps.contains { $0.action == .fillCode } }
 }
+
+/// Generates the self-contained JavaScript that replays one recipe step in the
+/// sign-in web view. Locates the control by the most stable hints first (id,
+/// then name, then tag/type + visible label); fills via the native value setter
+/// plus input/change events so React-controlled inputs (Okta) register the
+/// change. Returns "ok" when performed, "missing" when the control isn't on
+/// the page yet (the caller polls — SPA transitions take a moment).
+public enum SAMLReplayScript {
+    /// `secret` is whatever the step's fill action needs: the Keychain password
+    /// for fillPassword, a freshly generated TOTP code for fillCode.
+    public static func js(for step: SAMLSignInRecipe.Step, secret: String?) -> String {
+        let field = step.field
+        var locator = ""
+        if let id = field.elementID {
+            locator += "var e=document.getElementById(\(quote(id))); if(e) return e;\n"
+        }
+        if let name = field.name {
+            locator += "var n=document.getElementsByName(\(quote(name))); if(n.length) return n[0];\n"
+        }
+        let selector = field.tag + (field.type.map { "[type=\"\($0)\"]" } ?? "")
+        locator += "var c=Array.from(document.querySelectorAll(\(quote(selector)))).filter(function(x){return x.offsetParent!==null;});\n"
+        if let text = field.text {
+            locator += "var m=c.find(function(x){return ((x.value||x.textContent)||'').trim()===\(quote(text));}); if(m) return m;\n"
+        }
+        locator += "return c[0]||null;"
+
+        let action: String
+        switch step.action {
+        case .fillPassword, .fillCode:
+            action = """
+            var setter=Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype,'value').set;
+            setter.call(el, \(quote(secret ?? "")));
+            el.dispatchEvent(new Event('input',{bubbles:true}));
+            el.dispatchEvent(new Event('change',{bubbles:true}));
+            """
+        case .check:
+            action = "if(!el.checked){el.click();}"
+        case .click:
+            action = "el.click();"
+        }
+        return """
+        (function(){
+        function find(){
+        \(locator)
+        }
+        var el=find();
+        if(!el) return "missing";
+        \(action)
+        return "ok";
+        })()
+        """
+    }
+
+    /// JSON-escapes a value into a JS string literal (quotes, backslashes,
+    /// newlines, unicode — all safe to embed).
+    static func quote(_ value: String) -> String {
+        let data = (try? JSONSerialization.data(withJSONObject: [value]))
+            .flatMap { String(data: $0, encoding: .utf8) } ?? "[\"\"]"
+        return String(data.dropFirst().dropLast())
+    }
+}

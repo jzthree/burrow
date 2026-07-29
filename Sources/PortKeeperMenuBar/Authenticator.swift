@@ -93,7 +93,16 @@ struct AuthenticatorSheet: View {
                                 revealed: viewModel.revealedCodes[account.id],
                                 onReveal: { viewModel.revealTwoFactorCode(named: account.id) },
                                 onHide: { viewModel.hideTwoFactorCode(named: account.id) },
-                                onDelete: { viewModel.deleteTwoFactorAccount(named: account.id) }
+                                onDelete: { viewModel.deleteTwoFactorAccount(named: account.id) },
+                                onCopied: {
+                                    // Copying a code is usually the whole reason
+                                    // the window is open — let the "Copied" check
+                                    // show briefly, then close (codes re-lock).
+                                    Task { @MainActor in
+                                        try? await Task.sleep(for: .milliseconds(550))
+                                        viewModel.closeAuthenticator()
+                                    }
+                                }
                             )
                         }
                     }
@@ -213,6 +222,9 @@ private struct AuthenticatorRow: View {
     let onReveal: () -> Void
     let onHide: () -> Void
     let onDelete: () -> Void
+    /// Fired once the code lands on the clipboard — the window's usual job is
+    /// then done, so the sheet closes it.
+    var onCopied: () -> Void = {}
 
     @State private var hovering = false
     @State private var justCopied = false
@@ -295,6 +307,7 @@ private struct AuthenticatorRow: View {
                     NSPasteboard.general.clearContents()
                     NSPasteboard.general.setString(revealed.code, forType: .string)
                     justCopied = true
+                    onCopied()
                 } label: {
                     HStack(spacing: 6) {
                         Text(spacedCode(revealed.code))

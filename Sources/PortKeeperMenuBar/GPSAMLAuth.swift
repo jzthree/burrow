@@ -38,6 +38,7 @@ final class GPSAMLAuthenticator: NSObject, WKNavigationDelegate, NSWindowDelegat
     private var window: NSWindow?
     private var webView: WKWebView?
     private var completion: ((Result<SAMLResult, Error>) -> Void)?
+    private(set) var isInteractive = true
     private var headerUsername: String?
     private var pendingUsergroup = "gateway:prelogin-cookie"
 
@@ -53,6 +54,7 @@ final class GPSAMLAuthenticator: NSObject, WKNavigationDelegate, NSWindowDelegat
     /// expired one is a full sign-in — either way the user drives it.
     func begin(interactive: Bool = true, completion: @escaping (Result<SAMLResult, Error>) -> Void) {
         self.completion = completion
+        self.isInteractive = interactive
         guard interactive else {
             finish(.failure(SAMLError.interactionRequired))
             return

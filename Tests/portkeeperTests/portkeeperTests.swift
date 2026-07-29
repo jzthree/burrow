@@ -1085,3 +1085,32 @@ final class TCPTestServer {
     #expect(VPNSSODetector.decodeHTMLEntities("a&#x2D;b&#45;c") == "a-b-c")
     #expect(VPNSSODetector.decodeHTMLEntities("x&amp;y &quot;z&quot; & w") == "x&y \"z\" & w")
 }
+
+@Test func samlReplayScriptGeneratesSafeGroundedJS() {
+    // The password-fill step, shaped like the real recorded Okta step.
+    let fill = SAMLSignInRecipe.Step(
+        page: 1,
+        action: .fillPassword,
+        field: .init(tag: "input", type: "password", name: "credentials.passcode", elementID: "input60")
+    )
+    let js = SAMLReplayScript.js(for: fill, secret: #"p@"ss\wörd"#)
+    #expect(js.contains(#"document.getElementById("input60")"#))
+    #expect(js.contains(#"getElementsByName("credentials.passcode")"#))
+    // The secret is JSON-escaped — its quote/backslash can't break the script.
+    #expect(js.contains(#"setter.call(el, "p@\"ss\\wörd")"#))
+    #expect(js.contains("dispatchEvent(new Event('input'"))
+
+    // A label-matched submit click (no id/name — located by tag/type + text).
+    let click = SAMLSignInRecipe.Step(
+        page: 1,
+        action: .click,
+        field: .init(tag: "input", type: "submit", text: "Next")
+    )
+    let clickJS = SAMLReplayScript.js(for: click, secret: nil)
+    #expect(clickJS.contains(#"querySelectorAll("input[type=\"submit\"]")"#))
+    #expect(clickJS.contains(#"==="Next""#))
+    #expect(clickJS.contains("el.click();"))
+
+    // A recipe with a password step never carries the secret itself.
+    #expect(fill.field.text == nil)
+}

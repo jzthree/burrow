@@ -454,11 +454,44 @@ public enum GatewayPortReclaimer {
     /// ocproxy holds the SOCKS port and an openconnect for the server is
     /// running. Lets the app adopt surviving sessions after a restart
     /// instead of showing a working VPN as disconnected.
+    ///
+    /// Runs on the 10s liveness cadence, so it spawns exactly two processes
+    /// (one ps, one lsof) — the previous shape (ps + lsof + a ps per listener
+    /// pid) added up to real background energy.
     public static func hasLiveSession(socksPort: Int, server: String) -> Bool {
-        let holdsPort = listeningPIDs(port: socksPort).contains {
-            (processName($0) ?? "").contains("ocproxy")
+        let table = processTable()
+        let openconnectAlive = table.contains { entry in
+            entry.command.contains("openconnect")
+                && entry.command.split(separator: " ").contains(Substring(server))
         }
-        return holdsPort && !openconnectPIDs(matchingServer: server).isEmpty
+        guard openconnectAlive else { return false }
+        let commandsByPID = Dictionary(table.map { ($0.pid, $0.command) }, uniquingKeysWith: { first, _ in first })
+        return listeningPIDs(port: socksPort).contains { pid in
+            commandsByPID[pid]?.contains("ocproxy") ?? false
+        }
+    }
+
+    /// One `ps -ax` pass: pid + full command per process.
+    private static func processTable() -> [(pid: pid_t, command: String)] {
+        let ps = Process()
+        ps.executableURL = URL(fileURLWithPath: "/bin/ps")
+        ps.arguments = ["-ax", "-o", "pid=,command="]
+        let pipe = Pipe()
+        ps.standardOutput = pipe
+        ps.standardError = Pipe()
+        do {
+            try ps.run()
+        } catch {
+            return []
+        }
+        let output = String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+        ps.waitUntilExit()
+        return output.split(whereSeparator: \.isNewline).compactMap { line in
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            guard let space = trimmed.firstIndex(of: " "),
+                  let pid = pid_t(trimmed[..<space]) else { return nil }
+            return (pid, String(trimmed[trimmed.index(after: space)...]))
+        }
     }
 
     /// openconnect processes whose argument list mentions the server host.
@@ -501,7 +534,11 @@ public enum GatewayPortReclaimer {
     private static func listeningPIDs(port: Int) -> [pid_t] {
         let lsof = Process()
         lsof.executableURL = URL(fileURLWithPath: "/usr/sbin/lsof")
-        lsof.arguments = ["-nP", "-t", "-iTCP:\(port)", "-sTCP:LISTEN"]
+        // -b -w: never issue blocking kernel calls (stat on mount points).
+        // Without them, one dead NFS/FUSE-T mount turns this scan into a
+        // multi-minute hang — measured 2m24s vs 0.13s on the same machine —
+        // and this runs before every gateway launch and in the liveness probe.
+        lsof.arguments = ["-b", "-w", "-nP", "-t", "-iTCP:\(port)", "-sTCP:LISTEN"]
         let pipe = Pipe()
         lsof.standardOutput = pipe
         lsof.standardError = Pipe()
@@ -655,7 +692,19 @@ public final class GatewaySupervisor: @unchecked Sendable {
             throw GatewayError("ocproxy not found. Install it with: brew install ocproxy")
         }
 
-        GatewayPortReclaimer.reclaimStaleListeners(port: gateway.socksPort, logger: logger)
+        // One openconnect per gateway, ever: a fresh launch supersedes anything
+        // still around from an earlier attempt (a ghost from a cancelled task, a
+        // duplicate from a double-click). Two concurrent sessions to the same
+        // ASA displace each other server-side while the older ocproxy keeps the
+        // SOCKS port — a "green but routes nowhere" wedge.
+        GatewayPortReclaimer.killGatewayProcesses(socksPort: gateway.socksPort, server: gateway.server, logger: logger)
+
+        // The task may have been cancelled while the reclaim ran (a stop or a
+        // restart mid-launch). Launching openconnect anyway would create an
+        // unsupervised ghost process nothing tracks — bail out first.
+        guard !Task.isCancelled else {
+            throw GatewayError("cancelled before launch")
+        }
 
         let runState = RunState()
         let process = Process()

@@ -242,6 +242,10 @@ public struct GatewayConfig: Codable, Sendable, Identifiable, Equatable {
     /// A learned recipe for driving this gateway's SAML web sign-in (captured by
     /// recording it once), used to complete autoconnect without user input.
     public var signInRecipe: SAMLSignInRecipe?
+    /// Name of the 2FA (TOTP) account whose code answers this gateway's
+    /// sign-in when the flow asks for one — the VPN counterpart of a host's
+    /// linked authenticator. Used by recipe replay's fillCode step.
+    public var twoFactorAccount: String?
 
     public var usesSAML: Bool {
         authMode.lowercased() == "saml"
@@ -261,6 +265,7 @@ public struct GatewayConfig: Codable, Sendable, Identifiable, Equatable {
         case reconnectDelaySeconds
         case autoConnect
         case signInRecipe
+        case twoFactorAccount
     }
 
     public init(
@@ -276,7 +281,8 @@ public struct GatewayConfig: Codable, Sendable, Identifiable, Equatable {
         extraArgs: [String] = [],
         reconnectDelaySeconds: Int = 5,
         autoConnect: Bool = false,
-        signInRecipe: SAMLSignInRecipe? = nil
+        signInRecipe: SAMLSignInRecipe? = nil,
+        twoFactorAccount: String? = nil
     ) {
         self.name = name
         self.vpnProtocol = vpnProtocol
@@ -291,6 +297,7 @@ public struct GatewayConfig: Codable, Sendable, Identifiable, Equatable {
         self.reconnectDelaySeconds = reconnectDelaySeconds
         self.autoConnect = autoConnect
         self.signInRecipe = signInRecipe
+        self.twoFactorAccount = twoFactorAccount
     }
 
     public init(from decoder: Decoder) throws {
@@ -308,6 +315,7 @@ public struct GatewayConfig: Codable, Sendable, Identifiable, Equatable {
         self.reconnectDelaySeconds = try container.decodeIfPresent(Int.self, forKey: .reconnectDelaySeconds) ?? 5
         self.autoConnect = try container.decodeIfPresent(Bool.self, forKey: .autoConnect) ?? false
         self.signInRecipe = try container.decodeIfPresent(SAMLSignInRecipe.self, forKey: .signInRecipe)
+        self.twoFactorAccount = try container.decodeIfPresent(String.self, forKey: .twoFactorAccount)
     }
 }
 
