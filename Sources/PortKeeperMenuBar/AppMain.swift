@@ -4424,16 +4424,22 @@ final class MenuBarViewModel: ObservableObject {
 }
 
 final class TunnelEventBridge: @unchecked Sendable {
+    private static let sessions = TunnelEventSessionRegistry()
     weak var owner: MenuBarViewModel?
     let tunnelName: String
+    private let sessionID = UUID()
 
     init(owner: MenuBarViewModel, tunnelName: String) {
         self.owner = owner
         self.tunnelName = tunnelName
+        Self.sessions.activate(tunnelName, sessionID: sessionID)
     }
 
     func log(_ message: String) {
         Task { @MainActor in
+            guard Self.sessions.isCurrent(self.tunnelName, sessionID: self.sessionID) else {
+                return
+            }
             if message.localizedCaseInsensitiveContains("permission denied") ||
                 message.localizedCaseInsensitiveContains("authentication failed") {
                 self.owner?.recordAuthenticationFailure(for: self.tunnelName)
@@ -4445,6 +4451,9 @@ final class TunnelEventBridge: @unchecked Sendable {
 
     func handle(_ event: TunnelRuntimeEvent) {
         Task { @MainActor in
+            guard Self.sessions.isCurrent(self.tunnelName, sessionID: self.sessionID) else {
+                return
+            }
             switch event {
             case .starting:
                 self.owner?.clearRetryIndicator(for: self.tunnelName, resetAttempt: false)
@@ -4495,9 +4504,40 @@ final class TunnelEventBridge: @unchecked Sendable {
     }
 
     func finish() {
+        guard Self.sessions.finishIfCurrent(tunnelName, sessionID: sessionID) else {
+            return
+        }
         Task { @MainActor in
             self.owner?.finishTunnel(named: self.tunnelName)
         }
+    }
+}
+
+private final class TunnelEventSessionRegistry: @unchecked Sendable {
+    private let lock = NSLock()
+    private var sessions: [String: UUID] = [:]
+
+    func activate(_ tunnelName: String, sessionID: UUID) {
+        lock.lock()
+        sessions[tunnelName] = sessionID
+        lock.unlock()
+    }
+
+    func isCurrent(_ tunnelName: String, sessionID: UUID) -> Bool {
+        lock.lock()
+        let current = sessions[tunnelName] == sessionID
+        lock.unlock()
+        return current
+    }
+
+    func finishIfCurrent(_ tunnelName: String, sessionID: UUID) -> Bool {
+        lock.lock()
+        let current = sessions[tunnelName] == sessionID
+        if current {
+            sessions[tunnelName] = nil
+        }
+        lock.unlock()
+        return current
     }
 }
 
@@ -4650,6 +4690,8 @@ struct MenuBarContent: View {
                                                 gatewayNames: viewModel.gateways.map(\.id),
                                                 onStart: { viewModel.startTunnel(named: tunnel.id) },
                                                 onStop: { viewModel.stopTunnel(named: tunnel.id) },
+                                                onCancelAttempt: { viewModel.cancelTunnelAttempt(named: tunnel.id) },
+                                                onStopRetrying: { viewModel.stopRetrying(named: tunnel.id) },
                                                 onRestart: { viewModel.restartTunnel(named: tunnel.id) },
                                                 onEdit: { viewModel.openEditor(for: tunnel.id) },
                                                 onDuplicate: { viewModel.duplicateTunnel(named: tunnel.id) },
@@ -6325,6 +6367,8 @@ struct TunnelRow: View {
     var gatewayNames: [String] = []
     let onStart: () -> Void
     let onStop: () -> Void
+    let onCancelAttempt: () -> Void
+    let onStopRetrying: () -> Void
     let onRestart: () -> Void
     let onEdit: () -> Void
     let onDuplicate: () -> Void
@@ -6715,7 +6759,8 @@ struct TunnelRow: View {
             }
             if tunnel.isRunning && tunnel.connectionState == .failed {
                 Divider()
-                Button("Stop Retrying", action: onStop)
+                Button("Cancel Current Attempt", action: onCancelAttempt)
+                Button("Stop Retrying", action: onStopRetrying)
             }
             if !gatewayNames.isEmpty {
                 Divider()
@@ -6826,6 +6871,7 @@ struct TunnelRow: View {
                     .scaleEffect(isPrimaryHovered ? 1.015 : 1.0)
             }
             .buttonStyle(CompactPressButtonStyle())
+            .help(tunnel.connectionState == .failed ? "Stop this tunnel and its retry loop" : "Stop this tunnel")
             .onHover { hovering in
                 withAnimation(.easeOut(duration: 0.12)) {
                     isPrimaryHovered = hovering
