@@ -296,6 +296,16 @@ final class MenuBarViewModel: ObservableObject {
     /// no supervisor task yet, so this is the only thing standing between them
     /// and a duplicate relaunch.
     private var launchingTunnels: Set<String> = []
+    /// The generation number of each tunnel's live supervisor. Every launch
+    /// takes the next number and its event bridge carries it back with every
+    /// callback; callbacks whose number is no longer current are dropped. This
+    /// is what keeps a superseded supervisor's late finish from erasing
+    /// tasks[name] out from under its replacement — that reopened
+    /// startTunnel's single-flight guard, and the duplicate supervisor
+    /// launched through it then "reclaimed" (SIGTERMed) the replacement's
+    /// live ssh on every backoff cycle.
+    private var tunnelGenerations: [String: UInt64] = [:]
+    private var tunnelGenerationCounter: UInt64 = 0
     /// Consecutive through-tunnel health-probe failures per gateway; a session
     /// is only declared dead after a couple in a row so a transient blip
     /// doesn't tear down a working VPN.
@@ -1318,8 +1328,13 @@ final class MenuBarViewModel: ObservableObject {
         activeCredentialSources[name] = preparation.credentialSource
         sawAuthenticationFailure.remove(name)
 
+        tunnelGenerationCounter += 1
+        let generation = tunnelGenerationCounter
+        tunnelGenerations[name] = generation
+        TunnelLog.append(tunnel: name, "supervisor #\(generation) launched")
+
         updateState(for: name, isRunning: true, state: .connecting, message: "Connecting")
-        let bridge = TunnelEventBridge(owner: self, tunnelName: name)
+        let bridge = TunnelEventBridge(owner: self, tunnelName: name, generation: generation)
         // Password-backed tunnels stop on auth failure so finishTunnel can
         // invalidate the credential and re-prompt; key-based tunnels retry
         // forever with backoff — "Permission denied" from a host mid-reboot
@@ -1359,6 +1374,7 @@ final class MenuBarViewModel: ObservableObject {
            let tunnel = tunnels.first(where: { $0.id == name })?.tunnel {
             // Reclaim waits through SIGTERM (2s) and SIGKILL (1s) grace
             // periods — off the main thread so a stop click can't stall the UI.
+            TunnelLog.append(tunnel: name, "stop requested; reclaiming task-less ssh")
             updateState(for: name, isRunning: false, state: .disconnected, message: "Stopping")
             Task { @MainActor [weak self] in
                 guard let self else { return }
@@ -1389,6 +1405,12 @@ final class MenuBarViewModel: ObservableObject {
 
         task.cancel()
         tasks[name] = nil
+        // The cancelled supervisor winds down asynchronously and its final
+        // events (ssh death lines, the finish itself) arrive after this stop
+        // completes — retiring the generation makes them recognized no-ops
+        // instead of stomps on whatever launch comes next.
+        tunnelGenerations[name] = nil
+        TunnelLog.append(tunnel: name, "stop requested; supervisor cancelled")
         pendingCredentialSaves[name] = nil
         activeCredentialSources[name] = nil
         sawAuthenticationFailure.remove(name)
@@ -4276,7 +4298,27 @@ final class MenuBarViewModel: ObservableObject {
         }
     }
 
-    fileprivate func finishTunnel(named name: String) {
+    fileprivate func isCurrentSupervisor(_ generation: UInt64, for name: String) -> Bool {
+        tunnelGenerations[name] == generation
+    }
+
+    fileprivate func finishTunnel(named name: String, generation: UInt64) {
+        // Only the supervisor this app currently considers live may clean up.
+        // A superseded supervisor finishing late used to clear tasks[name]
+        // unconditionally, letting a duplicate launch through the single-flight
+        // guard — which then reclaimed (killed) the live replacement's ssh in
+        // a connected/failed loop. A stop already did this cleanup itself, so
+        // a post-stop finish has nothing left to do either way.
+        guard tunnelGenerations[name] == generation else {
+            if let current = tunnelGenerations[name] {
+                TunnelLog.append(tunnel: name, "ignored stale finish from supervisor #\(generation); supervisor #\(current) is active")
+            } else {
+                TunnelLog.append(tunnel: name, "supervisor #\(generation) finished after stop")
+            }
+            return
+        }
+        tunnelGenerations[name] = nil
+        TunnelLog.append(tunnel: name, "supervisor #\(generation) finished")
         tasks[name] = nil
         pendingCredentialSaves[name] = nil
 
@@ -4426,25 +4468,44 @@ final class MenuBarViewModel: ObservableObject {
 final class TunnelEventBridge: @unchecked Sendable {
     weak var owner: MenuBarViewModel?
     let tunnelName: String
+    /// Which launch this bridge belongs to. Events from a superseded launch
+    /// are dropped on arrival so a cancelled supervisor's dying gasps can't
+    /// repaint — or dismantle — the launch that replaced it.
+    let generation: UInt64
 
-    init(owner: MenuBarViewModel, tunnelName: String) {
+    init(owner: MenuBarViewModel, tunnelName: String, generation: UInt64) {
         self.owner = owner
         self.tunnelName = tunnelName
+        self.generation = generation
     }
 
     func log(_ message: String) {
         Task { @MainActor in
+            guard let owner = self.owner, owner.isCurrentSupervisor(self.generation, for: self.tunnelName) else {
+                return
+            }
+            TunnelLog.append(tunnel: self.tunnelName, Self.strippingNamePrefix(message, name: self.tunnelName))
             if message.localizedCaseInsensitiveContains("permission denied") ||
                 message.localizedCaseInsensitiveContains("authentication failed") {
-                self.owner?.recordAuthenticationFailure(for: self.tunnelName)
+                owner.recordAuthenticationFailure(for: self.tunnelName)
             }
-            self.owner?.appendLog(for: self.tunnelName, message: message)
-            self.owner?.updateState(for: self.tunnelName, isRunning: true, message: message)
+            owner.appendLog(for: self.tunnelName, message: message)
+            owner.updateState(for: self.tunnelName, isRunning: true, message: message)
         }
+    }
+
+    /// Supervisor lines arrive prefixed "[name] "; TunnelLog adds its own
+    /// tunnel tag, so drop the duplicate.
+    private static func strippingNamePrefix(_ message: String, name: String) -> String {
+        let prefix = "[\(name)] "
+        return message.hasPrefix(prefix) ? String(message.dropFirst(prefix.count)) : message
     }
 
     func handle(_ event: TunnelRuntimeEvent) {
         Task { @MainActor in
+            guard self.owner?.isCurrentSupervisor(self.generation, for: self.tunnelName) == true else {
+                return
+            }
             switch event {
             case .starting:
                 self.owner?.clearRetryIndicator(for: self.tunnelName, resetAttempt: false)
@@ -4496,7 +4557,9 @@ final class TunnelEventBridge: @unchecked Sendable {
 
     func finish() {
         Task { @MainActor in
-            self.owner?.finishTunnel(named: self.tunnelName)
+            // No generation gate here: finishTunnel itself decides, so a stale
+            // finish still leaves its diagnostic trace instead of vanishing.
+            self.owner?.finishTunnel(named: self.tunnelName, generation: self.generation)
         }
     }
 }
