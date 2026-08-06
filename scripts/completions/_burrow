@@ -34,7 +34,9 @@ _burrow() {
     'remove:remove a tunnel'
     'enable:enable a tunnel'
     'disable:disable a tunnel'
-    'run:run tunnels in the foreground'
+    'run:run tunnels (--detach to keep running after the terminal closes)'
+    'reload:apply config edits to a running tunnel'
+    'reclaim:free a stale remote -R port on a tunnel host'
     'hosts:manage ~/.ssh/config login hosts'
     'gateway:inspect and connect VPN gateways'
     '2fa:list two-factor accounts'
@@ -47,7 +49,7 @@ _burrow() {
   fi
 
   case $words[2] in
-    enable|disable|remove|edit|run)
+    enable|disable|remove|edit|run|reload|reclaim)
       _burrow_tunnels
       ;;
     hosts|host)

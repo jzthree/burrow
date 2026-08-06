@@ -5,6 +5,10 @@ import PortKeeperCore
 @main
 struct BurrowCLI {
     static func main() async {
+        // Line-buffer stdout even when it's a pipe. Errors go to stderr, which
+        // is never buffered, so block buffering prints them *before* the line
+        // saying what was being attempted — output that reads backwards.
+        setvbuf(stdout, nil, _IOLBF, 0)
         do {
             try await CLI().run(arguments: Array(CommandLine.arguments.dropFirst()))
         } catch let error as CLIError {
@@ -64,6 +68,8 @@ struct CLI {
             try setEnabled(arguments: Array(arguments.dropFirst()), enabled: false)
         case "run":
             try await runTunnels(arguments: Array(arguments.dropFirst()))
+        case "reload":
+            try reloadTunnels(arguments: Array(arguments.dropFirst()))
         case "reclaim":
             try reclaimRemotePort(arguments: Array(arguments.dropFirst()))
         case "profile", "profiles":
@@ -81,8 +87,42 @@ struct CLI {
         }
     }
 
+    /// What a tunnel's config says next to what its ssh process is actually
+    /// doing. A supervisor holds the definition it launched with, so printing
+    /// the file alone can state, with total confidence, forwards that no live
+    /// process has — which is exactly the failure this column exists to make
+    /// visible.
+    private struct RuntimeStatus {
+        let live: PortKeeperRuntimeRegistry.LiveProcess?
+        let drift: [String]
+
+        var label: String {
+            guard let live else { return "stopped" }
+            let owner: String
+            switch live.supervisor {
+            case .app: owner = "app"
+            case .cli: owner = "cli"
+            case .none: owner = "orphan"
+            }
+            return "\(drift.isEmpty ? "running" : "drift"):\(live.pid)/\(owner)"
+        }
+    }
+
+    private func runtimeStatus(for tunnel: TunnelConfig) -> RuntimeStatus {
+        guard let live = PortKeeperRuntimeRegistry.liveProcess(for: tunnel) else {
+            return RuntimeStatus(live: nil, drift: [])
+        }
+        return RuntimeStatus(
+            live: live,
+            drift: TunnelDrift.differences(configured: tunnel, liveCommand: live.command)
+        )
+    }
+
     private func listTunnels(json: Bool) throws {
         let config = try store.load()
+        let statuses = Dictionary(
+            uniqueKeysWithValues: config.tunnels.map { ($0.name, runtimeStatus(for: $0)) }
+        )
         if json {
             struct Row: Encodable {
                 let name: String
@@ -91,15 +131,30 @@ struct CLI {
                 let user: String?
                 let gateway: String?
                 let forwards: [String]
+                let running: Bool
+                let pid: Int?
+                let supervisor: String?
+                let drift: [String]
             }
             try printJSON(config.tunnels.map { tunnel in
-                Row(
+                let status = statuses[tunnel.name]
+                return Row(
                     name: tunnel.name,
                     enabled: tunnel.enabled,
                     host: tunnel.host,
                     user: tunnel.user,
                     gateway: tunnel.gateway,
-                    forwards: tunnel.forwards.map(renderForward)
+                    forwards: tunnel.forwards.map(renderForward),
+                    running: status?.live != nil,
+                    pid: status?.live.map { Int($0.pid) },
+                    supervisor: status?.live.map { live in
+                        switch live.supervisor {
+                        case .app: return "app"
+                        case .cli: return "cli"
+                        case .none: return "none"
+                        }
+                    },
+                    drift: status?.drift ?? []
                 )
             })
             return
@@ -109,11 +164,115 @@ struct CLI {
             return
         }
 
+        // One line per tunnel, name first: `burrow list | cut -f1` is how the
+        // shell completions enumerate tunnels.
         for tunnel in config.tunnels {
-            let status = tunnel.enabled ? "enabled" : "disabled"
+            let enablement = tunnel.enabled ? "enabled" : "disabled"
+            let status = statuses[tunnel.name] ?? RuntimeStatus(live: nil, drift: [])
             let forwardList = tunnel.forwards.map(renderForward).joined(separator: ", ")
-            print("\(tunnel.name)\t\(status)\t\(tunnel.host)\t\(forwardList)")
+            var line = "\(tunnel.name)\t\(enablement)\t\(status.label)\t\(tunnel.host)\t\(forwardList)"
+            if !status.drift.isEmpty {
+                line += "\tdrift: \(status.drift.joined(separator: "; ")) — `burrow reload \(tunnel.name)` applies the config"
+            }
+            print(line)
         }
+    }
+
+    /// Applies the config on disk to tunnels that are already running.
+    ///
+    /// The app is asked first, because it owns its supervisors and can restart
+    /// one without touching the VPN gateway underneath it (restarting the app
+    /// to pick up an edit would drop every gateway). A CLI-supervised tunnel is
+    /// restarted by ending its ssh: the supervisor re-reads config.json before
+    /// each attempt, so it comes back with the new definition. An ssh nothing
+    /// supervises is left alone — killing it would just leave it dead.
+    private func reloadTunnels(arguments: [String]) throws {
+        let config = try store.load()
+        let parser = ArgumentParser(arguments: arguments)
+        let force = parser.flag("--force")
+        let name = arguments.first(where: { !$0.hasPrefix("-") })
+
+        let selected: [TunnelConfig]
+        if let name {
+            guard let tunnel = config.tunnels.first(where: { $0.name == name }) else {
+                throw CLIError("tunnel '\(name)' was not found")
+            }
+            selected = [tunnel]
+        } else {
+            selected = config.tunnels
+        }
+
+        var reloaded = 0
+        var running = 0
+        for tunnel in selected {
+            guard let live = PortKeeperRuntimeRegistry.liveProcess(for: tunnel) else {
+                if name != nil {
+                    print("\(tunnel.name) isn't running — start it with `burrow run \(tunnel.name)` or in the app.")
+                }
+                continue
+            }
+            running += 1
+
+            switch live.supervisor {
+            case .app:
+                BurrowReloadSignal.post(tunnel: tunnel.name)
+                print("\(tunnel.name): asked the Burrow app to relaunch it (ssh pid \(live.pid))…")
+                fflush(stdout)
+                if let replacement = waitForReplacement(of: live.pid, tunnel: tunnel, timeout: 10) {
+                    print("\(tunnel.name): running the current config (ssh pid \(replacement.pid)).")
+                    reloaded += 1
+                } else {
+                    print("\(tunnel.name): the app didn't relaunch it — ending its ssh so the supervisor reconnects.")
+                    fflush(stdout)
+                    kill(live.pid, SIGTERM)
+                    if let replacement = waitForReplacement(of: live.pid, tunnel: tunnel, timeout: 20) {
+                        print("\(tunnel.name): back up (ssh pid \(replacement.pid)).")
+                        reloaded += 1
+                    } else {
+                        print("\(tunnel.name): nothing brought it back. Check the app, or run `burrow run \(tunnel.name)`.")
+                    }
+                }
+            case .cli:
+                print("\(tunnel.name): restarting the supervised ssh (pid \(live.pid))…")
+                fflush(stdout)
+                kill(live.pid, SIGTERM)
+                if let replacement = waitForReplacement(of: live.pid, tunnel: tunnel, timeout: 20) {
+                    print("\(tunnel.name): running the current config (ssh pid \(replacement.pid)).")
+                    reloaded += 1
+                } else {
+                    print("\(tunnel.name): its supervisor didn't reconnect within 20s — check `burrow list`.")
+                }
+            case .none:
+                guard force else {
+                    print("\(tunnel.name): ssh pid \(live.pid) has no supervisor (its parent is gone), so ending it would just leave the tunnel down. Take it over with `burrow run \(tunnel.name) --force`, or pass --force here to end it.")
+                    continue
+                }
+                kill(live.pid, SIGTERM)
+                print("\(tunnel.name): ended unsupervised ssh pid \(live.pid). Nothing will restart it — use `burrow run \(tunnel.name)`.")
+            }
+        }
+
+        if running == 0 && name == nil {
+            print("No running tunnels to reload.")
+        } else if name == nil {
+            print("Reloaded \(reloaded) of \(running) running tunnel(s).")
+        }
+    }
+
+    /// Polls for the tunnel's ssh to come back as a different process.
+    private func waitForReplacement(
+        of previousPID: pid_t,
+        tunnel: TunnelConfig,
+        timeout: TimeInterval
+    ) -> PortKeeperRuntimeRegistry.LiveProcess? {
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            usleep(500_000)
+            if let live = PortKeeperRuntimeRegistry.liveProcess(for: tunnel), live.pid != previousPID {
+                return live
+            }
+        }
+        return nil
     }
 
     func printJSON<T: Encodable>(_ value: T) throws {
@@ -259,31 +418,82 @@ struct CLI {
 
     /// Frees a stale reverse-forward (`-R`) port on a tunnel's remote host by
     /// terminating the process holding it, through the tunnel's own route
-    /// (jump host included). The CLI companion to the app's reclaim action.
+    /// (gateway and jump host included). The CLI companion to the app's
+    /// reclaim action. `--dry-run` reports the holder without signalling it —
+    /// on a shared login node, ending someone's session is a judgment call.
     private func reclaimRemotePort(arguments: [String]) throws {
         guard let name = arguments.first(where: { !$0.hasPrefix("-") }) else {
-            throw CLIError("usage: burrow reclaim <name> [--port N]")
+            throw CLIError("usage: burrow reclaim <name> [--port N] [--dry-run]")
         }
         let parser = ArgumentParser(arguments: arguments)
+        let dryRun = parser.flag("--dry-run")
         let config = try store.load()
-        guard let tunnel = config.tunnels.first(where: { $0.name == name }) else {
+        guard let configured = config.tunnels.first(where: { $0.name == name }) else {
             throw CLIError("tunnel '\(name)' was not found")
         }
-        guard let port = try parser.intValue(for: "--port") ?? RemoteForwardSupport.reverseForwardPort(of: tunnel) else {
+        guard let port = try parser.intValue(for: "--port") ?? RemoteForwardSupport.reverseForwardPort(of: configured) else {
             throw CLIError("tunnel '\(name)' has no reverse (-R) forward — pass --port N to reclaim a specific remote port.")
         }
-        let route = tunnel.jumpHost.map { "\($0) → " } ?? ""
-        print("Freeing remote port \(port) on \(route)\(tunnel.host)…")
-        let command = RemoteForwardSupport.freePortCommand(port)
-        let args = SSHCommandBuilder.remoteExecArguments(for: tunnel, command: command)
-        let result = RemoteCommandRunner.run(arguments: args, executablePath: sshExecutablePath)
-        if result.standardOutput.contains("BURROW_PORT_FREE") {
-            print("Freed remote port \(port). Restart the tunnel (`burrow run \(name)` or the app) to bind it.")
-        } else if result.standardOutput.contains("BURROW_PORT_BUSY") {
-            throw CLIError("remote port \(port) on \(tunnel.host) is still held by a process burrow can't signal (no fuser / restricted /proc). Free it on the host, or change the tunnel's reverse-forward port.")
-        } else {
-            let detail = result.standardError.split(whereSeparator: \.isNewline).last.map(String.init) ?? "could not reach the host"
-            throw CLIError("couldn't free remote port \(port): \(detail)")
+        // Reach the host the way the tunnel does: a gateway-bound tunnel keeps
+        // its route in a ProxyCommand, and dialing the host directly without
+        // it fails in a way that reads like the remote refusing the request.
+        if let gatewayName = configured.gateway,
+           let gateway = config.gateways.first(where: { $0.name == gatewayName }),
+           !PortProbe.canConnect(host: "127.0.0.1", port: gateway.socksPort) {
+            throw CLIError("\(name) routes via gateway '\(gatewayName)' but nothing is listening on 127.0.0.1:\(gateway.socksPort). Connect it with `burrow gateway connect \(gatewayName)` or in the Burrow app first.")
+        }
+        let tunnel = GatewayLinker.applyingGatewayProxy(
+            to: try TunnelLaunchPreparer.prepare(configured),
+            gateways: config.gateways
+        )
+
+        let route = configured.jumpHost.map { "\($0) → " } ?? ""
+        print(dryRun
+            ? "Checking what holds remote port \(port) on \(route)\(configured.host)…"
+            : "Freeing remote port \(port) on \(route)\(configured.host)…")
+        // stdout is block-buffered when it isn't a terminal, stderr never is:
+        // without this flush the error below prints *before* the line saying
+        // what was attempted.
+        fflush(stdout)
+
+        let result = RemoteCommandRunner.run(
+            arguments: SSHCommandBuilder.remoteExecArguments(
+                for: tunnel,
+                command: RemoteForwardSupport.freePortCommand(port, dryRun: dryRun)
+            ),
+            executablePath: sshExecutablePath
+        )
+        let outcome = RemoteForwardSupport.parseFreePortOutput(
+            standardOutput: result.standardOutput,
+            standardError: result.standardError
+        )
+        for holder in outcome.holders {
+            print("  held by \(holder)")
+        }
+        for pid in outcome.unkillable {
+            print("  could not signal pid \(pid) (it belongs to another user)")
+        }
+
+        switch outcome.status {
+        case .unreachable:
+            throw CLIError("couldn't reach \(configured.host): \(outcome.detail ?? "no response")")
+        case .freed:
+            if dryRun {
+                print("Nothing is listening on remote port \(port) — it's free to bind.")
+            } else {
+                print("Freed remote port \(port). Apply it with `burrow reload \(name)`, or start the tunnel.")
+            }
+        case .busy:
+            if dryRun {
+                let hint = outcome.holders.isEmpty
+                    ? "\(configured.host) wouldn't say what holds it (no lsof/ss/fuser, or the holder is another user's)"
+                    : "run `burrow reclaim \(name) --port \(port)` to end it"
+                print("Remote port \(port) is in use — \(hint).")
+            } else {
+                throw CLIError("remote port \(port) on \(configured.host) is still held after SIGTERM and SIGKILL. Free it on the host, or point this tunnel's reverse forward at an unused port. (Until then the tunnel connects without that forward.)")
+            }
+        case .unverified:
+            print("Signalled the holder(s), but \(configured.host) has neither ss nor lsof, so burrow can't confirm the port is free.")
         }
     }
 
@@ -291,19 +501,54 @@ struct CLI {
         let config = try store.load()
         let tunnelName = arguments.first(where: { !$0.hasPrefix("-") })
         let sshExecutablePath = self.sshExecutablePath
+        let force = arguments.contains("--force")
 
-        let selected: [TunnelConfig]
+        var selected: [TunnelConfig]
         if let tunnelName {
             guard let tunnel = config.tunnels.first(where: { $0.name == tunnelName }) else {
                 throw CLIError("tunnel '\(tunnelName)' was not found")
             }
             selected = [GatewayLinker.applyingGatewayProxy(to: try TunnelLaunchPreparer.prepare(tunnel), gateways: config.gateways)]
-        } else if arguments.contains("--all") || arguments.isEmpty {
+        } else if arguments.contains("--all") || arguments.first(where: { !$0.hasPrefix("-") }) == nil {
             selected = try config.tunnels.filter(\.enabled).map {
                 GatewayLinker.applyingGatewayProxy(to: try TunnelLaunchPreparer.prepare($0), gateways: config.gateways)
             }
         } else {
-            throw CLIError("usage: burrow run [--all|<name>]")
+            throw CLIError("usage: burrow run [--all|<name>] [--detach] [--force]")
+        }
+
+        // Two supervisors on one tunnel is not "two chances to stay up": each
+        // reclaims — SIGTERMs — the other's ssh before every attempt, and the
+        // tunnel flaps until one of them is killed.
+        if !force {
+            let alreadyRunning = selected.compactMap { tunnel in
+                PortKeeperRuntimeRegistry.liveProcess(for: tunnel).map { (tunnel: tunnel, live: $0) }
+            }
+            if let conflict = alreadyRunning.first, tunnelName != nil {
+                let owner: String
+                switch conflict.live.supervisor {
+                case .app: owner = "the Burrow app is supervising it"
+                case .cli: owner = "another `burrow run` is supervising it"
+                case .none: owner = "nothing is supervising it"
+                }
+                throw CLIError("'\(conflict.tunnel.name)' already has a live ssh (pid \(conflict.live.pid)) — \(owner). Use `burrow reload \(conflict.tunnel.name)` to restart it with the current config, or `--force` to take it over.")
+            }
+            let blocked = Set(alreadyRunning.map(\.tunnel.name))
+            for entry in alreadyRunning {
+                print("skipping \(entry.tunnel.name): already running as pid \(entry.live.pid).")
+            }
+            selected.removeAll { blocked.contains($0.name) }
+            if selected.isEmpty && !alreadyRunning.isEmpty {
+                print("Nothing to start — every enabled tunnel is already running.")
+                return
+            }
+        }
+
+        // Detach only after the checks above, so their errors reach the
+        // terminal instead of the background copy's /dev/null.
+        if arguments.contains("--detach") || arguments.contains("-d") {
+            try detachRun(arguments: arguments)
+            return
         }
 
         try await supervise(
@@ -312,6 +557,87 @@ struct CLI {
             failFastOnGatewayDown: tunnelName != nil,
             sshExecutablePath: sshExecutablePath
         )
+    }
+
+    /// Relaunches this same command in the background, in its own session, so
+    /// closing the terminal doesn't take the tunnel down with it. Output goes
+    /// to a deduplicated, size-capped log rather than the terminal.
+    private func detachRun(arguments: [String]) throws {
+        let executable = try selfExecutablePath()
+        let childArguments = ["run"] + arguments.filter { $0 != "--detach" && $0 != "-d" }
+        let logURL = BoundedLogFile.logsDirectory().appendingPathComponent("cli-run.log", isDirectory: false)
+
+        var childEnvironment = environment
+        childEnvironment["BURROW_LOG_FILE"] = logURL.path
+        let pid = try spawnDetached(
+            executable: executable,
+            arguments: childArguments,
+            environment: childEnvironment
+        )
+
+        let what = childArguments.dropFirst().filter { !$0.hasPrefix("-") }.first ?? "--all"
+        print("Detached: burrow run \(what) (pid \(pid)).")
+        print("Logs:     \(logURL.path)")
+        print("Stop it:  kill \(pid)")
+    }
+
+    /// The burrow binary currently executing, as an absolute path.
+    private func selfExecutablePath() throws -> String {
+        let argv0 = CommandLine.arguments.first ?? "burrow"
+        if argv0.contains("/") {
+            return URL(fileURLWithPath: argv0).standardizedFileURL.path
+        }
+        for directory in (environment["PATH"] ?? "").split(separator: ":") {
+            let candidate = "\(directory)/\(argv0)"
+            if FileManager.default.isExecutableFile(atPath: candidate) {
+                return candidate
+            }
+        }
+        throw CLIError("couldn't locate the burrow binary to detach (argv[0] was '\(argv0)'). Invoke it by path, e.g. `.build/release/burrow run NAME --detach`.")
+    }
+
+    private func spawnDetached(
+        executable: String,
+        arguments: [String],
+        environment: [String: String]
+    ) throws -> pid_t {
+        var fileActions: posix_spawn_file_actions_t?
+        posix_spawn_file_actions_init(&fileActions)
+        defer { posix_spawn_file_actions_destroy(&fileActions) }
+        // The child logs to its own file; its raw descriptors must not keep
+        // the terminal open (or write to it after the user has moved on).
+        posix_spawn_file_actions_addopen(&fileActions, 0, "/dev/null", O_RDONLY, 0)
+        posix_spawn_file_actions_addopen(&fileActions, 1, "/dev/null", O_WRONLY, 0)
+        posix_spawn_file_actions_addopen(&fileActions, 2, "/dev/null", O_WRONLY, 0)
+
+        var attributes: posix_spawnattr_t?
+        posix_spawnattr_init(&attributes)
+        defer { posix_spawnattr_destroy(&attributes) }
+        // Its own session: no controlling terminal, so the SIGHUP that closing
+        // the window sends to the foreground process group never reaches it.
+        posix_spawnattr_setflags(&attributes, Int16(POSIX_SPAWN_SETSID))
+
+        var processID = pid_t()
+        let argv = [executable] + arguments
+        let envp = environment.map { "\($0.key)=\($0.value)" }
+        let spawnResult = try ForegroundSSHRunner.withCStringArray(argv) { argumentPointers in
+            try ForegroundSSHRunner.withCStringArray(envp) { environmentPointers in
+                posix_spawn(&processID, executable, &fileActions, &attributes, argumentPointers, environmentPointers)
+            }
+        }
+        guard spawnResult == 0 else {
+            throw CLIError("couldn't detach: \(String(cString: strerror(spawnResult)))")
+        }
+        return processID
+    }
+
+    /// Where a detached run sends what it would otherwise print. Both bounds
+    /// matter here: a supervisor retries forever, and nobody is watching.
+    private var detachedLog: BoundedLogFile? {
+        guard let path = environment["BURROW_LOG_FILE"], !path.isEmpty else {
+            return nil
+        }
+        return BoundedLogFile(url: URL(fileURLWithPath: path), label: "burrow.cli-run-log")
     }
 
     /// Runs a set of already-prepared tunnels: warns (or fails) on a down
@@ -343,8 +669,11 @@ struct CLI {
         }
 
         let interactiveMode = selected.count == 1 && isatty(STDIN_FILENO) != 0
+        // One instance, shared by every supervisor: the deduplicator's state
+        // lives in it, and a per-call instance would suppress nothing.
+        let log = detachedLog
 
-        print("Running \(selected.count) tunnel(s). Press Ctrl-C to stop.")
+        emit("Running \(selected.count) tunnel(s). Press Ctrl-C to stop.", to: log)
         if interactiveMode {
             print("Interactive SSH prompts will use this terminal.")
             try runInteractiveTunnel(selected[0], executablePath: sshExecutablePath)
@@ -357,15 +686,16 @@ struct CLI {
         let runnerTask = Task {
             await withTaskGroup(of: Void.self) { group in
                 for tunnel in selected {
+                    let reloadDefinition = self.definitionReloader(for: tunnel.name)
                     group.addTask {
                         let supervisor = TunnelSupervisor(
                             tunnel: tunnel,
                             logger: { line in
-                                print(line)
-                                fflush(stdout)
+                                Self.emit(line, source: tunnel.name, to: log)
                             },
                             executablePath: sshExecutablePath,
-                            captureOutput: true
+                            captureOutput: true,
+                            configReloader: reloadDefinition
                         )
                         await supervisor.run()
                     }
@@ -379,8 +709,47 @@ struct CLI {
         await runnerTask.value
     }
 
+    /// A `@Sendable` view of "what does config.json say this tunnel is right
+    /// now", prepared and gateway-routed exactly like a fresh launch. A
+    /// supervisor calls it before each attempt, so an edit made while it runs
+    /// takes effect on the next reconnect instead of waiting for a restart.
+    private func definitionReloader(for name: String) -> @Sendable () -> TunnelConfig? {
+        let store = self.store
+        return {
+            guard let config = try? store.load(),
+                  let configured = config.tunnels.first(where: { $0.name == name }),
+                  let prepared = try? TunnelLaunchPreparer.prepare(configured) else {
+                return nil
+            }
+            return GatewayLinker.applyingGatewayProxy(to: prepared, gateways: config.gateways)
+        }
+    }
+
+    /// A supervisor line goes to the terminal, or — when detached — to the
+    /// bounded log file instead.
+    private static func emit(_ line: String, source: String, to log: BoundedLogFile?) {
+        guard let log else {
+            print(line)
+            fflush(stdout)
+            return
+        }
+        // Supervisor lines arrive prefixed "[name] "; the log adds its own tag.
+        let prefix = "[\(source)] "
+        log.append(source: source, line.hasPrefix(prefix) ? String(line.dropFirst(prefix.count)) : line)
+    }
+
+    private func emit(_ line: String, to log: BoundedLogFile?) {
+        Self.emit(line, source: "burrow", to: log)
+    }
+
     private func runInteractiveTunnel(_ tunnel: TunnelConfig, executablePath: String) throws {
+        var tunnel = tunnel
+        let reloadDefinition = definitionReloader(for: tunnel.name)
         while true {
+            if let updated = reloadDefinition(), updated != tunnel {
+                print("[\(tunnel.name)] config changed on disk — relaunching with the new definition.")
+                tunnel = updated
+            }
             try PortKeeperRuntimeRegistry.reclaimOwnedProcess(
                 for: tunnel,
                 executablePath: executablePath
@@ -470,7 +839,7 @@ struct CLI {
 
             Commands:
               init
-              list [--json]
+              list [--json]        (also: is it running, and does the live ssh match config?)
               print-config
               sample-config
               version | --version
@@ -484,8 +853,13 @@ struct CLI {
               remove NAME
               enable NAME
               disable NAME
-              run [--all|NAME]
-              reclaim NAME [--port N]   (free a stale remote -R port on the tunnel's host)
+              run [--all|NAME] [--detach] [--force]
+                  --detach  keep running after the terminal closes, logging to a capped file
+                  --force   take over a tunnel something else is already supervising
+              reload [NAME]             (apply config edits to a running tunnel, in place)
+              reclaim NAME [--port N] [--dry-run]
+                                        (free a stale remote -R port on the tunnel's host;
+                                         --dry-run only reports what holds it)
 
             Profiles (named groups of tunnels + gateways):
               profile list [--json]
@@ -661,7 +1035,7 @@ private enum ForegroundSSHRunner {
         return 128 + terminationSignal
     }
 
-    private static func withCStringArray<Result>(
+    static func withCStringArray<Result>(
         _ values: [String],
         _ body: ([UnsafeMutablePointer<CChar>?]) throws -> Result
     ) throws -> Result {

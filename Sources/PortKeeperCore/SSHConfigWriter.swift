@@ -43,6 +43,20 @@ public enum SSHConfigWriter {
         }
     }
 
+    /// The directives that let one authenticated connection be reused by every
+    /// later `ssh <alias>` — what "keeping a host warm" actually rests on.
+    /// Without them ssh authenticates, exits, and leaves nothing behind: the
+    /// user types their password and 2FA code again every single time, and
+    /// Burrow can only report that it "signed in but kept no master".
+    ///
+    /// ControlPersist is a duration rather than `yes` so a master that nothing
+    /// is using eventually retires on its own.
+    public static let multiplexingDirectives: [(name: String, value: String)] = [
+        ("ControlMaster", "auto"),
+        ("ControlPath", "~/.ssh/burrow/cm-%r@%h:%p"),
+        ("ControlPersist", "8h"),
+    ]
+
     /// Renders the `Host` block Burrow appends (also used for previews/tests).
     public static func render(_ entry: HostEntry) -> String {
         var lines = ["# Added by Burrow", "Host \(entry.alias)", "    HostName \(entry.hostName)"]
@@ -58,7 +72,81 @@ public enum SSHConfigWriter {
         if let jump = entry.proxyJump, !jump.isEmpty {
             lines.append("    ProxyJump \(jump)")
         }
+        for directive in multiplexingDirectives {
+            lines.append("    \(directive.name) \(directive.value)")
+        }
         return lines.joined(separator: "\n")
+    }
+
+    /// Adds whichever multiplexing directives `alias`'s stanza is missing,
+    /// leaving any it already sets alone (a hand-tuned ControlPath stays).
+    /// Returns the names it added — empty when the host was already set up.
+    ///
+    /// This is the repair for "signed in but kept no master": the fix is three
+    /// lines of ssh config, and telling someone to go add them by hand is not
+    /// an answer a tool should give when it can just do it.
+    @discardableResult
+    public static func enableMultiplexing(
+        alias: String,
+        in url: URL = SSHConfigParser.defaultConfigURL()
+    ) throws -> [String] {
+        let target = alias.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !target.isEmpty else {
+            throw WriteError.invalidEntry("No host alias given.")
+        }
+        guard let contents = try? String(contentsOf: url, encoding: .utf8) else {
+            throw WriteError.invalidEntry("Couldn't read \(url.lastPathComponent).")
+        }
+
+        var lines = contents.components(separatedBy: "\n")
+        let targetLower = target.lowercased()
+        guard let hostLineIndex = lines.firstIndex(where: {
+            keyword($0) == "host" && hostTokens($0).contains { $0.lowercased() == targetLower }
+        }) else {
+            throw WriteError.invalidEntry("Host “\(alias)” wasn't found in \(url.lastPathComponent) (it may be in an Included file).")
+        }
+
+        var bodyEnd = hostLineIndex + 1
+        while bodyEnd < lines.count {
+            let kw = keyword(lines[bodyEnd])
+            if kw == "host" || kw == "match" { break }
+            bodyEnd += 1
+        }
+        let bodyRange = (hostLineIndex + 1)..<bodyEnd
+        var body = Array(lines[bodyRange])
+        let indent = body
+            .first(where: { !$0.trimmingCharacters(in: .whitespaces).isEmpty })
+            .map { String($0.prefix { $0 == " " || $0 == "\t" }) } ?? "    "
+
+        // Insert after the stanza's last directive, before any trailing blank
+        // lines that separate it from the next Host block.
+        var insertionPoint = body.count
+        while insertionPoint > 0, body[insertionPoint - 1].trimmingCharacters(in: .whitespaces).isEmpty {
+            insertionPoint -= 1
+        }
+
+        var added: [String] = []
+        for directive in multiplexingDirectives where !body.contains(where: { keyword($0) == directive.name.lowercased() }) {
+            body.insert("\(indent)\(directive.name) \(directive.value)", at: insertionPoint)
+            insertionPoint += 1
+            added.append(directive.name)
+        }
+        guard !added.isEmpty else { return [] }
+
+        try ensureControlPathDirectory()
+        lines.replaceSubrange(bodyRange, with: body)
+        try writeConfigText(lines.joined(separator: "\n"), to: url)
+        return added
+    }
+
+    /// ssh won't create the directory a ControlPath lives in; without it every
+    /// connection fails to open the socket and silently keeps no master.
+    public static func ensureControlPathDirectory(fileManager: FileManager = .default) throws {
+        let directory = fileManager.homeDirectoryForCurrentUser
+            .appendingPathComponent(".ssh", isDirectory: true)
+            .appendingPathComponent("burrow", isDirectory: true)
+        try fileManager.createDirectory(at: directory, withIntermediateDirectories: true)
+        try? fileManager.setAttributes([.posixPermissions: 0o700], ofItemAtPath: directory.path)
     }
 
     /// Appends a host block to the config, creating ~/.ssh and the file (mode
@@ -91,6 +179,9 @@ public enum SSHConfigWriter {
         let directory = url.deletingLastPathComponent()
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         try? FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: directory.path)
+        // The rendered block sets a ControlPath; its directory has to exist
+        // before the first connection or no master is ever kept.
+        try? ensureControlPathDirectory()
 
         let existing = (try? String(contentsOf: url, encoding: .utf8)) ?? ""
         var output = existing

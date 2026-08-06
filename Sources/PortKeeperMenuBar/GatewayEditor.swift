@@ -19,6 +19,12 @@ struct GatewayDraft: Identifiable {
     var socksPort: String
     var sshHostPatternsText: String
     var extraArgsText: String
+    /// Typed here, saved to the Keychain by the editor's save path — never
+    /// part of the config file. Empty means "leave whatever is stored alone".
+    var password: String = ""
+    /// Whether a password is already stored, so the field can say so instead
+    /// of looking blank-and-unset.
+    var hasSavedPassword: Bool = false
 
     static let protocolChoices: [(id: String, label: String)] = [
         ("gp", "GlobalProtect"),
@@ -333,6 +339,23 @@ struct GatewayEditorSheet: View {
                                 .foregroundStyle(.secondary)
                         }
                         Spacer()
+                    }
+                }
+                // Set the password here rather than waiting to be prompted on
+                // the first connect: you have it in hand *now*, while you're
+                // describing the gateway.
+                if draft.authMode == "password" {
+                    GridRow {
+                        label("Password")
+                        HStack(spacing: 8) {
+                            SecureField(draft.hasSavedPassword ? "saved — type to replace" : "optional", text: $draft.password)
+                                .textFieldStyle(.roundedBorder)
+                                .frame(width: 180)
+                            Text("kept in your Keychain")
+                                .font(.system(size: 10))
+                                .foregroundStyle(.secondary)
+                            Spacer()
+                        }
                     }
                 }
                 GridRow {

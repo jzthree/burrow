@@ -69,6 +69,142 @@ public enum PortKeeperRuntimeRegistry {
         return pid
     }
 
+    /// A tunnel's ssh process as it exists right now, for *inspection* rather
+    /// than ownership: status reporting, drift detection, reload.
+    public struct LiveProcess: Sendable, Equatable {
+        public let pid: pid_t
+        /// The full command line, straight from `ps`.
+        public let command: String
+        /// What is supervising it, judged from its parent process.
+        public let supervisor: Supervisor
+
+        public enum Supervisor: Sendable, Equatable {
+            /// The menu-bar app launched it and will restart it.
+            case app
+            /// A `burrow run` launched it and will restart it.
+            case cli
+            /// Nothing is watching — its parent is gone (reparented to init)
+            /// or is something else entirely. Killing it just leaves it dead.
+            case none
+        }
+    }
+
+    /// The live ssh process for `tunnel`, if there is one.
+    ///
+    /// Ownership is judged loosely on purpose: the configured forwards may be
+    /// exactly what no longer matches (that mismatch is the drift callers are
+    /// asking about), so identity rests on the endpoint plus Burrow's launch
+    /// shape. The recorded pid is authoritative; the process scan is the
+    /// fallback for a lost pid file, and there it also demands a
+    /// tunnel-specific fingerprint so two tunnels to the same host can't be
+    /// confused for each other.
+    public static func liveProcess(
+        for tunnel: TunnelConfig,
+        fileManager: FileManager = .default,
+        runtimeDirectory: URL? = nil
+    ) -> LiveProcess? {
+        if let pidFileURL = try? pidFileURL(for: tunnel.name, fileManager: fileManager, runtimeDirectory: runtimeDirectory),
+           fileManager.fileExists(atPath: pidFileURL.path),
+           let pid = try? readPID(from: pidFileURL),
+           pid > 0, pid != getpid(), processExists(pid),
+           let command = processCommand(for: pid),
+           looksLikeTunnelProcess(command, tunnel: tunnel) {
+            return LiveProcess(pid: pid, command: command, supervisor: supervisor(of: pid))
+        }
+
+        for (pid, command) in processTable() where pid != getpid()
+            && looksLikeTunnelProcess(command, tunnel: tunnel)
+            && hasTunnelFingerprint(command, tunnel: tunnel) {
+            return LiveProcess(pid: pid, command: command, supervisor: supervisor(of: pid))
+        }
+        return nil
+    }
+
+    /// The full command line of a running process, for callers that need to
+    /// see what a process was actually launched with (drift, adoption).
+    public static func commandLine(of pid: pid_t) -> String? {
+        processCommand(for: pid)
+    }
+
+    private static func looksLikeTunnelProcess(_ command: String, tunnel: TunnelConfig) -> Bool {
+        let remoteTarget = tunnel.user.map { "\($0)@\(tunnel.host)" } ?? tunnel.host
+        guard command.contains("ExitOnForwardFailure=yes") else { return false }
+        // The remote target is ssh's last argument and contains no spaces, so
+        // it survives ps flattening even next to a quoted ProxyCommand.
+        return command.split(whereSeparator: \.isWhitespace).last.map(String.init) == remoteTarget
+    }
+
+    /// Something in the command line that belongs to *this* tunnel and no
+    /// other: its own known-hosts file, or one of its forwards.
+    private static func hasTunnelFingerprint(_ command: String, tunnel: TunnelConfig) -> Bool {
+        let safeName = tunnel.name.replacingOccurrences(of: "/", with: "_")
+        if command.contains("/\(safeName).known_hosts") {
+            return true
+        }
+        return tunnel.forwards.contains { command.contains(forwardOwnershipFragment($0)) }
+    }
+
+    private static func supervisor(of pid: pid_t) -> LiveProcess.Supervisor {
+        guard let parent = parentPID(of: pid), parent > 1,
+              let command = processCommand(for: parent) else {
+            return .none
+        }
+        if command.contains("Burrow.app/Contents/MacOS/") || command.contains("/BurrowApp") {
+            return .app
+        }
+        // The CLI runs as `burrow …` however it was invoked (installed binary,
+        // `swift run`, a .build path), so match the executable's own name.
+        let executable = command.split(whereSeparator: \.isWhitespace).first.map(String.init) ?? command
+        if (executable as NSString).lastPathComponent == "burrow" {
+            return .cli
+        }
+        return .none
+    }
+
+    private static func parentPID(of pid: pid_t) -> pid_t? {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/bin/ps")
+        process.arguments = ["-p", "\(pid)", "-o", "ppid="]
+        let pipe = Pipe()
+        process.standardOutput = pipe
+        process.standardError = Pipe()
+        do {
+            try process.run()
+            let data = pipe.fileHandleForReading.readDataToEndOfFile()
+            process.waitUntilExit()
+            guard process.terminationStatus == 0 else { return nil }
+            let text = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines)
+            return text.flatMap { pid_t($0) }
+        } catch {
+            return nil
+        }
+    }
+
+    /// Ends one specific process, without the command scan `reclaimOwnedProcess`
+    /// also does. Use it when the pid is already known and a replacement may be
+    /// starting concurrently: the scan matches on launch *shape*, so it can't
+    /// tell the process being stopped from the one taking its place.
+    public static func terminateProcess(
+        _ pid: pid_t,
+        for tunnelName: String,
+        logger: ((String) -> Void)? = nil,
+        fileManager: FileManager = .default,
+        runtimeDirectory: URL? = nil
+    ) {
+        guard pid > 0, pid != getpid(), processExists(pid) else {
+            try? clearRecordedProcess(for: tunnelName, matching: pid, fileManager: fileManager, runtimeDirectory: runtimeDirectory)
+            return
+        }
+        logger?("[\(tunnelName)] stopping ssh process \(pid).")
+        kill(pid, SIGTERM)
+        waitForExit(of: pid, timeout: 2.0)
+        if processExists(pid) {
+            kill(pid, SIGKILL)
+            waitForExit(of: pid, timeout: 1.0)
+        }
+        try? clearRecordedProcess(for: tunnelName, matching: pid, fileManager: fileManager, runtimeDirectory: runtimeDirectory)
+    }
+
     public static func recordProcess(
         _ pid: pid_t,
         for tunnelName: String,

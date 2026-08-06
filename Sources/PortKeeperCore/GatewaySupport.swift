@@ -258,6 +258,28 @@ public struct JumpHostSpec: Equatable, Sendable {
 }
 
 /// Connects gateway configs to tunnels and to plain ssh usage.
+/// Pacing for unattended (silent) VPN sign-in attempts after a session drops.
+///
+/// The thing that usually fixes a failed attempt is the network coming back,
+/// and that has no deadline — so this widens instead of quitting, matching the
+/// tunnels' capped backoff. The old two-strikes-then-park policy meant a
+/// five-minute outage cost the whole day's automation: the gateway sat at
+/// "click Connect" long after connectivity returned.
+public enum SilentSignInRetry {
+    /// Delay before attempt `attempt` (1-based). Quick twice — a wake or an
+    /// IdP hiccup clears in seconds — then widening to a half-hour it keeps
+    /// forever.
+    public static func delaySeconds(attempt: Int) -> Int {
+        let schedule = [20, 60, 180, 600, 1800]
+        return schedule[min(max(attempt, 1) - 1, schedule.count - 1)]
+    }
+
+    /// A human-readable "next try" for the row's status message.
+    public static func describeDelay(_ seconds: Int) -> String {
+        seconds < 60 ? "\(seconds)s" : "\(seconds / 60)m"
+    }
+}
+
 public enum GatewayLinker {
     /// Routes a tunnel's ssh connection through its gateway's SOCKS port.
     /// A user-supplied ProxyCommand in extraSSHOptions wins.

@@ -156,7 +156,18 @@ extension CLI {
         if status == 0, SSHHostWarmer.isWarm(alias: alias) {
             print("'\(alias)' is warm — `ssh \(alias)` now reuses this master (kept alive by ControlPersist).")
         } else if status == 0 {
-            throw CLIError("'\(alias)' authenticated but no reusable master exists — add `ControlMaster auto` / `ControlPersist` to its ssh config.")
+            // The host authenticated but keeps nothing — it's missing the
+            // multiplexing directives. Add them and try once more rather than
+            // asking the user to go edit ssh config by hand.
+            let added = try SSHConfigWriter.enableMultiplexing(alias: alias)
+            guard !added.isEmpty else {
+                throw CLIError("'\(alias)' authenticated but kept no master, and its ssh config already enables multiplexing — something on the host is closing the session.")
+            }
+            print("Added \(added.joined(separator: ", ")) to '\(alias)' in ~/.ssh/config — signing in once more…")
+            guard SSHHostWarmer.warmForeground(alias: alias) == 0, SSHHostWarmer.isWarm(alias: alias) else {
+                throw CLIError("'\(alias)' still kept no master after enabling multiplexing.")
+            }
+            print("'\(alias)' is warm — `ssh \(alias)` now reuses this master.")
         } else {
             throw CLIError("could not warm '\(alias)' (sign-in failed or was cancelled).")
         }

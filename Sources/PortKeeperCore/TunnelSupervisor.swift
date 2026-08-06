@@ -7,6 +7,9 @@ public enum TunnelRuntimeEvent: Sendable {
     case exited(Int32, String?)
     case failedToStart(String)
     case authenticationFailed(String)
+    /// Connecting with fewer forwards than configured, because the remote
+    /// refuses to bind one of them. Everything else is up.
+    case degraded(String)
     case log(String)
 }
 
@@ -55,8 +58,13 @@ public final class TunnelSupervisor: @unchecked Sendable {
     private let captureOutput: Bool
     private let authFailurePolicy: AuthFailureRetryPolicy
     private let retryTuning: RetryTuning
+    private let configReloader: (@Sendable () -> TunnelConfig?)?
     private let processLock = NSLock()
     private var currentProcess: Process?
+    /// How long to wait before a retry that is part of reverse-forward
+    /// recovery — short, because it is acting on new information rather than
+    /// waiting out an outage.
+    private let recoveryDelaySeconds = 2
 
     public init(
         tunnel: TunnelConfig,
@@ -66,7 +74,8 @@ public final class TunnelSupervisor: @unchecked Sendable {
         executablePath: String = "/usr/bin/ssh",
         captureOutput: Bool = true,
         authFailurePolicy: AuthFailureRetryPolicy = .retryWithBackoff,
-        retryTuning: RetryTuning = .standard
+        retryTuning: RetryTuning = .standard,
+        configReloader: (@Sendable () -> TunnelConfig?)? = nil
     ) {
         self.tunnel = tunnel
         self.logger = logger
@@ -76,6 +85,7 @@ public final class TunnelSupervisor: @unchecked Sendable {
         self.captureOutput = captureOutput
         self.authFailurePolicy = authFailurePolicy
         self.retryTuning = retryTuning
+        self.configReloader = configReloader
     }
 
     /// Delay before retry number `consecutiveFailures` (1-based): base doubling
@@ -100,31 +110,63 @@ public final class TunnelSupervisor: @unchecked Sendable {
             // long outage from hammering the host every few seconds.
             var consecutiveFailures = 0
             var nextDelaySeconds = max(1, tunnel.reconnectDelaySeconds)
+            // The definition a supervisor launched with is not necessarily the
+            // one on disk a minute later: config.json is the ground truth and
+            // `burrow edit` may rewrite it mid-session. Owners that supply a
+            // reloader pick edits up on the next reconnect instead of holding
+            // a stale copy until they're restarted.
+            var definition = tunnel
+            var recovery = ReverseForwardRecovery()
+
             while !Task.isCancelled {
+                if let reloaded = configReloader?(), reloaded != definition {
+                    logger("[\(definition.name)] config changed on disk — relaunching with the new definition.")
+                    definition = reloaded
+                    recovery.reset()
+                }
+                let launch = recovery.applying(to: definition)
+
                 do {
-                    let result = try runOnce()
+                    let result = try runOnce(tunnel: launch, droppedPorts: recovery.droppedPorts)
                     if Task.isCancelled {
                         break
                     }
-                    if result.didConnect {
-                        consecutiveFailures = 0
-                    }
-                    consecutiveFailures += 1
-                    nextDelaySeconds = Self.retryDelay(
-                        consecutiveFailures: consecutiveFailures,
-                        base: tunnel.reconnectDelaySeconds,
-                        cap: retryTuning.ordinaryCapSeconds
-                    )
                     eventHandler(.exited(result.exitCode, result.diagnosticMessage))
-                    let diagnosticSuffix = result.diagnosticMessage.map { " \($0)" } ?? ""
-                    logger("[\(tunnel.name)] ssh exited with code \(result.exitCode).\(diagnosticSuffix) Reconnecting in \(nextDelaySeconds)s.")
+
+                    switch recovery.next(diagnostic: result.diagnosticMessage, tunnel: definition) {
+                    case .reclaim(let port):
+                        nextDelaySeconds = recoveryDelaySeconds
+                        attemptRemotePortReclaim(port, tunnel: definition)
+                    case .degrade(let port):
+                        // The connected-without-it notice comes from the run
+                        // itself, so the row says what it is missing for as
+                        // long as it stays up — not for the two seconds
+                        // between attempts.
+                        nextDelaySeconds = recoveryDelaySeconds
+                        logger("[\(definition.name)] giving up on -R \(port) for now and connecting with the rest. Free the port with `burrow reclaim \(definition.name) --port \(port)`; the forward returns on the next reconnect.")
+                    case .none:
+                        // A run that reached forward readiness starts the
+                        // backoff — and the recovery escalation — over.
+                        if result.didConnect {
+                            consecutiveFailures = 0
+                            recovery.reset()
+                        }
+                        consecutiveFailures += 1
+                        nextDelaySeconds = Self.retryDelay(
+                            consecutiveFailures: consecutiveFailures,
+                            base: definition.reconnectDelaySeconds,
+                            cap: retryTuning.ordinaryCapSeconds
+                        )
+                        let diagnosticSuffix = result.diagnosticMessage.map { " \($0)" } ?? ""
+                        logger("[\(definition.name)] ssh exited with code \(result.exitCode).\(diagnosticSuffix) Reconnecting in \(nextDelaySeconds)s.")
+                    }
                 } catch let error as AuthenticationFailureError {
                     if Task.isCancelled {
                         break
                     }
                     eventHandler(.authenticationFailed(error.message))
                     if case .stopAndReport = authFailurePolicy {
-                        logger("[\(tunnel.name)] authentication failed: \(error.message). Stopping retries until credentials are updated.")
+                        logger("[\(definition.name)] authentication failed: \(error.message). Stopping retries until credentials are updated.")
                         break
                     }
                     // Key-based tunnel: a host mid-reboot reports "Permission
@@ -135,7 +177,7 @@ public final class TunnelSupervisor: @unchecked Sendable {
                         base: retryTuning.authBaseSeconds,
                         cap: retryTuning.authCapSeconds
                     )
-                    logger("[\(tunnel.name)] authentication failed: \(error.message). Retrying in \(nextDelaySeconds)s.")
+                    logger("[\(definition.name)] authentication failed: \(error.message). Retrying in \(nextDelaySeconds)s.")
                 } catch {
                     if Task.isCancelled {
                         break
@@ -143,11 +185,11 @@ public final class TunnelSupervisor: @unchecked Sendable {
                     consecutiveFailures += 1
                     nextDelaySeconds = Self.retryDelay(
                         consecutiveFailures: consecutiveFailures,
-                        base: tunnel.reconnectDelaySeconds,
+                        base: definition.reconnectDelaySeconds,
                         cap: retryTuning.ordinaryCapSeconds
                     )
                     eventHandler(.failedToStart(error.localizedDescription))
-                    logger("[\(tunnel.name)] failed to start: \(error.localizedDescription). Retrying in \(nextDelaySeconds)s.")
+                    logger("[\(definition.name)] failed to start: \(error.localizedDescription). Retrying in \(nextDelaySeconds)s.")
                 }
 
                 do {
@@ -162,7 +204,36 @@ public final class TunnelSupervisor: @unchecked Sendable {
         })
     }
 
-    private func runOnce() throws -> RunResult {
+    /// Frees a reverse-forward port the remote refuses to rebind, through the
+    /// tunnel's own route (gateway and jump host included). Blocking — it runs
+    /// on the supervisor's own thread, between two connection attempts.
+    private func attemptRemotePortReclaim(_ port: Int, tunnel: TunnelConfig) {
+        logger("[\(tunnel.name)] remote port \(port) is already bound on \(tunnel.host) — trying to free it.")
+        let result = RemoteCommandRunner.run(
+            arguments: SSHCommandBuilder.remoteExecArguments(
+                for: tunnel,
+                command: RemoteForwardSupport.freePortCommand(port)
+            ),
+            executablePath: executablePath
+        )
+        let outcome = RemoteForwardSupport.parseFreePortOutput(
+            standardOutput: result.standardOutput,
+            standardError: result.standardError
+        )
+        let held = outcome.holderSummary.map { " (held by \($0))" } ?? ""
+        switch outcome.status {
+        case .freed:
+            logger("[\(tunnel.name)] freed remote port \(port)\(held). Reconnecting with every forward.")
+        case .busy:
+            logger("[\(tunnel.name)] remote port \(port) is still held\(held).")
+        case .unverified:
+            logger("[\(tunnel.name)] signalled the holder of remote port \(port)\(held), but \(tunnel.host) has no ss or lsof to confirm it is free.")
+        case .unreachable:
+            logger("[\(tunnel.name)] couldn't reach \(tunnel.host) to free port \(port): \(outcome.detail ?? "no response").")
+        }
+    }
+
+    private func runOnce(tunnel: TunnelConfig, droppedPorts: [Int] = []) throws -> RunResult {
         try PortKeeperRuntimeRegistry.reclaimOwnedProcess(
             for: tunnel,
             executablePath: executablePath,
@@ -214,9 +285,14 @@ public final class TunnelSupervisor: @unchecked Sendable {
         eventHandler(.starting)
         try process.run()
         try PortKeeperRuntimeRegistry.recordProcess(process.processIdentifier, for: tunnel.name)
-        let didConnect = waitForForwardReadiness(process: process, runState: runState)
+        let didConnect = waitForForwardReadiness(tunnel: tunnel, process: process, runState: runState)
         if didConnect {
             eventHandler(.connected)
+            if !droppedPorts.isEmpty {
+                let ports = droppedPorts.map { "-R \($0)" }.joined(separator: ", ")
+                let plural = droppedPorts.count == 1 ? "that port" : "those ports"
+                eventHandler(.degraded("Connected without \(ports) — the remote won't release \(plural)"))
+            }
         }
         process.waitUntilExit()
 
@@ -281,7 +357,7 @@ public final class TunnelSupervisor: @unchecked Sendable {
             normalized.contains("remote port forwarding failed")
     }
 
-    private func waitForForwardReadiness(process: Process, runState: RunState) -> Bool {
+    private func waitForForwardReadiness(tunnel: TunnelConfig, process: Process, runState: RunState) -> Bool {
         let probeTargets = tunnel.forwards.compactMap { forward -> (String, Int)? in
             switch forward.kind {
             case .local, .dynamic:

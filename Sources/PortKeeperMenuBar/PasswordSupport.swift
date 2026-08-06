@@ -123,6 +123,17 @@ final class PasswordStore {
     private let legacyService = "PortKeeper"
     private let vaultAccount = "__credential_vault__"
 
+    /// ThisDeviceOnly keeps the vault out of anything that leaves this Mac.
+    ///
+    /// Note for anyone tempted to switch this to `AfterFirstUnlock` so
+    /// background reconnects can read it on a locked screen: it would change
+    /// nothing. These items live in the file-based login keychain, where
+    /// `kSecAttrAccessible` is ignored (it applies to the data-protection
+    /// keychain only) — the login keychain's own lock state is what governs.
+    /// The defense that does work is holding the password in memory once
+    /// read; see `sessionGatewayPasswords`.
+    private static var accessibility: CFString { kSecAttrAccessibleWhenUnlockedThisDeviceOnly }
+
     func password(for key: TunnelCredentialKey) throws -> String? {
         try preloadPasswords(for: [key]).password(for: key)
     }
@@ -227,14 +238,14 @@ final class PasswordStore {
         // their next save.
         let update: [String: Any] = [
             kSecValueData as String: data,
-            kSecAttrAccessible as String: kSecAttrAccessibleWhenUnlockedThisDeviceOnly,
+            kSecAttrAccessible as String: Self.accessibility,
         ]
 
         let status = SecItemUpdate(query as CFDictionary, update as CFDictionary)
         if status == errSecItemNotFound {
             var create = query
             create[kSecValueData as String] = data
-            create[kSecAttrAccessible as String] = kSecAttrAccessibleWhenUnlockedThisDeviceOnly
+            create[kSecAttrAccessible as String] = Self.accessibility
             let addStatus = SecItemAdd(create as CFDictionary, nil)
             guard addStatus == errSecSuccess else {
                 throw PasswordStoreError.unhandled(addStatus)
@@ -611,36 +622,50 @@ final class WarmSignInWindowController: NSObject, NSWindowDelegate {
 }
 
 enum SSHHostPrompt {
+    /// Everything the New SSH Host sheet can set up in one pass: the config
+    /// entry, and — because a host you add is a host you're about to sign in
+    /// to — the credentials that make signing in automatic.
+    struct NewHost {
+        let entry: SSHConfigWriter.HostEntry
+        let password: String?
+        let twoFactorSecret: String?
+    }
+
     @MainActor
-    static func request() -> SSHConfigWriter.HostEntry? {
+    static func request() -> NewHost? {
         let alert = NSAlert()
         alert.messageText = "New SSH Host"
         alert.informativeText = "Adds a Host entry to your ~/.ssh/config so you can open it from Burrow and from any terminal. Burrow only appends; it won't change your existing config."
 
-        let width: CGFloat = 360
-        let container = NSStackView(frame: NSRect(x: 0, y: 0, width: width, height: 116))
-        container.orientation = .vertical
-        container.alignment = .leading
-        container.spacing = 6
+        let container = AlertForm.container()
+        let aliasField = AlertForm.field(placeholder: "lab-gpu")
+        let hostField = AlertForm.field(placeholder: "gpu.lab.edu or 10.0.0.5")
+        let userField = AlertForm.field(placeholder: "optional")
+        let portField = AlertForm.field(placeholder: "22")
+        let passwordField = AlertForm.field(placeholder: "optional", secure: true)
+        let secretField = AlertForm.field(placeholder: "otpauth://… or base32 key")
 
-        let aliasField = NSTextField(frame: NSRect(x: 0, y: 0, width: width, height: 24))
-        aliasField.placeholderString = "Name / alias (e.g. lab-gpu)"
-        let hostField = NSTextField(frame: NSRect(x: 0, y: 0, width: width, height: 24))
-        hostField.placeholderString = "Host address (e.g. gpu.lab.edu or 10.0.0.5)"
-        let userField = NSTextField(frame: NSRect(x: 0, y: 0, width: width, height: 24))
-        userField.placeholderString = "User (optional)"
-        let portField = NSTextField(frame: NSRect(x: 0, y: 0, width: width, height: 24))
-        portField.placeholderString = "Port (optional, default 22)"
+        container.addArrangedSubview(AlertForm.row("Name", aliasField))
+        container.addArrangedSubview(AlertForm.row("Address", hostField))
+        container.addArrangedSubview(AlertForm.row("User", userField))
+        container.addArrangedSubview(AlertForm.row("Port", portField))
 
-        for field in [aliasField, hostField, userField, portField] {
-            field.translatesAutoresizingMaskIntoConstraints = false
-            field.widthAnchor.constraint(equalToConstant: width).isActive = true
-            container.addArrangedSubview(field)
-        }
+        // Credentials up front: needing a second trip through a different menu
+        // to make a host usable is the kind of thing you only discover after
+        // the host has already asked you for a password twice.
+        container.addArrangedSubview(AlertForm.section("Sign-in (optional)"))
+        container.addArrangedSubview(AlertForm.row("Password", passwordField))
+        container.addArrangedSubview(AlertForm.note("Stored in your Keychain and used to keep this host warm. Needs a user name above."))
+        container.addArrangedSubview(AlertForm.row("2FA key", secretField))
+        container.addArrangedSubview(AlertForm.note("A TOTP setup key, so Burrow can enter codes behind Touch ID. Duo push and hardware tokens have no key to enroll."))
+        AlertForm.finish(container)
+
         alert.accessoryView = container
         alert.window.initialFirstResponder = aliasField
 
-        alert.addButton(withTitle: "Add to ~/.ssh/config")
+        // Short enough that the two buttons sit side by side instead of
+        // stacking; the informative text above already says where it goes.
+        alert.addButton(withTitle: "Add Host")
         alert.addButton(withTitle: "Cancel")
 
         guard alert.runModal() == .alertFirstButtonReturn else {
@@ -650,14 +675,20 @@ enum SSHHostPrompt {
         let host = hostField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
         let user = userField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
         let port = Int(portField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines))
+        let password = passwordField.stringValue
+        let secret = secretField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !alias.isEmpty, !host.isEmpty else {
             return nil
         }
-        return SSHConfigWriter.HostEntry(
-            alias: alias,
-            hostName: host,
-            user: user.isEmpty ? nil : user,
-            port: port
+        return NewHost(
+            entry: SSHConfigWriter.HostEntry(
+                alias: alias,
+                hostName: host,
+                user: user.isEmpty ? nil : user,
+                port: port
+            ),
+            password: password.isEmpty ? nil : password,
+            twoFactorSecret: secret.isEmpty ? nil : secret
         )
     }
 
@@ -670,9 +701,11 @@ enum SSHHostPrompt {
         alert.messageText = "Enroll 2FA for \(alias)"
         alert.informativeText = "Paste this host's authenticator setup key — its otpauth:// link or the “can't scan” base32 secret.\n\nBurrow stores it in your macOS Keychain and asks for Touch ID / your Mac password before generating a code whenever it keeps \(alias) warm. This works only for TOTP-based 2FA — a Duo push or hardware token has no key to enroll."
 
-        let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 340, height: 24))
-        field.placeholderString = "otpauth://… or base32 key"
-        alert.accessoryView = field
+        let container = AlertForm.container()
+        let field = AlertForm.field(placeholder: "otpauth://… or base32 key")
+        container.addArrangedSubview(AlertForm.row("Setup key", field))
+        AlertForm.finish(container)
+        alert.accessoryView = container
         alert.window.initialFirstResponder = field
 
         alert.addButton(withTitle: "Enroll & Link")
@@ -700,27 +733,14 @@ enum SSHHostPrompt {
         alert.messageText = "Edit \(alias)"
         alert.informativeText = "Updates HostName / User / Port for “\(alias)” in ~/.ssh/config. Burrow changes only those lines and leaves the rest of the stanza (ControlMaster, ProxyJump, comments, …) untouched."
 
-        let width: CGFloat = 360
-        let container = NSStackView(frame: NSRect(x: 0, y: 0, width: width, height: 88))
-        container.orientation = .vertical
-        container.alignment = .leading
-        container.spacing = 6
-
-        let hostField = NSTextField(frame: NSRect(x: 0, y: 0, width: width, height: 24))
-        hostField.placeholderString = "Host address (e.g. gpu.lab.edu or 10.0.0.5)"
-        hostField.stringValue = hostName
-        let userField = NSTextField(frame: NSRect(x: 0, y: 0, width: width, height: 24))
-        userField.placeholderString = "User (optional)"
-        userField.stringValue = user ?? ""
-        let portField = NSTextField(frame: NSRect(x: 0, y: 0, width: width, height: 24))
-        portField.placeholderString = "Port (optional, default 22)"
-        portField.stringValue = port.map(String.init) ?? ""
-
-        for field in [hostField, userField, portField] {
-            field.translatesAutoresizingMaskIntoConstraints = false
-            field.widthAnchor.constraint(equalToConstant: width).isActive = true
-            container.addArrangedSubview(field)
-        }
+        let container = AlertForm.container()
+        let hostField = AlertForm.field(placeholder: "gpu.lab.edu or 10.0.0.5", value: hostName)
+        let userField = AlertForm.field(placeholder: "optional", value: user ?? "")
+        let portField = AlertForm.field(placeholder: "22", value: port.map(String.init) ?? "")
+        container.addArrangedSubview(AlertForm.row("Address", hostField))
+        container.addArrangedSubview(AlertForm.row("User", userField))
+        container.addArrangedSubview(AlertForm.row("Port", portField))
+        AlertForm.finish(container)
         alert.accessoryView = container
         alert.window.initialFirstResponder = hostField
 

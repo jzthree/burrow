@@ -132,7 +132,7 @@ open Burrow.xcodeproj
 
 ```bash
 burrow init
-burrow list [--json]
+burrow list [--json]              # + live status: running / stopped / drift vs config
 burrow print-config
 burrow sample-config
 burrow version
@@ -143,7 +143,9 @@ burrow edit NAME [any add flag]   # only passed flags change; "" clears a field
 burrow enable NAME
 burrow disable NAME
 burrow remove NAME
-burrow run [--all|NAME]
+burrow run [--all|NAME] [--detach] [--force]
+burrow reload [NAME]              # apply config edits to a running tunnel, in place
+burrow reclaim NAME [--port N] [--dry-run]   # free a stale remote -R port
 
 # ~/.ssh/config login hosts (incl. keep-warm)
 burrow hosts list [--json]

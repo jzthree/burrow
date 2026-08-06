@@ -58,9 +58,16 @@ public enum SSHCommandBuilder {
     }
 
     /// ssh arguments to run a single command on the tunnel's host — same
-    /// endpoint, jump host, identity, and port as the tunnel, but no forwards
-    /// and no `-N`. Used to reach the remote for maintenance (e.g. freeing a
-    /// stale reverse-forward port).
+    /// endpoint, route, identity, and port as the tunnel, but no forwards and
+    /// no `-N`. Used to reach the remote for maintenance (e.g. freeing a stale
+    /// reverse-forward port).
+    ///
+    /// The tunnel's extra options come along because the route can live in
+    /// them: a gateway-bound tunnel carries its ProxyCommand there, and
+    /// without it this dials the host directly — which, for a host only
+    /// reachable through the VPN, fails in a way that looks like the remote
+    /// refusing the request. They come last so they win over the defaults
+    /// below (a tunnel that must ask for a passphrase can turn BatchMode off).
     public static func remoteExecArguments(for tunnel: TunnelConfig, command: String) -> [String] {
         var args: [String] = [
             "-o", "BatchMode=yes",
@@ -72,6 +79,9 @@ public enum SSHCommandBuilder {
         }
         if let jumpHost = tunnel.jumpHost, !jumpHost.isEmpty {
             args.append(contentsOf: ["-J", jumpHost])
+        }
+        for option in tunnel.extraSSHOptions {
+            args.append(contentsOf: ["-o", option])
         }
         args.append(remoteTarget(for: tunnel))
         args.append(command)

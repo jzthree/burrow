@@ -52,7 +52,7 @@ Tunnels are supervised SSH sessions that hold one or more forwards open.
 
 ```sh
 burrow init                     # create the config file if missing
-burrow list                     # name, enabled/disabled, host, forwards
+burrow list                     # name, enabled/disabled, live status, host, forwards
 burrow print-config             # full config as JSON
 burrow sample-config            # print an example tunnel config
 
@@ -71,6 +71,8 @@ burrow remove prod-db
 # with auto-reconnect:
 burrow run prod-db
 burrow run --all
+burrow run prod-db --detach     # keep running after the terminal closes
+burrow run prod-db --force      # take over a tunnel something else supervises
 ```
 
 Forward syntax: `--local`/`--remote` take `[bind:]listenPort:destHost:destPort`;
@@ -78,11 +80,60 @@ Forward syntax: `--local`/`--remote` take `[bind:]listenPort:destHost:destPort`;
 `run` warns when that gateway's local SOCKS port isn't listening (start it in
 the app first).
 
+`run` refuses a tunnel that already has a live ssh (the app's, or another
+`burrow run`) unless you pass `--force`: two supervisors on one tunnel each
+kill the other's ssh before every attempt, and it flaps until one is stopped.
+A detached run logs to `~/Library/Application Support/Burrow/logs/cli-run.log`
+(deduplicated and size-capped) and is stopped with `kill <pid>`.
+
+### Live status, drift, and reload
+
+A supervisor holds the definition it launched with, so an edit made while a
+tunnel is up does not reach the live ssh by itself. `burrow list` therefore
+reports both sides — `running:<pid>/<app|cli|orphan>`, `stopped`, or
+`drift:<pid>/…` with a trailing column naming exactly what differs:
+
+```
+nebula-agent  enabled  drift:66193/app  cri22in002  local:3000->localhost:3001, remote:31703->localhost:2222
+              drift: config has -R 46386:localhost:22, the live ssh doesn't
+```
+
+```sh
+burrow reload NAME              # relaunch that tunnel with the config on disk
+burrow reload                   # every running tunnel
+```
+
+`reload` asks the Burrow app to restart just that tunnel (gateways are left
+alone — no VPN drops), and restarts a CLI-supervised one by ending its ssh; the
+supervisor re-reads config.json before each attempt, so it comes back with the
+new definition. An ssh with no supervisor is reported, not killed.
+
+### Stale remote ports (reverse forwards)
+
+A `-R` forward fails to bind when an abandoned session still holds the port on
+the remote. Burrow now tries to free it automatically and, failing that,
+connects *without* that one forward rather than dropping the whole tunnel
+(`ExitOnForwardFailure=yes` would otherwise take the local forwards down too).
+The row then reads "Connected without -R 31703".
+
+```sh
+burrow reclaim NAME --dry-run          # who holds the port? (kills nothing)
+burrow reclaim NAME [--port N]         # SIGTERM then SIGKILL the holder
+```
+
+Holders are found with `lsof`, `ss`, or `fuser`, whichever the host has, and
+are reported by pid and command before anything is signalled. Reclaim routes
+through the tunnel's own gateway and jump host.
+
 ## SSH hosts (~/.ssh/config)
 
-Plain login hosts from `~/.ssh/config`. Burrow only appends its own hosts
-(marked `# Added by Burrow`) and removes them surgically; it never rewrites your
-existing config.
+Plain login hosts from `~/.ssh/config`. Burrow appends its own hosts (marked
+`# Added by Burrow`) and removes them surgically. The only lines it ever changes
+in a stanza you wrote are ones you asked for: `hosts add` includes
+`ControlMaster auto` / `ControlPath` / `ControlPersist` so warming works, and
+warming a host that authenticates but keeps no master adds whichever of those
+three it is missing (an existing `ControlPath` of yours is left alone), then
+signs in once more.
 
 ```sh
 burrow hosts list               # alias -> user@host:port
@@ -102,10 +153,11 @@ foreground, so **you complete the password / 2FA / Duo-push prompt right in the
 terminal**; after that ssh backgrounds the master.
 
 The master persists only if the host has `ControlMaster auto`, a `ControlPath`,
-and `ControlPersist` set in its ssh config (Burrow's own hosts and most managed
-hosts do). If not, `warm` reports that no reusable master could be kept and you
-should add those options. Warm masters are shared with the Burrow app, so
-`hosts status` and the app's flame indicator agree.
+and `ControlPersist` set in its ssh config. Burrow adds these itself — to hosts
+it creates, and to an existing host the first time warming it produces no
+master — so "signed in but kept nothing" fixes itself instead of becoming your
+homework. Warm masters are shared with the Burrow app, so `hosts status` and the
+app's flame indicator agree.
 
 ## VPN gateways (read-only from the CLI)
 

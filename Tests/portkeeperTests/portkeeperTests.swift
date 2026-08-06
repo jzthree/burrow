@@ -884,6 +884,68 @@ private func waitUntil(timeout: TimeInterval, condition: @escaping @Sendable () 
     }
 }
 
+@Test func newHostsGetMultiplexingSoWarmingWorks() async throws {
+    let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+    try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+    let configURL = dir.appendingPathComponent("config")
+
+    try SSHConfigWriter.appendHost(
+        SSHConfigWriter.HostEntry(alias: "dsi", hostName: "dsi.example.edu", user: "alice"),
+        to: configURL
+    )
+    let text = try String(contentsOf: configURL, encoding: .utf8)
+    // Without these a warm sign-in authenticates and leaves nothing behind.
+    #expect(text.contains("ControlMaster auto"))
+    #expect(text.contains("ControlPersist 8h"))
+    #expect(text.contains("ControlPath ~/.ssh/burrow/cm-%r@%h:%p"))
+}
+
+@Test func enableMultiplexingAddsOnlyWhatIsMissing() async throws {
+    let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+    try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+    let configURL = dir.appendingPathComponent("config")
+    // A hand-written stanza: one multiplexing directive already set, with a
+    // deliberate ControlPath the user picked.
+    try """
+    Host dsi
+        HostName dsi.example.edu
+        User alice
+        ControlPath ~/.ssh/mine-%r@%h:%p
+
+    Host other
+        HostName other.example.edu
+    """.write(to: configURL, atomically: true, encoding: .utf8)
+
+    let added = try SSHConfigWriter.enableMultiplexing(alias: "dsi", in: configURL)
+    #expect(added == ["ControlMaster", "ControlPersist"])
+
+    let text = try String(contentsOf: configURL, encoding: .utf8)
+    // Their ControlPath survives untouched...
+    #expect(text.contains("ControlPath ~/.ssh/mine-%r@%h:%p"))
+    #expect(!text.contains("ControlPath ~/.ssh/burrow/"))
+    // ...the new lines land inside dsi's stanza, not in the next host's...
+    let dsiBlock = try #require(text.components(separatedBy: "Host other").first)
+    #expect(dsiBlock.contains("ControlMaster auto"))
+    #expect(dsiBlock.contains("ControlPersist 8h"))
+    // ...and the untouched host stays untouched.
+    #expect(SSHConfigParser.parse(fileAt: configURL).contains { $0.alias == "other" })
+
+    // Running it again is a no-op, so a repeated warm doesn't keep rewriting.
+    #expect(try SSHConfigWriter.enableMultiplexing(alias: "dsi", in: configURL).isEmpty)
+}
+
+@Test func enableMultiplexingReportsHostsItCannotEdit() async throws {
+    let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+    try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+    let configURL = dir.appendingPathComponent("config")
+    try "Host known\n    HostName known.example.edu\n".write(to: configURL, atomically: true, encoding: .utf8)
+
+    // A host that lives in an Included file isn't in this one to edit.
+    #expect(throws: SSHConfigWriter.WriteError.self) {
+        try SSHConfigWriter.enableMultiplexing(alias: "elsewhere", in: configURL)
+    }
+}
+
 @Test func sshConfigWriterRemovesHostSurgically() async throws {
     let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
     try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)

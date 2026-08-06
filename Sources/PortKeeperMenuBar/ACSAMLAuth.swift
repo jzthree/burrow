@@ -32,6 +32,11 @@ final class AnyConnectSAMLAuthenticator: NSObject, WKNavigationDelegate, NSWindo
         case cancelled
         case interactionRequired
         case badServer
+        /// The sign-in page never loaded — no network, not a flow that needs a
+        /// human. Worth separating: the caller retries this one instead of
+        /// parking the gateway at "click Connect", which is what every logged
+        /// failure of the current build actually was.
+        case pageUnreachable
 
         var errorDescription: String? {
             switch self {
@@ -41,6 +46,8 @@ final class AnyConnectSAMLAuthenticator: NSObject, WKNavigationDelegate, NSWindo
                 return "SAML sign-in needs attention — click Connect"
             case .badServer:
                 return "Gateway server is not a valid host name."
+            case .pageUnreachable:
+                return "Sign-in page didn't load (no network)"
             }
         }
     }
@@ -53,6 +60,9 @@ final class AnyConnectSAMLAuthenticator: NSObject, WKNavigationDelegate, NSWindo
     private(set) var isInteractive = true
     /// Bounds a silent attempt: past this, the flow evidently needs the user.
     private var silentDeadlineTask: Task<Void, Never>?
+    /// Bounds the *first* page load, which failing means the network is out —
+    /// a different answer than "needs the user", and a much shorter wait.
+    private var pageLoadDeadlineTask: Task<Void, Never>?
     /// Silent replay: the learned recipe driven with the Keychain password, so
     /// an expired IdP session reconnects with zero clicks.
     private var replayTask: Task<Void, Never>?
@@ -174,6 +184,29 @@ final class AnyConnectSAMLAuthenticator: NSObject, WKNavigationDelegate, NSWindo
                 guard self.completion != nil, let webView = self.webView else {
                     return
                 }
+                // A silent attempt is triggered by the session dying, which is
+                // usually the network dying — so confirm the gateway answers at
+                // all before spending the attempt on it. Skipping this is what
+                // turned every recent unattended reconnect into a 45-second
+                // wait ending in "click Connect", when the truth was "no
+                // network yet, try again shortly".
+                guard self.isInteractive else {
+                    let server = self.gateway.server
+                    Task { @MainActor [weak self] in
+                        let reachable = await Task.detached {
+                            PortProbe.canConnect(host: server, port: 443, timeout: 5)
+                        }.value
+                        guard let self, self.completion != nil, let webView = self.webView else { return }
+                        guard reachable else {
+                            SAMLInteractionLog.append("server-unreachable", gateway: self.gateway.name, ["t": self.elapsed])
+                            self.finish(.failure(ACSAMLError.pageUnreachable))
+                            return
+                        }
+                        webView.load(URLRequest(url: url))
+                        self.startCookieWatch()
+                    }
+                    return
+                }
                 webView.load(URLRequest(url: url))
                 self.startCookieWatch()
             }
@@ -205,6 +238,17 @@ final class AnyConnectSAMLAuthenticator: NSObject, WKNavigationDelegate, NSWindo
                 guard let self, self.completion != nil else { return }
                 SAMLInteractionLog.append("needs-interaction", gateway: self.gateway.name)
                 self.finish(.failure(ACSAMLError.interactionRequired))
+            }
+            // A separate, much shorter deadline for "did anything load at all".
+            // Every silent failure since the current recipe was recorded had
+            // zero pages: the attempt fired the instant the health probe
+            // declared the path dead, when there was no working network. Spending
+            // 45s to conclude "needs a human" was wrong on both counts.
+            pageLoadDeadlineTask = Task { @MainActor [weak self] in
+                try? await Task.sleep(for: .seconds(12))
+                guard let self, self.completion != nil, self.observedPages == 0 else { return }
+                SAMLInteractionLog.append("page-unreachable", gateway: self.gateway.name)
+                self.finish(.failure(ACSAMLError.pageUnreachable))
             }
             if canReplay {
                 startReplay()
@@ -290,6 +334,19 @@ final class AnyConnectSAMLAuthenticator: NSObject, WKNavigationDelegate, NSWindo
                 try? await Task.sleep(for: .milliseconds(700))
             }
         }
+    }
+
+    /// A load that fails outright (DNS, no route, TLS) is the network being
+    /// gone, not a flow needing attention — end a silent attempt now rather
+    /// than sitting out its deadline. An interactive window keeps the failure
+    /// on screen, where the user can see and retry it.
+    func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
+        SAMLInteractionLog.append("load-failed", gateway: gateway.name, [
+            "code": (error as NSError).code,
+            "t": elapsed,
+        ])
+        guard !isInteractive, observedPages == 0 else { return }
+        finish(.failure(ACSAMLError.pageUnreachable))
     }
 
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
@@ -417,6 +474,7 @@ final class AnyConnectSAMLAuthenticator: NSObject, WKNavigationDelegate, NSWindo
             case .cancelled: outcome = "cancelled"
             case .interactionRequired: outcome = "needs-interaction"
             case .badServer: outcome = "bad-server"
+            case .pageUnreachable: outcome = "page-unreachable"
             }
         case .failure: outcome = "error"
         }
@@ -433,6 +491,8 @@ final class AnyConnectSAMLAuthenticator: NSObject, WKNavigationDelegate, NSWindo
         cookiePollTask = nil
         silentDeadlineTask?.cancel()
         silentDeadlineTask = nil
+        pageLoadDeadlineTask?.cancel()
+        pageLoadDeadlineTask = nil
         replayTask?.cancel()
         replayTask = nil
         replayPassword = nil

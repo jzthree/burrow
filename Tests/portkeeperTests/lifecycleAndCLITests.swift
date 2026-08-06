@@ -663,7 +663,7 @@ private func runBurrow(_ arguments: [String], configURL: URL) throws -> CLIResul
     #expect(RemoteForwardSupport.reverseForwardPort(of: tunnel) == 31703)
 
     let command = RemoteForwardSupport.freePortCommand(31703)
-    #expect(command.contains("fuser -k 31703/tcp"))
+    #expect(command.contains("fuser -n tcp 31703"))
     #expect(command.contains("BURROW_PORT_FREE"))
     #expect(command.contains("BURROW_PORT_BUSY"))
 }

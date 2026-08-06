@@ -280,6 +280,10 @@ final class MenuBarViewModel: ObservableObject {
     private var tasks: [String: Task<Void, Never>] = [:]
     private var gatewayTasks: [String: Task<Void, Never>] = [:]
     private var pendingGatewayCredentialSaves: [String: PendingCredentialSave] = [:]
+    /// Gateway passwords held for this run of the app, so a silent SAML replay
+    /// isn't at the mercy of a Keychain read that can fail while the screen is
+    /// locked — the exact moment an unattended reconnect needs one.
+    private var sessionGatewayPasswords: [TunnelCredentialKey: String] = [:]
     private var invalidGatewayCredentialKeys: Set<TunnelCredentialKey> = []
     /// In-flight browser sign-ins by gateway name; presence blocks duplicate
     /// sign-in windows.
@@ -492,16 +496,32 @@ final class MenuBarViewModel: ObservableObject {
             .filter { tasks[$0.id] == nil && !$0.isRunning }
             .map { (name: $0.id, tunnel: $0.tunnel) }
         guard !candidates.isEmpty else { return }
-        let survivors = await Task.detached { () -> [(name: String, pid: pid_t)] in
+        let survivors = await Task.detached { () -> [(name: String, pid: pid_t, drift: [String])] in
             candidates.compactMap { candidate in
                 guard let prepared = try? TunnelLaunchPreparer.prepare(candidate.tunnel),
                       let pid = PortKeeperRuntimeRegistry.recordedOwnedProcess(for: prepared) else {
                     return nil
                 }
-                return (candidate.name, pid)
+                // Adopt only what still matches the config. A survivor from
+                // before an edit keeps running the *old* definition, and
+                // adoption is the one path that deliberately never restarts —
+                // so without this check the file and the live process can
+                // disagree for as long as the process lives, invisibly.
+                let drift = PortKeeperRuntimeRegistry.commandLine(of: pid).map {
+                    TunnelDrift.differences(configured: candidate.tunnel, liveCommand: $0)
+                } ?? []
+                return (candidate.name, pid, drift)
             }
         }.value
         for survivor in survivors where tasks[survivor.name] == nil && adoptedTunnels[survivor.name] == nil {
+            guard survivor.drift.isEmpty else {
+                // Left alone here: the auto-start below launches a supervisor,
+                // whose reclaim ends this process and relaunches it with the
+                // definition config.json actually describes.
+                TunnelLog.append(tunnel: survivor.name, "not adopting ssh \(survivor.pid): \(survivor.drift.joined(separator: "; "))")
+                appendLog(for: survivor.name, message: "Surviving ssh \(survivor.pid) predates a config change (\(survivor.drift.joined(separator: "; "))) — restarting it instead of adopting it.")
+                continue
+            }
             adoptedTunnels[survivor.name] = survivor.pid
             appendLog(for: survivor.name, message: "Adopted surviving ssh process \(survivor.pid) from the previous run.")
             updateState(for: survivor.name, isRunning: true, state: .connected, message: "Adopted running ssh session")
@@ -924,6 +944,46 @@ final class MenuBarViewModel: ObservableObject {
         }
         configWatcher = watcher
         watcher.start()
+        startReloadSignalObserver()
+    }
+
+    /// `burrow reload` asks the app to relaunch a tunnel with the config as it
+    /// is on disk now. The watcher above already restarts tunnels whose
+    /// definition changed, but an explicit reload is what the user reaches for
+    /// when the two have drifted apart anyway — and it must not cost them the
+    /// VPN, which quitting the app to "make the edit stick" would.
+    private func startReloadSignalObserver() {
+        DistributedNotificationCenter.default().addObserver(
+            forName: BurrowReloadSignal.name,
+            object: nil,
+            queue: .main
+        ) { [weak self] notification in
+            let requested = notification.object as? String
+            Task { @MainActor [weak self] in
+                self?.applyConfigToRunningTunnels(named: requested)
+            }
+        }
+    }
+
+    /// Relaunches running tunnels against the current config. `name` limits it
+    /// to one; nil means every running tunnel.
+    private func applyConfigToRunningTunnels(named name: String?) {
+        loadConfig()
+        let targets = tunnels.filter { state in
+            (name == nil || state.id == name) && (tasks[state.id] != nil || adoptedTunnels[state.id] != nil)
+        }
+        guard !targets.isEmpty else {
+            if let name {
+                globalMessage = "Reload requested for \(name), which isn't running here."
+            }
+            return
+        }
+        for state in targets {
+            TunnelLog.append(tunnel: state.id, "reload requested; relaunching with the config on disk")
+            stopTunnel(named: state.id)
+            startTunnel(named: state.id, allowPasswordPrompt: false)
+        }
+        globalMessage = "Reloaded \(targets.map(\.id).joined(separator: ", "))."
     }
 
     private func handleConfigFileChange() {
@@ -1145,10 +1205,17 @@ final class MenuBarViewModel: ObservableObject {
     }
 
     /// Whether this tunnel's latest failure is a remote reverse-forward port
-    /// conflict — drives the "Free Remote Port & Retry" affordance.
+    /// conflict — drives the "Free Remote Port & Retry" affordance. A tunnel
+    /// that connected *without* the contested forward counts too: it is up,
+    /// but the port is still stuck, and this is the action that unsticks it.
     func remoteForwardConflictPort(forTunnel name: String) -> Int? {
-        guard let state = tunnels.first(where: { $0.id == name }),
-              state.connectionState == .failed,
+        guard let state = tunnels.first(where: { $0.id == name }) else {
+            return nil
+        }
+        if state.connectionState == .connected {
+            return RemoteForwardSupport.degradedForwardPort(in: state.lastMessage)
+        }
+        guard state.connectionState == .failed,
               state.lastMessage.lowercased().contains("remote port forwarding failed") else {
             return nil
         }
@@ -1169,6 +1236,12 @@ final class MenuBarViewModel: ObservableObject {
             return
         }
         let tunnel = state.tunnel
+        // Reach the host the way the tunnel does: a gateway-bound tunnel keeps
+        // its route in a ProxyCommand, so without it this dials a host that is
+        // only reachable through the VPN and reports a confusing failure.
+        let routed = (try? preparedTunnelForLaunch(tunnel)).map {
+            GatewayLinker.applyingGatewayProxy(to: $0, gateways: gateways.map(\.config))
+        } ?? tunnel
         stopTunnel(named: name)
         updateState(for: name, isRunning: false, state: .connecting, message: "Freeing remote port \(port) on \(tunnel.host)…")
         globalMessage = "Freeing remote port \(port) on \(tunnel.host)…"
@@ -1176,24 +1249,31 @@ final class MenuBarViewModel: ObservableObject {
         Task { @MainActor [weak self] in
             guard let self else { return }
             let command = RemoteForwardSupport.freePortCommand(port)
-            let arguments = SSHCommandBuilder.remoteExecArguments(for: tunnel, command: command)
+            let arguments = SSHCommandBuilder.remoteExecArguments(for: routed, command: command)
             let result = await Task.detached {
                 RemoteCommandRunner.run(arguments: arguments)
             }.value
+            let outcome = RemoteForwardSupport.parseFreePortOutput(
+                standardOutput: result.standardOutput,
+                standardError: result.standardError
+            )
+            let held = outcome.holderSummary.map { " (held by \($0))" } ?? ""
 
-            let freed = result.standardOutput.contains("BURROW_PORT_FREE")
-            let stillBusy = result.standardOutput.contains("BURROW_PORT_BUSY")
-            if freed {
-                self.appendLog(for: name, message: "Freed stale remote port \(port) on \(tunnel.host).")
+            switch outcome.status {
+            case .freed:
+                self.appendLog(for: name, message: "Freed stale remote port \(port) on \(tunnel.host)\(held).")
                 self.globalMessage = "Freed remote port \(port) — restarting \(name)."
                 self.startTunnel(named: name)
-            } else if stillBusy {
-                let msg = "Remote port \(port) on \(tunnel.host) is held by a process Burrow can't signal (no fuser, restricted /proc). Free it on the host, or change this tunnel's reverse-forward port to an unused one."
+            case .unverified:
+                self.appendLog(for: name, message: "Signalled the holder of remote port \(port)\(held); \(tunnel.host) has no ss or lsof to confirm. Restarting \(name).")
+                self.globalMessage = "Signalled the holder of port \(port) — restarting \(name)."
+                self.startTunnel(named: name)
+            case .busy:
+                let msg = "Remote port \(port) on \(tunnel.host) is still held\(held). Free it on the host, or change this tunnel's reverse-forward port to an unused one."
                 self.appendLog(for: name, message: msg)
                 self.updateState(for: name, isRunning: false, state: .failed, message: msg)
-            } else {
-                let detail = result.standardError.split(whereSeparator: \.isNewline).last.map(String.init) ?? "could not reach the host"
-                let msg = "Couldn't free remote port \(port): \(detail)"
+            case .unreachable:
+                let msg = "Couldn't free remote port \(port): \(outcome.detail ?? "could not reach the host")"
                 self.appendLog(for: name, message: msg)
                 self.updateState(for: name, isRunning: false, state: .failed, message: msg)
             }
@@ -1368,6 +1448,7 @@ final class MenuBarViewModel: ObservableObject {
         notifier.forget(name: name)
         // An adopted tunnel has no task; ending the adoption here lets the
         // task-less path below reclaim (kill) the adopted ssh via the registry.
+        let adoptedPID = adoptedTunnels[name]
         adoptedTunnels[name] = nil
         let task = tasks[name]
         if task == nil,
@@ -1380,6 +1461,15 @@ final class MenuBarViewModel: ObservableObject {
                 guard let self else { return }
                 let prepared = try? self.preparedTunnelForLaunch(tunnel)
                 let failure = await Task.detached { () -> String? in
+                    // A known pid is ended precisely. The command scan inside
+                    // reclaim matches on launch shape, so when a restart is
+                    // starting the replacement right now (Restart, a config
+                    // edit, `burrow reload`) it would just as happily kill the
+                    // new ssh as the old one.
+                    if let adoptedPID {
+                        PortKeeperRuntimeRegistry.terminateProcess(adoptedPID, for: name)
+                        return nil
+                    }
                     guard let prepared else { return nil }
                     do {
                         try PortKeeperRuntimeRegistry.reclaimOwnedProcess(for: prepared)
@@ -2207,9 +2297,12 @@ final class MenuBarViewModel: ObservableObject {
                     if await Task.detached(operation: { SSHHostWarmer.isWarm(alias: alias) }).value {
                         self.confirmHostWarm(alias)
                         self.setWarmStatus(alias, "\(alias) is warm — terminals open instantly.")
-                    } else {
+                    } else if let failure = await self.enableMultiplexingAndRewarm(alias: alias, environment: interactiveEnv) {
                         self.warmHosts.remove(alias)
-                        self.setWarmStatus(alias, "\(alias) signed in but kept no master — add `ControlMaster auto` / `ControlPersist` to its ssh config.", error: true)
+                        self.setWarmStatus(alias, "\(alias) signed in but kept no master — \(failure)", error: true)
+                    } else {
+                        self.confirmHostWarm(alias)
+                        self.setWarmStatus(alias, "\(alias) is warm — Burrow added ControlMaster/ControlPersist to its ssh config so the session sticks.")
                     }
                     return
                 }
@@ -2226,6 +2319,38 @@ final class MenuBarViewModel: ObservableObject {
             self.warmHosts.remove(alias)
             self.setWarmStatus(alias, "Couldn't warm \(alias) after 3 tries: \(lastReason ?? "sign-in failed"). For a Duo push, use ⋯ ▸ Sign in via Terminal.", error: true)
         }
+    }
+
+    /// A host that authenticates but keeps no master is missing three lines of
+    /// ssh config, so Burrow adds them and tries once more instead of handing
+    /// the user a homework assignment. Only ever adds — a stanza that already
+    /// sets a ControlPath keeps it, and everything else is left verbatim.
+    /// Returns nil when the host ends up warm, or the reason it didn't.
+    private func enableMultiplexingAndRewarm(alias: String, environment: [String: String]?) async -> String? {
+        let added: [String]
+        do {
+            added = try SSHConfigWriter.enableMultiplexing(alias: alias)
+        } catch {
+            // Typically a host defined in an Included file, which Burrow does
+            // not edit. Its config genuinely needs a human.
+            return error.localizedDescription
+        }
+        guard !added.isEmpty else {
+            // It already had them, so something else is dropping the session
+            // and another identical attempt would fail the same way.
+            return "its ssh config already enables multiplexing, so something on the host is closing the session."
+        }
+        sshConfigHosts = SSHConfigParser.parse()
+        let outcome = await Task.detached {
+            SSHHostWarmer.warm(alias: alias, environment: environment)
+        }.value
+        guard outcome.succeeded else {
+            return "added \(added.joined(separator: ", ")) to its ssh config, but the reconnect failed: \(WarmDiagnosis.shortReason(outcome.output))."
+        }
+        guard await Task.detached(operation: { SSHHostWarmer.isWarm(alias: alias) }).value else {
+            return "added \(added.joined(separator: ", ")) to its ssh config, but it still kept no master."
+        }
+        return nil
     }
 
     /// Interactive warm via a Terminal — the fallback for hosts a dialog can't
@@ -2333,17 +2458,50 @@ final class MenuBarViewModel: ObservableObject {
     /// Prompts for a new login host and appends it to ~/.ssh/config, then
     /// refreshes the Hosts list and expands the section so it's visible.
     func createSSHHost() {
-        guard let entry = SSHHostPrompt.request() else {
+        guard let request = SSHHostPrompt.request() else {
             return
         }
+        let entry = request.entry
         do {
             try SSHConfigWriter.appendHost(entry)
             sshConfigHosts = SSHConfigParser.parse()
             toggledSections.insert("hosts")  // default-collapsed → expand to show it
-            globalMessage = "Added SSH host \(entry.alias) to ~/.ssh/config."
         } catch {
             globalMessage = "Couldn't add SSH host: \(error.localizedDescription)"
+            return
         }
+
+        // The host exists now; the credentials are extras, so each reports its
+        // own outcome instead of failing the whole thing.
+        var extras: [String] = []
+        if let password = request.password {
+            let key = TunnelCredentialKey(
+                host: entry.hostName,
+                port: entry.port ?? 22,
+                user: entry.user ?? ""
+            )
+            if entry.user?.isEmpty != false {
+                extras.append("no user name, so the password wasn't saved")
+            } else {
+                do {
+                    try passwordStore.save(password: password, for: key)
+                    extras.append("password saved")
+                } catch {
+                    extras.append("couldn't save the password: \(error.localizedDescription)")
+                }
+            }
+        }
+        if let secret = request.twoFactorSecret {
+            if enrollTwoFactor(name: entry.alias, secret: secret) {
+                setTwoFactorLink(accountName: entry.alias, forHostAlias: entry.alias)
+                extras.append("2FA enrolled")
+            } else {
+                extras.append("the 2FA key wasn't accepted")
+            }
+        }
+
+        let summary = extras.isEmpty ? "" : " (\(extras.joined(separator: "; ")))"
+        globalMessage = "Added SSH host \(entry.alias) to ~/.ssh/config\(summary)."
     }
 
     /// Edits an existing host's address / user / port in place (no remove-and-
@@ -2971,7 +3129,13 @@ final class MenuBarViewModel: ObservableObject {
         }
         gatewayDraft = nil
         profileDraft = nil
-        editorDraft = TunnelDraft(tunnel: tunnel, originalName: tunnel.name)
+        var draft = TunnelDraft(tunnel: tunnel, originalName: tunnel.name)
+        // Only whether one exists — the value itself never leaves the Keychain
+        // for a form field.
+        if let key = TunnelCredentialKey(tunnel: tunnel) {
+            draft.hasSavedPassword = ((try? passwordStore.password(for: key)) ?? nil)?.isEmpty == false
+        }
+        editorDraft = draft
     }
 
     func duplicateTunnel(named name: String) {
@@ -3107,6 +3271,9 @@ final class MenuBarViewModel: ObservableObject {
     private func saveGatewayPassword(_ gateway: GatewayConfig, password: String) {
         guard let key = TunnelCredentialKey(gateway: gateway) else { return }
         try? passwordStore.save(password: password, for: key)
+        // Kept in memory as well, so a silent replay later in this run works
+        // even if the Keychain declines to answer.
+        sessionGatewayPasswords[key] = password
     }
 
     func createTunnel() {
@@ -3141,6 +3308,17 @@ final class MenuBarViewModel: ObservableObject {
             }
 
             try store.upsert(tunnel, replacing: originalName)
+            // Empty means "leave what's stored alone" — the editor never shows
+            // a saved password, so a blank field can't mean "delete it".
+            if !draft.password.isEmpty, let key = TunnelCredentialKey(tunnel: tunnel) {
+                do {
+                    try passwordStore.save(password: draft.password, for: key)
+                    sessionPasswords[key] = draft.password
+                    invalidCredentialKeys.remove(key)
+                } catch {
+                    globalMessage = "Saved \(tunnel.name), but its password couldn't be stored: \(error.localizedDescription)"
+                }
+            }
             loadConfig()
 
             if wasRunning {
@@ -3227,7 +3405,13 @@ final class MenuBarViewModel: ObservableObject {
         }
         editorDraft = nil
         profileDraft = nil
-        gatewayDraft = GatewayDraft(gateway: gateway, originalName: gateway.name)
+        var draft = GatewayDraft(gateway: gateway, originalName: gateway.name)
+        // Only whether one exists — the value itself never leaves the Keychain
+        // for a form field.
+        if let key = TunnelCredentialKey(gateway: gateway) {
+            draft.hasSavedPassword = ((try? passwordStore.password(for: key)) ?? nil)?.isEmpty == false
+        }
+        gatewayDraft = draft
     }
 
     func closeGatewayEditor() {
@@ -3247,8 +3431,26 @@ final class MenuBarViewModel: ObservableObject {
                 stopGateway(named: gateway.name, userInitiated: false)
             }
             try store.upsertGateway(gateway, replacing: draft.originalName)
+            var note = ""
+            // An empty field means "leave what's stored alone" — the editor
+            // never shows a saved password, so blanking it can't be a request
+            // to delete one.
+            if !draft.password.isEmpty {
+                if let key = TunnelCredentialKey(gateway: gateway) {
+                    do {
+                        try passwordStore.save(password: draft.password, for: key)
+                        sessionGatewayPasswords[key] = draft.password
+                        invalidGatewayCredentialKeys.remove(key)
+                        note = " Password saved to your Keychain."
+                    } catch {
+                        note = " The password couldn't be saved: \(error.localizedDescription)"
+                    }
+                } else {
+                    note = " Add a user name to save the password."
+                }
+            }
             loadConfig()
-            globalMessage = "Saved gateway \(gateway.name)."
+            globalMessage = "Saved gateway \(gateway.name).\(note)"
             gatewayDraft = nil
         } catch {
             globalMessage = "Save failed: \(error.localizedDescription)"
@@ -3527,7 +3729,22 @@ final class MenuBarViewModel: ObservableObject {
                 var replayCodeProvider: (@MainActor () async -> String?)?
                 if !allowPasswordPrompt, gateway.signInRecipe?.isEmpty == false {
                     if let key = TunnelCredentialKey(gateway: gateway) {
-                        replayPassword = try? passwordStore.password(for: key)
+                        // The in-memory copy first: it survives a Keychain that
+                        // won't answer (locked screen on an older vault), and
+                        // costs nothing when the Keychain does.
+                        replayPassword = sessionGatewayPasswords[key] ?? (try? passwordStore.password(for: key))
+                        sessionGatewayPasswords[key] = replayPassword ?? sessionGatewayPasswords[key]
+                        if replayPassword == nil {
+                            // Distinct event names, no identifiers: the log's
+                            // contract is locators and timings only. Previously
+                            // every cause collapsed into "replay-no-password",
+                            // which couldn't tell "never saved" from "no key to
+                            // look it up with" — the one that turned out to be
+                            // the real bug.
+                            SAMLInteractionLog.append("no-stored-password", gateway: name)
+                        }
+                    } else {
+                        SAMLInteractionLog.append("no-credential-key", gateway: name)
                     }
                     if let accountName = gateway.twoFactorAccount,
                        let account = twoFactorAccounts.first(where: { $0.name == accountName }) {
@@ -3591,9 +3808,11 @@ final class MenuBarViewModel: ObservableObject {
                     case .failure(let error):
                         self.updateGatewayState(for: name, isRunning: false, state: .failed, message: error.localizedDescription)
                         // A failed *silent* attempt on an autoconnect gateway
-                        // retries a couple of times — right after wake the
-                        // network may still be settling, and Okta can hiccup.
-                        // Exhausted retries park at "click Connect".
+                        // keeps retrying on a widening schedule: right after
+                        // wake the network may still be settling, an IdP can
+                        // hiccup, and a laptop can be shut for an hour. The
+                        // row says when the next try is; clicking Connect at
+                        // any point does it now, with a window.
                         if !allowPasswordPrompt && gateway.autoConnect {
                             self.scheduleSilentSAMLRetry(named: name)
                         }
@@ -3934,19 +4153,38 @@ final class MenuBarViewModel: ObservableObject {
         GatewayLog.append(gateway: name, trimmed)
     }
 
-    /// Bounded background retry after a failed silent SAML attempt: 20s, then
-    /// 60s, then give up (the row already says "click Connect").
+    /// Background retry after a failed silent SAML attempt, on a widening
+    /// schedule that never gives up (see `SilentSignInRetry`). A stopped
+    /// gateway, a connected one, or one the user took over stops it; nothing
+    /// else does, because "the network is back" can happen at any hour.
     private func scheduleSilentSAMLRetry(named name: String) {
         let attempt = silentSAMLRetryAttempts[name, default: 0] + 1
-        guard attempt <= 2 else { return }
         silentSAMLRetryAttempts[name] = attempt
-        let delay = attempt == 1 ? 20 : 60
+        let delay = SilentSignInRetry.delaySeconds(attempt: attempt)
+        // Say what's actually happening. The row used to read "click Connect"
+        // while nothing further was being tried; now it reads as what it is.
+        // "click Connect" comes off the end — it's advice about doing it by
+        // hand, and the sentence is about to say what Burrow will do itself.
+        if let state = gateways.first(where: { $0.id == name }), state.connectionState != .connected {
+            var reason = state.lastMessage
+            if let previous = reason.range(of: " — retrying in ") {
+                reason = String(reason[..<previous.lowerBound])
+            }
+            reason = reason.replacingOccurrences(of: " — click Connect", with: "")
+            updateGatewayState(
+                for: name,
+                isRunning: false,
+                state: .failed,
+                message: "\(reason) — retrying in \(SilentSignInRetry.describeDelay(delay))"
+            )
+        }
         Task { @MainActor [weak self] in
             try? await Task.sleep(for: .seconds(delay))
             guard let self,
                   self.gatewayTasks[name] == nil,
                   self.activeSAMLAuthenticators[name] == nil,
                   !self.adoptedGateways.contains(name),
+                  !self.userStoppedGateways.contains(name),
                   self.gateways.first(where: { $0.id == name })?.connectionState != .connected else {
                 return
             }
@@ -4549,6 +4787,13 @@ final class TunnelEventBridge: @unchecked Sendable {
                 if !settled {
                     self.owner?.globalMessage = "\(self.tunnelName): \(message). Retrying."
                 }
+            case .degraded(let message):
+                // Up, but not entirely. The row stays green — the tunnel is
+                // serving — while its message names the forward that isn't
+                // there, which also re-arms the "Free Remote Port" action.
+                self.owner?.appendLog(for: self.tunnelName, message: message)
+                self.owner?.updateState(for: self.tunnelName, isRunning: true, state: .connected, message: message)
+                self.owner?.globalMessage = "\(self.tunnelName): \(message.prefix(1).lowercased() + message.dropFirst())."
             case .log:
                 break
             }
@@ -7633,6 +7878,12 @@ struct TunnelDraft: Identifiable {
     var gateway: String
     var onConnect: String
     var onDisconnect: String
+    /// Typed here, saved to the Keychain by the editor's save path — never
+    /// part of the config file. Empty means "leave whatever is stored alone".
+    var password: String = ""
+    /// Whether a password is already stored, so the field can say so instead
+    /// of looking blank-and-unset.
+    var hasSavedPassword: Bool = false
 
     init(tunnel: TunnelConfig, originalName: String?) {
         self.id = UUID()
@@ -7843,6 +8094,24 @@ struct TunnelEditorSheet: View {
                         text: $draft.user,
                         suggestions: suggestions.users
                     )
+                }
+                // A key-based host never needs this; a password one otherwise
+                // waits to ambush you with a prompt on first connect. The
+                // Keychain entry is keyed by user@host:port, so it only
+                // appears once there's a user to key it to.
+                if !draft.user.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    GridRow {
+                        editorLabel("Password")
+                        HStack(spacing: 8) {
+                            SecureField(draft.hasSavedPassword ? "saved — type to replace" : "optional (keys need none)", text: $draft.password)
+                                .textFieldStyle(.roundedBorder)
+                                .frame(width: 180)
+                            Text("kept in your Keychain")
+                                .font(.system(size: 10))
+                                .foregroundStyle(.secondary)
+                            Spacer()
+                        }
+                    }
                 }
                 GridRow {
                     editorLabel("SSH Port")
