@@ -848,22 +848,26 @@ public final class GatewaySupervisor: @unchecked Sendable {
         )
     }
 
-    /// Parses openconnect's "To trust this server in future, perhaps add this
-    /// to your command line: --servercert pin-sha256:..." suggestion.
+    /// Parses openconnect's suggested server certificate pin. Newer failures
+    /// sometimes only print the mismatched certificate as `pin-sha256:...`
+    /// instead of including a full `--servercert` command-line suggestion.
     public static func extractServerCertPin(from line: String) -> String? {
-        guard let markerRange = line.range(of: "--servercert") else {
+        let searchArea: Substring
+        if let markerRange = line.range(of: "--servercert") {
+            searchArea = line[markerRange.upperBound...]
+        } else if let markerRange = line.range(of: "pin-sha256:") {
+            searchArea = line[markerRange.lowerBound...]
+        } else {
             return nil
         }
-        var remainder = line[markerRange.upperBound...]
-        // Strip leading separators only ("--servercert pin..." or "--servercert=pin...");
-        // a trailing "=" is base64 padding and must survive.
-        while !remainder.hasPrefix("pin-sha256:"), let first = remainder.first, first == " " || first == "\t" || first == "=" {
-            remainder = remainder.dropFirst()
-        }
-        guard remainder.hasPrefix("pin-sha256:") else {
+
+        guard let pinRange = searchArea.range(of: "pin-sha256:") else {
             return nil
         }
-        let pin = remainder.split(whereSeparator: { $0 == " " || $0 == "\t" }).first.map(String.init) ?? String(remainder)
+        let pin = searchArea[pinRange.lowerBound...]
+            .split(whereSeparator: { $0 == " " || $0 == "\t" })
+            .first
+            .map(String.init) ?? String(searchArea[pinRange.lowerBound...])
         return pin.isEmpty ? nil : pin
     }
 
